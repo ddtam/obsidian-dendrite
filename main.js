@@ -1177,7 +1177,7 @@ var PREVIEW = "dendrite-preview";
 var DEFAULTS = {
   writingFolder: "Writing",
   headingTop: 1,
-  cardWidth: 380,
+  cardWidth: 480,
   autosaveMs: 600,
   openInDendrite: true,
   vimKeys: true,
@@ -2574,10 +2574,14 @@ var DendriteView = class extends ItemView {
     const before = core.serialiseTree(this.root);
     const srcText = await this.app.vault.read(ed.file);
     const srcStatus = core.roleFor(node, (x) => this.roleOf(x)) === "prose" ? this.statusOf(ed.id) : null;
+    const set = this.roleOf(ed.id);
+    const role = set && set !== "section" ? set : null;
+    const prints = !role || role === "prose";
     const id = core.newId(prefix, (x) => this.taken(x));
     const made = await this.createCardFile(id, cut.moved);
     await writeProps(this.app, made, {
-      dendrite_status: srcStatus || "draft"
+      dendrite_role: role,
+      dendrite_status: prints ? srcStatus || "draft" : null
     });
     const fresh = core.makeNode(
       id,

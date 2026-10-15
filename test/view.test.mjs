@@ -1198,3 +1198,30 @@ test('each card shows what it prints top right, and a click there ' +
     assert.match(app.vault.text.get(f.path), /dendrite_role: scaffolding/);
     assert.deepEqual(shown('G-bbbbb'), ['scaffolding', false]);
 });
+
+test('a card split from one whose role was set takes that role', async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Why]]\n' +
+        '- [[G-bbbbb|Note]]\n',
+        { 'G-aaaaa': '---\ndendrite_role: scaffolding\n---\n' +
+              'Why it matters.\n\nWho it helps.',
+          'G-bbbbb': '---\ndendrite_role: section\n---\n# Note\nPlan.' });
+    await view.startEdit('G-aaaaa');
+    view.editing.ta.setSelectionRange(17, 17);
+    await view.moveSelection('below');
+    const made = view.root.children[1].id;
+    const props = (id) => /^---\n([\s\S]*?)\n---/.exec(
+        read(cardPath(id)))[1];
+    assert.match(props(made), /dendrite_role: scaffolding/);
+    assert.doesNotMatch(props(made), /dendrite_status/,
+                        'a card that prints nothing has no status');
+    await view.endEdit();
+    // Heading only describes the card's own heading line, which the
+    // moved text does not carry: the new card follows the tree.
+    await view.startEdit('G-bbbbb');
+    view.editing.ta.setSelectionRange(7, 7);
+    await view.moveSelection('below');
+    const next = view.root.children[3].id;
+    assert.doesNotMatch(props(next), /dendrite_role/);
+    assert.match(props(next), /dendrite_status: draft/);
+});

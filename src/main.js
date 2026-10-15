@@ -37,7 +37,7 @@ const PREVIEW = 'dendrite-preview';
 const DEFAULTS = {
     writingFolder: 'Writing',
     headingTop: 1,
-    cardWidth: 380,
+    cardWidth: 480,
     autosaveMs: 600,
     openInDendrite: true,
     vimKeys: true,
@@ -1459,11 +1459,19 @@ class DendriteView extends ItemView {
         // moment ago may not have been drawn yet.
         const srcStatus = core.roleFor(node, (x) => this.roleOf(x)) ===
             'prose' ? this.statusOf(ed.id) : null;
+        // A role set on the card goes with the text, so planning split
+        // from a scaffolding card stays planning. Heading only is not
+        // carried: it describes the card's own heading line.
+        const set = this.roleOf(ed.id);
+        const role = set && set !== 'section' ? set : null;
+        const prints = !role || role === 'prose';
         const id = core.newId(prefix, (x) => this.taken(x));
         const made = await this.createCardFile(id, cut.moved);
-        // The moved text is as mature as it was where it came from.
+        // The moved text is as mature as it was where it came from; a
+        // card that prints nothing has no status.
         await writeProps(this.app, made, {
-            dendrite_status: srcStatus || 'draft' });
+            dendrite_role: role,
+            dendrite_status: prints ? srcStatus || 'draft' : null });
         const fresh = core.makeNode(id, core.deriveLabel(cut.moved, null),
                                     null);
         if (where === 'child') core.appendChild(node, fresh);
