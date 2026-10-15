@@ -3,7 +3,10 @@
  * The card editor, in two kinds behind one interface:
  *
  *   { kind, el, value, focus(atStart), selection(), replace(text, at),
- *     focusAt(at, to), destroy() }
+ *     focusAt(at, to), rangeAt(start, end), destroy() }
+ *
+ * `rangeAt` gives a DOM range over the text between two offsets, for
+ * painting find's matches, or null where the text is not on the page.
  *
  * OBSIDIAN'S EDITOR is Obsidian's own markdown editor, so a card gets live
  * preview, [[ link and citation suggestions, editor commands such as
@@ -110,6 +113,9 @@ function obsidianEditor(app, parent, opts) {
         onUpdate(update, changed) {
             super.onUpdate(update, changed);
             if (changed) this.cardOpts.onChange();
+            // The editor redraws its lines as text changes and as it
+            // scrolls, which drops anything painted over the old ones.
+            if (this.cardOpts.onRedraw) this.cardOpts.onRedraw();
         }
 
         onunload() {
@@ -164,6 +170,23 @@ function obsidianEditor(app, parent, opts) {
             editor.setSelection(editor.offsetToPos(at),
                                 editor.offsetToPos(to));
         },
+        rangeAt(start, end) {
+            const cm = ed.editor.cm;
+            const vp = cm.viewport;
+            if (!cm.domAtPos || (vp && (start < vp.from || end > vp.to))) {
+                return null;
+            }
+            try {
+                const a = cm.domAtPos(start);
+                const b = cm.domAtPos(end);
+                const r = el.ownerDocument.createRange();
+                r.setStart(a.node, a.offset);
+                r.setEnd(b.node, b.offset);
+                return r;
+            } catch (err) {
+                return null;
+            }
+        },
         destroy() { parent.removeChild(ed); },
     };
 }
@@ -202,6 +225,9 @@ function textEditor(opts) {
             ta.focus();
             ta.setSelectionRange(at, to);
         },
+        // A text box's text is not in the page's text, so nothing in it
+        // can be painted; find selects its match instead.
+        rangeAt() { return null; },
         destroy() { ta.remove(); },
     };
 }

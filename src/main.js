@@ -902,6 +902,14 @@ class DendriteView extends ItemView {
             this.justDragged = false;
             return;
         }
+        // A selection dragged out of a card ends with a click on what
+        // holds both ends, the column or the board. Taking the focus for
+        // the board then would leave the selection showing and the keys
+        // going nowhere.
+        if (this.pressInText) {
+            this.pressInText = false;
+            return;
+        }
         const link = e.target.closest('a.internal-link');
         if (link) {
             e.preventDefault();
@@ -1040,6 +1048,10 @@ class DendriteView extends ItemView {
     // ---- dragging cards -------------------------------------------------
 
     onDragDown(e) {
+        // A press in text, such as the start of a selection, makes its
+        // click part of editing that text, wherever the release lands.
+        this.pressInText = !!(e.target.closest &&
+            e.target.closest('.dendrite-cm, textarea, input'));
         if (e.button !== 0 || e.pointerType === 'touch') return;
         const card = e.target.closest('.dendrite-card');
         if (!card) return;
@@ -1253,6 +1265,7 @@ class DendriteView extends ItemView {
             onBlur: () => { this.save(ed); },
             onEscape: () => { this.endEdit(); },
             onFind: () => { this.openFind(); },
+            onRedraw: () => { if (this.find) this.paintFind(); },
             onUndo: () => this.undoEmptyNew(),
         }, this.plugin.settings.obsidianEditor !== false);
         ed.editor = editor;
@@ -1272,6 +1285,8 @@ class DendriteView extends ItemView {
         this.renderToolbar();
         editor.focus(atStart);
         this.showMode();
+        // The rendered card it replaced took find's paint with it.
+        if (this.find) this.paintFind();
     }
 
     /** Write the editor's text to its card, keeping the frontmatter. */
@@ -2586,8 +2601,16 @@ class DendriteView extends ItemView {
         const ids = new Set(f.matches.map((m) => m.id));
         for (const id of ids) {
             const card = this.cardEls.get(id);
+            const ed = this.editing;
+            if (ed && ed.id === id) {
+                // The card being written: its matches from the text as it
+                // now stands, placed by the editor itself.
+                this.paintEditing(ed, patterns, id === (cur && cur.id) ?
+                    nth : -1, all, (r) => { current = r; });
+                continue;
+            }
             const md = card && card.querySelector('.dendrite-md');
-            if (!md || (this.editing && this.editing.id === id)) continue;
+            if (!md) continue;
             const nodes = [];
             let text = '';
             const walker = doc.createTreeWalker(md, 4);
@@ -2622,6 +2645,27 @@ class DendriteView extends ItemView {
         if (current) {
             reg.set('dendrite-find-current', new win.Highlight(current));
         }
+    }
+
+    /** Find's matches in the editor of the card being written. */
+    paintEditing(ed, patterns, nth, all, setCurrent) {
+        const text = ed.editor.value;
+        const spans = [];
+        for (const p of patterns) {
+            p.lastIndex = 0;
+            let m;
+            while ((m = p.exec(text)) !== null) {
+                if (!m[0].length) { p.lastIndex += 1; continue; }
+                spans.push([m.index, m.index + m[0].length]);
+            }
+        }
+        spans.sort((a, b) => a[0] - b[0]);
+        spans.forEach(([a, b], k) => {
+            const r = ed.editor.rangeAt(a, b);
+            if (!r) return;
+            if (k === nth) setCurrent(r);
+            else all.push(r);
+        });
     }
 
     // ---- export ----------------------------------------------------------

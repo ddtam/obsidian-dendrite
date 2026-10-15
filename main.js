@@ -961,6 +961,7 @@ var require_editor = __commonJS({
         onUpdate(update, changed) {
           super.onUpdate(update, changed);
           if (changed) this.cardOpts.onChange();
+          if (this.cardOpts.onRedraw) this.cardOpts.onRedraw();
         }
         onunload() {
           super.onunload();
@@ -1024,6 +1025,23 @@ var require_editor = __commonJS({
             editor.offsetToPos(to)
           );
         },
+        rangeAt(start, end) {
+          const cm = ed.editor.cm;
+          const vp = cm.viewport;
+          if (!cm.domAtPos || vp && (start < vp.from || end > vp.to)) {
+            return null;
+          }
+          try {
+            const a = cm.domAtPos(start);
+            const b = cm.domAtPos(end);
+            const r = el.ownerDocument.createRange();
+            r.setStart(a.node, a.offset);
+            r.setEnd(b.node, b.offset);
+            return r;
+          } catch (err) {
+            return null;
+          }
+        },
         destroy() {
           parent.removeChild(ed);
         }
@@ -1065,6 +1083,11 @@ var require_editor = __commonJS({
         focusAt(at, to = at) {
           ta.focus();
           ta.setSelectionRange(at, to);
+        },
+        // A text box's text is not in the page's text, so nothing in it
+        // can be painted; find selects its match instead.
+        rangeAt() {
+          return null;
         },
         destroy() {
           ta.remove();
@@ -2118,6 +2141,10 @@ var DendriteView = class extends ItemView {
       this.justDragged = false;
       return;
     }
+    if (this.pressInText) {
+      this.pressInText = false;
+      return;
+    }
     const link = e.target.closest("a.internal-link");
     if (link) {
       e.preventDefault();
@@ -2253,6 +2280,7 @@ var DendriteView = class extends ItemView {
   }
   // ---- dragging cards -------------------------------------------------
   onDragDown(e) {
+    this.pressInText = !!(e.target.closest && e.target.closest(".dendrite-cm, textarea, input"));
     if (e.button !== 0 || e.pointerType === "touch") return;
     const card = e.target.closest(".dendrite-card");
     if (!card) return;
@@ -2457,6 +2485,9 @@ var DendriteView = class extends ItemView {
       onFind: () => {
         this.openFind();
       },
+      onRedraw: () => {
+        if (this.find) this.paintFind();
+      },
       onUndo: () => this.undoEmptyNew()
     }, this.plugin.settings.obsidianEditor !== false);
     ed.editor = editor;
@@ -2474,6 +2505,7 @@ var DendriteView = class extends ItemView {
     this.renderToolbar();
     editor.focus(atStart);
     this.showMode();
+    if (this.find) this.paintFind();
   }
   /** Write the editor's text to its card, keeping the frontmatter. */
   save(ed) {
@@ -3740,8 +3772,15 @@ var DendriteView = class extends ItemView {
     const ids = new Set(f.matches.map((m) => m.id));
     for (const id of ids) {
       const card = this.cardEls.get(id);
+      const ed = this.editing;
+      if (ed && ed.id === id) {
+        this.paintEditing(ed, patterns, id === (cur && cur.id) ? nth : -1, all, (r) => {
+          current = r;
+        });
+        continue;
+      }
       const md = card && card.querySelector(".dendrite-md");
-      if (!md || this.editing && this.editing.id === id) continue;
+      if (!md) continue;
       const nodes = [];
       let text = "";
       const walker = doc.createTreeWalker(md, 4);
@@ -3779,6 +3818,29 @@ var DendriteView = class extends ItemView {
     if (current) {
       reg.set("dendrite-find-current", new win.Highlight(current));
     }
+  }
+  /** Find's matches in the editor of the card being written. */
+  paintEditing(ed, patterns, nth, all, setCurrent) {
+    const text = ed.editor.value;
+    const spans = [];
+    for (const p of patterns) {
+      p.lastIndex = 0;
+      let m;
+      while ((m = p.exec(text)) !== null) {
+        if (!m[0].length) {
+          p.lastIndex += 1;
+          continue;
+        }
+        spans.push([m.index, m.index + m[0].length]);
+      }
+    }
+    spans.sort((a, b) => a[0] - b[0]);
+    spans.forEach(([a, b], k) => {
+      const r = ed.editor.rangeAt(a, b);
+      if (!r) return;
+      if (k === nth) setCurrent(r);
+      else all.push(r);
+    });
   }
   // ---- export ----------------------------------------------------------
   /** Export, the whole manuscript or a branch, as chosen from a menu. */

@@ -1344,3 +1344,109 @@ test('moving the board tells the window it scrolled, so other plugins\' ' +
     h.window.removeEventListener('scroll', heard, { capture: true });
     view.contentEl.remove();
 });
+
+test('find keeps painting its matches in the card being written',
+     async () => {
+    const edmod = require('../src/editor.js');
+    let made = null;
+    class FakeMarkdownEditor {
+        constructor(app, container, owner) {
+            this.owner = owner;
+            const contentDOM = createDiv();
+            container.appendChild(contentDOM);
+            this.textNode = h.window.document.createTextNode('');
+            contentDOM.appendChild(this.textNode);
+            const self = this;
+            this.editor = {
+                cm: { contentDOM, hasFocus: false,
+                      state: { doc: { toString: () => self.textNode.data } },
+                      viewport: { from: 0, to: 1e9 },
+                      domAtPos: (k) => ({ node: self.textNode, offset: k }) },
+                focus() {}, setCursor() {}, setSelection() {},
+                lastLine() { return 0; },
+                getLine() { return self.textNode.data; },
+                offsetToPos: (k) => k,
+            };
+            made = this;
+        }
+        set(v) { this.textNode.data = v; }
+        onUpdate() {}
+        register() {}
+        load() {}
+        unload() { this.onunload(); }
+        onunload() {}
+    }
+    const { view, app } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'TET2 here and TET2 there', 'G-bbbbb': 'B' });
+    app.keymap = { pushScope() {}, popScope() {} };
+    app.embedRegistry = { embedByExtension: { md: () => ({
+        showEditor() {}, unload() {},
+        editMode: Object.create(Object.create(FakeMarkdownEditor.prototype)),
+    }) } };
+    edmod.resetForTests();
+    h.window.CSS = { highlights: new Map() };
+    h.window.Highlight = class { constructor(...r) { this.ranges = r; } };
+    const lit = (name) => (h.window.CSS.highlights.get(name) ||
+        { ranges: [] }).ranges.map((r) => r.toString());
+    try {
+        view.openFind();
+        view.find.input.value = 'tet2';
+        view.find.input.dispatchEvent(new h.window.Event('input'));
+        await tick(150);
+        await view.editAtMatch();
+        assert.equal(view.editing.editor.kind, 'obsidian');
+        assert.deepEqual(lit('dendrite-find-current'), ['TET2'],
+                         'the current match, in the editor');
+        assert.deepEqual(lit('dendrite-find'), ['TET2'], 'and the other');
+        // The editor redraws its lines; the paint follows the new text.
+        made.set('No match now, then TET2');
+        h.window.CSS.highlights.clear();
+        made.onUpdate({}, true);
+        assert.deepEqual([...lit('dendrite-find-current'),
+                          ...lit('dendrite-find')], ['TET2']);
+    } finally {
+        await view.endEdit();
+        view.closeFind();
+        delete h.window.CSS;
+        delete h.window.Highlight;
+        edmod.resetForTests();
+        delete app.embedRegistry;
+    }
+});
+
+test('a text selection dragged out of the card keeps the keyboard in it',
+     async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'Some text to select', 'G-bbbbb': 'B' });
+    h.window.document.body.appendChild(view.contentEl);
+    try {
+        await view.startEdit('G-aaaaa');
+        const ta = view.editing.ta;
+        assert.equal(h.window.document.activeElement, ta);
+        // The press starts in the text; the release lands over the
+        // column, so the click goes to what holds both.
+        ta.dispatchEvent(new h.window.MouseEvent('pointerdown',
+            { bubbles: true, cancelable: true, button: 0 }));
+        ta.setSelectionRange(0, 9);
+        view.board.querySelector('.dendrite-col').dispatchEvent(
+            new h.window.MouseEvent('click', { bubbles: true }));
+        await tick(10);
+        assert.ok(view.editing, 'still editing');
+        assert.equal(h.window.document.activeElement, ta,
+                     'the keyboard stays in the card');
+        assert.deepEqual([ta.selectionStart, ta.selectionEnd], [0, 9]);
+        // A click that starts and ends on the board still selects cards.
+        view.cardEls.get('G-bbbbb').dispatchEvent(new h.window.MouseEvent(
+            'pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+        h.window.dispatchEvent(new h.window.MouseEvent('pointerup',
+            { bubbles: true }));
+        view.cardEls.get('G-bbbbb').dispatchEvent(
+            new h.window.MouseEvent('click', { bubbles: true }));
+        await tick(20);
+        assert.equal(view.active, 'G-bbbbb');
+    } finally {
+        view.contentEl.remove();
+    }
+});
