@@ -1012,3 +1012,46 @@ test('a wheel scroll moves the column and redraws the flow at once',
     assert.equal(inner.style.transform, 'translateY(-700px)',
                  'a sideways scroll is left to the board');
 });
+
+test('a sync rewriting the index unchanged leaves the board and the ' +
+     'editor alone', async () => {
+    const { app, view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A\n', 'G-bbbbb': 'B\n' });
+    h.window.document.body.appendChild(view.contentEl);
+    await view.startEdit('G-aaaaa');
+    const ta = view.editing.ta;
+    assert.equal(h.window.document.activeElement, ta);
+    const board = view.board;
+    // LiveSync writes the same text back after Dendrite's own write
+    // event has already been consumed.
+    const f = app.vault.getAbstractFileByPath(INDEX);
+    await app.vault.modify(f, read(INDEX));
+    await tick(400);
+    assert.equal(view.board, board, 'the board was not rebuilt');
+    assert.equal(h.window.document.activeElement, ta,
+                 'the card being written keeps the focus');
+    view.contentEl.remove();
+});
+
+test('an outside change to the index while a card is written keeps ' +
+     'the editor focused at its cursor', async () => {
+    const { app, view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'Some text\n', 'G-bbbbb': 'B\n' });
+    h.window.document.body.appendChild(view.contentEl);
+    await view.startEdit('G-aaaaa');
+    const ta = view.editing.ta;
+    ta.setSelectionRange(2, 4);
+    const f = app.vault.getAbstractFileByPath(INDEX);
+    await app.vault.modify(f, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-bbbbb|B]]\n- [[G-aaaaa|A]]\n');
+    await tick(400);
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-bbbbb', 'G-aaaaa'], 'the change was loaded');
+    assert.equal(view.editing && view.editing.ta, ta, 'still editing');
+    assert.equal(h.window.document.activeElement, ta,
+                 'the card being written keeps the focus');
+    assert.deepEqual([ta.selectionStart, ta.selectionEnd], [2, 4]);
+    view.contentEl.remove();
+});

@@ -924,10 +924,13 @@ var require_editor = __commonJS({
           ed.editor.setValue(text);
           this.focusAt(at);
         },
-        focusAt(at) {
+        focusAt(at, to = at) {
           const editor = ed.editor;
           editor.focus();
-          editor.setCursor(editor.offsetToPos(at));
+          editor.setSelection(
+            editor.offsetToPos(at),
+            editor.offsetToPos(to)
+          );
         },
         destroy() {
           parent.removeChild(ed);
@@ -967,9 +970,9 @@ var require_editor = __commonJS({
           fit();
           this.focusAt(at);
         },
-        focusAt(at) {
+        focusAt(at, to = at) {
           ta.focus();
-          ta.setSelectionRange(at, at);
+          ta.setSelectionRange(at, to);
         },
         destroy() {
           ta.remove();
@@ -1372,6 +1375,14 @@ var DendriteView = class extends ItemView {
   }
   // ---- rendering -------------------------------------------------------
   render() {
+    const ed = this.editing;
+    const keep = ed && ed.editor.el.contains(document.activeElement) && ed.editor.selection();
+    this.drawBoard();
+    if (keep && this.editing === ed && ed.editor.el.isConnected) {
+      ed.editor.focusAt(keep[0], keep[1]);
+    }
+  }
+  drawBoard() {
     const el = this.contentEl;
     if (this.observer) this.observer.disconnect();
     if (this.resizer) this.resizer.disconnect();
@@ -2758,6 +2769,9 @@ var DendriteView = class extends ItemView {
     if (f === this.file) {
       const text = await this.app.vault.cachedRead(f);
       if (this.selfWrites.delete(text)) return;
+      if (this.root && core.writeIndexText(text, this.root) === text) {
+        return;
+      }
       clearTimeout(this.reloadTimer);
       this.reloadTimer = setTimeout(() => this.reload(), 300);
       return;

@@ -3,7 +3,7 @@
  * The card editor, in two kinds behind one interface:
  *
  *   { kind, el, value, focus(atStart), selection(), replace(text, at),
- *     focusAt(at), destroy() }
+ *     focusAt(at, to), destroy() }
  *
  * OBSIDIAN'S EDITOR is Obsidian's own markdown editor, so a card gets live
  * preview, [[ link and citation suggestions, editor commands such as
@@ -146,10 +146,11 @@ function obsidianEditor(app, parent, opts) {
             ed.editor.setValue(text);
             this.focusAt(at);
         },
-        focusAt(at) {
+        focusAt(at, to = at) {
             const editor = ed.editor;
             editor.focus();
-            editor.setCursor(editor.offsetToPos(at));
+            editor.setSelection(editor.offsetToPos(at),
+                                editor.offsetToPos(to));
         },
         destroy() { parent.removeChild(ed); },
     };
@@ -185,9 +186,9 @@ function textEditor(opts) {
             fit();
             this.focusAt(at);
         },
-        focusAt(at) {
+        focusAt(at, to = at) {
             ta.focus();
-            ta.setSelectionRange(at, at);
+            ta.setSelectionRange(at, to);
         },
         destroy() { ta.remove(); },
     };

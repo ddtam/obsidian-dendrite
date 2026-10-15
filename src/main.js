@@ -250,6 +250,19 @@ class DendriteView extends ItemView {
     // ---- rendering -------------------------------------------------------
 
     render() {
+        // Rebuilding the board detaches the editor, which drops its focus;
+        // the card being written gets it back with its selection, so
+        // typing carries on through a reload such as a sync's.
+        const ed = this.editing;
+        const keep = ed && ed.editor.el.contains(document.activeElement) &&
+            ed.editor.selection();
+        this.drawBoard();
+        if (keep && this.editing === ed && ed.editor.el.isConnected) {
+            ed.editor.focusAt(keep[0], keep[1]);
+        }
+    }
+
+    drawBoard() {
         const el = this.contentEl;
         if (this.observer) this.observer.disconnect();
         if (this.resizer) this.resizer.disconnect();
@@ -1635,6 +1648,11 @@ class DendriteView extends ItemView {
         if (f === this.file) {
             const text = await this.app.vault.cachedRead(f);
             if (this.selfWrites.delete(text)) return;
+            // A sync can write the text back unchanged, after Dendrite's
+            // own event was consumed: nothing to reload.
+            if (this.root && core.writeIndexText(text, this.root) === text) {
+                return;
+            }
             // The index changed outside Dendrite: re-read it, debounced so
             // a burst of edits or a sync reloads once.
             clearTimeout(this.reloadTimer);
