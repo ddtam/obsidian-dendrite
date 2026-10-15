@@ -1281,6 +1281,11 @@ var ROLE_KEYS = new Map([
   ["0", null],
   ...ROLE_ITEMS.map((r) => [r[3], r[0]])
 ]);
+var STATUS_ITEMS = [
+  ["draft", "Status: draft", "pencil-line", "1"],
+  ["done", "Status: done", "check", "2"],
+  ["revise", "Status: revise", "flag", "3"]
+];
 var PREVIEW = "dendrite-preview";
 var DEFAULTS = {
   writingFolder: "Writing",
@@ -2023,25 +2028,32 @@ var DendriteView = class extends ItemView {
     const role = this.roleOf(id);
     const node = this.byId.get(id);
     const auto = node && node.children.length ? "heading only" : "full text";
-    const doc = this.pageDoc();
     for (const [value, title, icon, key] of [
       [null, `Prints automatically (${auto})`, "wand", "0"],
       ...ROLE_ITEMS
     ]) {
-      const label = doc.createDocumentFragment();
-      const row = label.appendChild(doc.createElement("span"));
-      row.className = "dendrite-menu-row";
-      row.appendChild(doc.createElement("span")).textContent = title;
-      const chip = row.appendChild(doc.createElement("kbd"));
-      chip.className = "dendrite-menu-key";
-      chip.dataset.key = key;
       m.addItem((i) => {
-        i.setTitle(label).setIcon(icon).onClick(() => this.setRole(id, value));
+        i.setTitle(this.menuLabel(title, key)).setIcon(icon).onClick(() => this.setRole(id, value));
         if (typeof i.setChecked === "function") {
           i.setChecked(role === value);
         }
       });
     }
+  }
+  /**
+   * A menu item's title with its key as a chip at the right. The chip
+   * draws its key from data-key, so the title's text stays the title.
+   */
+  menuLabel(title, key) {
+    const doc = this.pageDoc();
+    const label = doc.createDocumentFragment();
+    const row = label.appendChild(doc.createElement("span"));
+    row.className = "dendrite-menu-row";
+    row.appendChild(doc.createElement("span")).textContent = title;
+    const chip = row.appendChild(doc.createElement("kbd"));
+    chip.className = "dendrite-menu-key";
+    chip.dataset.key = key;
+    return label;
   }
   /** The role choices alone, from a card's corner icon. */
   roleMenu(id, anchor) {
@@ -2078,13 +2090,9 @@ var DendriteView = class extends ItemView {
     const info = this.statusInfo && this.statusInfo.get(id);
     if (info && info.prints) {
       m.addSeparator();
-      for (const [value, title, icon] of [
-        ["draft", "Status: draft", "pencil-line"],
-        ["done", "Status: done (+)", "check"],
-        ["revise", "Status: revise (\u2212)", "flag"]
-      ]) {
+      for (const [value, title, icon, key] of STATUS_ITEMS) {
         m.addItem((i) => {
-          i.setTitle(title).setIcon(icon).onClick(() => this.setStatus(id, value));
+          i.setTitle(this.menuLabel(title, `\u21E7${key}`)).setIcon(icon).onClick(() => this.setStatus(id, value));
           if (typeof i.setChecked === "function") {
             i.setChecked(info.own === value);
           }
@@ -2584,9 +2592,17 @@ var DendriteView = class extends ItemView {
       statusKey();
       return;
     }
-    if (ROLE_KEYS.has(e.key) && this.active) {
+    const code = /^(?:Digit|Numpad)(\d)$/.exec(e.code || "");
+    const digit = code ? code[1] : /^\d$/.test(e.key) ? e.key : null;
+    const status = e.shiftKey && digit && STATUS_ITEMS.find((r) => r[3] === digit);
+    if (status && this.active) {
       e.preventDefault();
-      this.setRole(this.active, ROLE_KEYS.get(e.key));
+      this.setStatusByKey(status[0]);
+      return;
+    }
+    if (!e.shiftKey && ROLE_KEYS.has(digit) && this.active) {
+      e.preventDefault();
+      this.setRole(this.active, ROLE_KEYS.get(digit));
       return;
     }
     if (!this.plugin.settings.vimKeys) return;
@@ -3147,6 +3163,16 @@ var DendriteView = class extends ItemView {
    * is without Dendrite; null removes it, from a card that does not
    * print.
    */
+  /** A status from the keyboard, for a card whose text prints. */
+  async setStatusByKey(status) {
+    const node = this.byId.get(this.active);
+    if (!node) return;
+    if (core.roleFor(node, (x) => this.roleOf(x)) !== "prose") {
+      new Notice("Dendrite: a structural card takes its status from the cards below it.");
+      return;
+    }
+    await this.setStatus(this.active, status);
+  }
   async setStatus(id, status) {
     const f = this.cardFile(id);
     if (!f) return;

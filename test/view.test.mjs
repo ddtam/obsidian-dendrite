@@ -1484,3 +1484,42 @@ test('number keys set a card\'s role, and the menus show each key',
     assert.equal(keys[3][0], 'Scaffolding: prints its children only',
                  'the title reads without its key');
 });
+
+test('Shift and 1 to 3 set a printing card\'s status, by physical key',
+     async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': '# A', 'G-bbbbb': 'B' });
+    await view.select('G-bbbbb');
+    // A layout's own character for Shift+digit varies; the key's code
+    // does not.
+    const press = async (code, key) => {
+        view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
+            { code, key, shiftKey: true, bubbles: true, cancelable: true }));
+        await tick(20);
+    };
+    const status = (id) => (/dendrite_status: (\w+)/.exec(
+        read(cardPath(id))) || [])[1];
+    await press('Digit2', '@');
+    assert.equal(status('G-bbbbb'), 'done');
+    await press('Digit3', '"');
+    assert.equal(status('G-bbbbb'), 'revise', 'a UK layout\'s Shift+3');
+    await press('Digit1', '!');
+    assert.equal(status('G-bbbbb'), 'draft');
+    assert.equal(/dendrite_role/.test(read(cardPath('G-bbbbb'))), false,
+                 'no role was set by the digit');
+    await view.select('G-aaaaa');
+    await press('Digit2', '@');
+    assert.equal(status('G-aaaaa'), undefined,
+                 'a structural card takes its status from below');
+    view.cardMenu(view.cardEls.get('G-aaaaa'));
+    await view.select('G-bbbbb');
+    view.cardMenu(view.cardEls.get('G-bbbbb'));
+    const chips = h.obsidian.lastMenu.items.filter((i) =>
+        /^Status/.test(i.title)).map((i) => [i.title,
+        i.titleContent.querySelector('[data-key]').dataset.key]);
+    assert.deepEqual(chips, [['Status: draft', '⇧1'],
+                             ['Status: done', '⇧2'],
+                             ['Status: revise', '⇧3']]);
+});

@@ -58,6 +58,7 @@ Obsidian has no public API for putting its editor inside another view, so Dendri
 | Ctrl+Z | Undo the last structural change; in a new card still empty, undo making it |
 | Ctrl+F | Find in the cards, in either mode |
 | 0 to 4 | What the card prints: 0 automatic, 1 heading only, 2 full text, 3 scaffolding, 4 left out; in normal mode |
+| Shift+1 to 3 | The card's status: 1 draft, 2 done, 3 revise; in normal mode, on a card whose text prints, by the physical key on any layout |
 
 ### Vim-style keys
 
