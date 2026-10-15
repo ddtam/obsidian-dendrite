@@ -709,8 +709,9 @@
     text-overflow: ellipsis;
 }
 
-/* The drag handle, in the card's top right corner, shown on hover and on
-   the active card. Touch screens move cards from the card's menu. */
+/* Top right of every card: what it prints, faint when that follows from
+   the tree and stronger when set on the card. Under the pointer it turns
+   into the handle the card is dragged by; a click changes the role. */
 .dendrite-grip {
     position: absolute;
     top: 4px;
@@ -722,10 +723,16 @@
     width: 20px;
     height: 20px;
     border-radius: var(--radius-s);
-    color: var(--text-faint);
+    color: var(--text-muted);
     cursor: grab;
-    opacity: 0;
-    transition: opacity 120ms ease;
+}
+
+.dendrite-grip.is-auto {
+    color: var(--text-faint);
+}
+
+.dendrite-grip > span {
+    display: flex;
 }
 
 .dendrite-grip svg {
@@ -733,9 +740,13 @@
     height: 14px;
 }
 
-.dendrite-card:hover > .dendrite-grip,
-.dendrite-card.is-active > .dendrite-grip {
-    opacity: 1;
+.dendrite-grip-icon,
+.dendrite-grip:hover .dendrite-role-icon {
+    display: none !important;
+}
+
+.dendrite-grip:hover .dendrite-grip-icon {
+    display: flex !important;
 }
 
 .dendrite-grip:hover {
@@ -743,8 +754,13 @@
     background: var(--background-modifier-hover);
 }
 
+/* The text keeps clear of the corner icon. */
+.dendrite-card-body {
+    padding-right: 14px;
+}
+
 .is-mobile .dendrite-grip {
-    display: none;
+    cursor: pointer;
 }
 
 .dendrite-board.is-dragging-card,

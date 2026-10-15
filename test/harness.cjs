@@ -158,6 +158,9 @@ function makeApp() {
             text.set(f.path, data);
             touch(f);
             ev.trigger('modify', f);
+            // Obsidian re-parses the note after it is written, then says
+            // its metadata changed.
+            setTimeout(() => meta.trigger('changed', f), 0);
         },
         async process(f, fn) {
             const out = fn(text.get(f.path));

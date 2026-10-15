@@ -25,6 +25,14 @@ const { cardEditor } = require('./editor.js');
 const pandoc = require('./pandoc.js');
 
 const VIEW = 'dendrite-view';
+
+// What a card prints, as the card menu and its corner icon show it.
+const ROLE_ITEMS = [
+    ['section', 'Prints its heading only', 'heading'],
+    ['prose', 'Prints its full text', 'text'],
+    ['scaffolding', 'Scaffolding: prints its children only', 'layers'],
+    ['notes', 'Left out of the manuscript', 'eye-off'],
+];
 const PREVIEW = 'dendrite-preview';
 const DEFAULTS = {
     writingFolder: 'Writing',
@@ -428,11 +436,12 @@ class DendriteView extends ItemView {
         const card = group.createDiv({ cls: 'dendrite-card' });
         card.dataset.id = n.id;
         if (n.children.length) card.addClass('has-children');
-        // The handle a card is dragged by, so a press on its text still
-        // selects text.
+        // Top right: what the card prints, which turns into the handle
+        // it is dragged by under the pointer; a click changes the role.
         const grip = card.createDiv({ cls: 'dendrite-grip' });
-        setIcon(grip, 'grip-vertical');
-        grip.setAttr('aria-label', 'Drag to move this card and its branch');
+        grip.createSpan({ cls: 'dendrite-role-icon' });
+        setIcon(grip.createSpan({ cls: 'dendrite-grip-icon' }),
+                'grip-vertical');
         const body = card.createDiv({ cls: 'dendrite-card-body' });
         const cached = this.rendered.get(n.id);
         const f = this.cardFile(n.id);
@@ -760,6 +769,34 @@ class DendriteView extends ItemView {
         this.toolbar = t;
     }
 
+    /** The role choices for a card, the current one checked. */
+    addRoleItems(m, id) {
+        const role = this.roleOf(id);
+        const node = this.byId.get(id);
+        const auto = node && node.children.length ? 'heading only' :
+            'full text';
+        for (const [value, title, icon] of
+            [[null, `Prints automatically (${auto})`, 'wand'],
+             ...ROLE_ITEMS]) {
+            m.addItem((i) => {
+                i.setTitle(title).setIcon(icon)
+                    .onClick(() => this.setRole(id, value));
+                if (typeof i.setChecked === 'function') {
+                    i.setChecked(role === value);
+                }
+            });
+        }
+    }
+
+    /** The role choices alone, from a card's corner icon. */
+    roleMenu(id, anchor) {
+        const { Menu } = require('obsidian');
+        const m = new Menu();
+        this.addRoleItems(m, id);
+        const r = anchor.getBoundingClientRect();
+        m.showAtPosition({ x: r.left, y: r.bottom }, this.pageDoc());
+    }
+
     cardMenu(anchor, event) {
         const { Menu } = require('obsidian');
         const m = new Menu();
@@ -775,12 +812,8 @@ class DendriteView extends ItemView {
         m.addSeparator();
         item('Card properties…', 'sliders-horizontal',
              () => new CardModal(this, this.active).open());
-        // What this card prints: automatic follows its place in the tree.
+        // Status, then what this card prints.
         const id = this.active;
-        const role = this.roleOf(id);
-        const node = this.byId.get(id);
-        const auto = node && node.children.length ? 'heading only' :
-            'full text';
         const info = this.statusInfo && this.statusInfo.get(id);
         if (info && info.prints) {
             m.addSeparator();
@@ -803,22 +836,7 @@ class DendriteView extends ItemView {
                  () => this.setStatus(id, null));
         }
         m.addSeparator();
-        for (const [value, title, icon] of [
-            [null, `Prints automatically (${auto})`, 'wand'],
-            ['section', 'Prints its heading only', 'heading'],
-            ['prose', 'Prints its full text', 'text'],
-            ['scaffolding', 'Scaffolding: prints its children only',
-             'layers'],
-            ['notes', 'Left out of the manuscript', 'eye-off'],
-        ]) {
-            m.addItem((i) => {
-                i.setTitle(title).setIcon(icon)
-                    .onClick(() => this.setRole(id, value));
-                if (typeof i.setChecked === 'function') {
-                    i.setChecked(role === value);
-                }
-            });
-        }
+        this.addRoleItems(m, id);
         m.addSeparator();
         const branch = this.byId.get(this.active);
         item('Export this branch to markdown', 'file-output',
@@ -867,6 +885,12 @@ class DendriteView extends ItemView {
         }
         if (e.target.closest('.dendrite-toolbar, textarea, .dendrite-cm, ' +
                              'button, .dendrite-quota')) return;
+        const grip = e.target.closest('.dendrite-grip');
+        if (grip) {
+            const id = grip.parentElement.dataset.id;
+            this.select(id, false).then(() => this.roleMenu(id, grip));
+            return;
+        }
         const card = e.target.closest('.dendrite-card');
         if (card) this.select(card.dataset.id);
         this.contentEl.focus();
@@ -1997,6 +2021,26 @@ class DendriteView extends ItemView {
             card.toggleClass('is-left-out', out);
             card.toggleClass('is-heading-only',
                              this.roleOf(id) === 'section');
+            // The corner icon: the role in effect, faint when it follows
+            // from the tree rather than being set on the card.
+            const set = this.roleOf(id);
+            const role = out ? 'notes' :
+                core.roleFor(node, (x) => this.roleOf(x));
+            const auto = out ? set !== 'notes' : !set;
+            const grip = card.querySelector(':scope > .dendrite-grip');
+            if (grip && grip.dataset.role !== role) {
+                grip.dataset.role = role;
+                const icon = grip.querySelector('.dendrite-role-icon');
+                icon.empty();
+                setIcon(icon, ROLE_ITEMS.find((r) => r[0] === role)[2]);
+            }
+            if (grip) {
+                grip.toggleClass('is-auto', auto);
+                const what = ROLE_ITEMS.find((r) => r[0] === role)[1];
+                grip.setAttr('aria-label', what +
+                    (auto ? ' (automatic)' : '') +
+                    '. Click to change; drag to move the card.');
+            }
             card.toggleClass('is-scaffolding',
                              this.roleOf(id) === 'scaffolding');
         }

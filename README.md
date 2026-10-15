@@ -73,7 +73,7 @@ In normal mode, shown as **NORMAL** in the bar, no card is being edited and lett
 | u | Undo |
 | gg / G | First / last card in the column |
 
-**Drag a card** with the mouse or a pen to move it with its branch: any card from anywhere on it, and the selected card by its handle, the grip in its top right corner, so its text can still be selected. Over the top half of another card it goes above it, over the bottom half below it, and over the card's right edge it becomes that card's last child. An accent line shows where it will land, columns scroll near their ends, Escape cancels, and Ctrl+Z undoes a drop. A card cannot be dropped into its own branch.
+**Drag a card** with the mouse or a pen to move it with its branch: any card from anywhere on it, and the selected card by the icon in its top right corner, which turns into a grip under the pointer, so its text can still be selected. Over the top half of another card it goes above it, over the bottom half below it, and over the card's right edge it becomes that card's last child. An accent line shows where it will land, columns scroll near their ends, Escape cancels, and Ctrl+Z undoes a drop. A card cannot be dropped into its own branch.
 
 On a phone, the active card's toolbar offers the same actions, and a long press opens the card's menu, which has the move and indent items.
 
@@ -137,7 +137,7 @@ Each card has a role, which decides what of it prints:
 | Scaffolding | nothing from the card; its children print in its place, a heading level up and numbered as its siblings | never by default |
 | Left out | nothing from the card or its branch | never by default |
 
-Set a card's role from its right-click menu; it is stored as `dendrite_role` (`section`, `prose`, `scaffolding` or `notes`) on the card. An outline card in the first column, holding a heading and your notes, is set to **Heading only** so its notes stay out even before it has children. A scaffolding card, such as a question the sections beneath it answer, shows with a dotted outline and muted text; a left-out card shows with a dashed outline; a heading-only card shows its notes muted. `%% comments %%` never print.
+Every card shows its role as an icon in its top right corner, faint when the role follows from the tree and stronger when set on the card; clicking the icon offers the roles. Set a card's role there or from its right-click menu; it is stored as `dendrite_role` (`section`, `prose`, `scaffolding` or `notes`) on the card. An outline card in the first column, holding a heading and your notes, is set to **Heading only** so its notes stay out even before it has children. A scaffolding card, such as a question the sections beneath it answer, shows with a dotted outline and muted text; a left-out card shows with a dashed outline; a heading-only card shows its notes muted. `%% comments %%` never print.
 
 ## Card status
 

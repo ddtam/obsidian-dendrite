@@ -117,7 +117,8 @@ test('insert below, child and above, then indent and outdent', async () => {
 test('delete trashes the branch and undo restores notes and tree',
      async () => {
     const index = '---\ndendrite_prefix: G\n---\n' +
-        '- [[G-aaaaa|A]]\n    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n';
+        '- [[G-aaaaa|A]]\n    - [[G-bbbbb|B text]]\n' +
+        '- [[G-ccccc|C text]]\n';
     const { view, read, text } = await open(index, {
         'G-aaaaa': '# A\n', 'G-bbbbb': 'B text', 'G-ccccc': 'C text' });
     view.active = 'G-aaaaa';
@@ -125,7 +126,7 @@ test('delete trashes the branch and undo restores notes and tree',
     assert.equal(text(cardPath('G-aaaaa')), undefined);
     assert.equal(text(cardPath('G-bbbbb')), undefined);
     assert.equal(read(INDEX), '---\ndendrite_prefix: G\n---\n' +
-                 '- [[G-ccccc|C]]\n');
+                 '- [[G-ccccc|C text]]\n');
     assert.equal(view.active, 'G-ccccc');
     await view.doUndo();
     assert.equal(text(cardPath('G-bbbbb')), 'B text');
@@ -689,7 +690,8 @@ test('moving a selection to a new card below or a child, and undoing it',
 test('merging into the card above or the parent, and undoing it',
      async () => {
     const index = '---\ndendrite_prefix: G\n---\n' +
-        '- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n    - [[G-ccccc|C]]\n';
+        '- [[G-aaaaa|Para A.]]\n- [[G-bbbbb|Para B.]]\n' +
+        '    - [[G-ccccc|Para C.]]\n';
     const { view, read, text } = await open(index, {
         'G-aaaaa': 'Para A.', 'G-bbbbb': 'Para B.', 'G-ccccc': 'Para C.' });
     view.active = 'G-bbbbb';
@@ -697,7 +699,7 @@ test('merging into the card above or the parent, and undoing it',
     assert.equal(text(cardPath('G-aaaaa')), 'Para A.\n\nPara B.');
     assert.equal(text(cardPath('G-bbbbb')), undefined, 'merged note trashed');
     assert.equal(read(INDEX), '---\ndendrite_prefix: G\n---\n' +
-                 '- [[G-aaaaa|Para A.]]\n    - [[G-ccccc|C]]\n',
+                 '- [[G-aaaaa|Para A.]]\n    - [[G-ccccc|Para C.]]\n',
                  'B\'s child follows its text');
     await view.doUndo();
     assert.equal(text(cardPath('G-aaaaa')), 'Para A.');
@@ -1157,4 +1159,42 @@ test('in a popout window, a smooth scroll reaches its target in time',
     assert.equal(view.offsets[0], 100, 'at its target');
     assert.ok(set.every((y) => y >= 100 && y <= 200),
               'never past either end: ' + set.join(','));
+});
+
+test('each card shows what it prints top right, and a click there ' +
+     'changes it', async () => {
+    const { view, app } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n    - [[G-ddddd|D]]\n' +
+        '- [[G-eeeee|E]]\n',
+        { 'G-aaaaa': '# A', 'G-bbbbb': 'B',
+          'G-ccccc': '---\ndendrite_role: notes\n---\nC',
+          'G-ddddd': 'D',
+          'G-eeeee': '---\ndendrite_role: scaffolding\n---\nE' });
+    const badge = (id) => view.cardEls.get(id)
+        .querySelector('.dendrite-grip');
+    const shown = (id) => [badge(id).dataset.role,
+                           badge(id).hasClass('is-auto')];
+    assert.deepEqual(shown('G-aaaaa'), ['section', true],
+                     'a card with children: heading only, automatic');
+    assert.deepEqual(shown('G-bbbbb'), ['prose', true]);
+    assert.deepEqual(shown('G-ccccc'), ['notes', false], 'set by hand');
+    assert.deepEqual(shown('G-ddddd'), ['notes', true],
+                     'inside a left-out branch');
+    assert.deepEqual(shown('G-eeeee'), ['scaffolding', false]);
+    // A click on it, without a drag, offers the roles.
+    badge('G-bbbbb').dispatchEvent(new h.window.MouseEvent('click',
+        { bubbles: true, cancelable: true }));
+    await tick(10);
+    assert.equal(view.active, 'G-bbbbb');
+    const menu = h.obsidian.lastMenu;
+    const item = menu.items.find((i) => /^Scaffolding/.test(i.title));
+    assert.ok(item, 'the role menu is open');
+    assert.ok(!menu.titles.some((t) => /^Delete/.test(t)),
+              'it holds the roles only');
+    await item.click();
+    await tick(10);
+    const f = app.vault.getAbstractFileByPath('W/Grant/cards/G-bbbbb.md');
+    assert.match(app.vault.text.get(f.path), /dendrite_role: scaffolding/);
+    assert.deepEqual(shown('G-bbbbb'), ['scaffolding', false]);
 });
