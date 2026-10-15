@@ -1127,3 +1127,22 @@ test('in a popout window, the quota box, its editor and dragging use that ' +
     assert.deepEqual(view.root.children.map((n) => n.id),
                      ['G-bbbbb', 'G-aaaaa'], 'the drop landed');
 });
+
+test('in a popout window, a smooth scroll reaches its target in time',
+     async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    const pop = h.makePopout();
+    pop.document.body.appendChild(pop.document.adoptNode(view.contentEl));
+    // The board has no layout here, so offsets are recorded, not clamped.
+    const set = [];
+    view.setColOffset = (d, y) => { view.offsets[d] = y; set.push(y); };
+    view.offsets = [200];
+    view.animateOffsets([100], true);
+    await tick(400);
+    assert.equal(view.anim, null, 'the animation finished');
+    assert.equal(view.offsets[0], 100, 'at its target');
+    assert.ok(set.every((y) => y >= 100 && y <= 200),
+              'never past either end: ' + set.join(','));
+});

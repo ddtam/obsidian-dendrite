@@ -1810,10 +1810,11 @@ var DendriteView = class extends ItemView {
       this.drawFlow();
       return;
     }
-    const start = performance.now();
+    let start = null;
     const DURATION = 220;
     const step = (now) => {
-      const k = Math.min(1, (now - start) / DURATION);
+      if (start === null) start = now;
+      const k = Math.min(1, Math.max(0, (now - start) / DURATION));
       const e = 1 - Math.pow(1 - k, 3);
       targets.forEach((y, d) => {
         if (y !== null) {

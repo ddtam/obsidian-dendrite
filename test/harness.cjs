@@ -13,7 +13,9 @@ global.document = w.document;
 global.HTMLElement = w.HTMLElement;
 global.Event = w.Event;
 global.getComputedStyle = (el) => w.getComputedStyle(el);
-global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+// A frame is called with its window's clock, as a browser does.
+global.requestAnimationFrame = (fn) =>
+    setTimeout(() => fn(performance.now()), 0);
 global.cancelAnimationFrame = (id) => clearTimeout(id);
 w.requestAnimationFrame = global.requestAnimationFrame;
 w.cancelAnimationFrame = global.cancelAnimationFrame;
@@ -60,7 +62,10 @@ installHelpers(w);
 function makePopout() {
     const win = new JSDOM('<!doctype html><body></body>').window;
     installHelpers(win);
-    win.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+    // Its clock starts when it opens, so it reads behind the main
+    // window's by however long that was open first.
+    win.requestAnimationFrame = (fn) =>
+        setTimeout(() => fn(performance.now() - 60000), 0);
     win.cancelAnimationFrame = (id) => clearTimeout(id);
     return win;
 }
