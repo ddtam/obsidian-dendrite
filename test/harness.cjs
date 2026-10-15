@@ -300,7 +300,7 @@ const obsidian = {
             (this.items = this.items || []).push(item);
             return this;
         }
-        addSeparator() {}
+        addSeparator() { this.titles.push('---'); return this; }
         showAtMouseEvent() { this.shown = 'mouse'; }
         showAtPosition() { this.shown = 'position'; }
     },

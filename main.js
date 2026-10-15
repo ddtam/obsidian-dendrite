@@ -1900,7 +1900,6 @@ var DendriteView = class extends ItemView {
       "sliders-horizontal",
       () => new CardModal(this, this.active).open()
     );
-    m.addSeparator();
     const id = this.active;
     const role = this.roleOf(id);
     const node = this.byId.get(id);
@@ -1947,6 +1946,7 @@ var DendriteView = class extends ItemView {
         }
       });
     }
+    m.addSeparator();
     const branch = this.byId.get(this.active);
     item(
       "Export this branch to markdown",

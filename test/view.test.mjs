@@ -509,6 +509,17 @@ test('right-click opens the card menu at the pointer, delete included',
     assert.ok(card.hasClass('is-active'), 'but the card is highlighted');
     const menu = h.obsidian.lastMenu;
     assert.equal(menu.shown, 'mouse');
+    // The roles are a section of their own, and sections are separated
+    // once.
+    const t = menu.titles;
+    const first = t.findIndex((x) => /^Prints automatically/.test(x));
+    const last = t.indexOf('Left out of the manuscript');
+    assert.ok(first > 0 && last > first);
+    assert.equal(t[first - 1], '---', 'a separator before the roles');
+    assert.equal(t[last + 1], '---', 'and after them');
+    assert.ok(t.slice(first, last + 1).every((x) => x !== '---'));
+    assert.ok(!t.some((x, k) => x === '---' && t[k + 1] === '---'),
+              'no doubled separators');
     const del = menu.items.find((i) => /^Delete/.test(i.title));
     assert.ok(del, 'the menu offers delete');
     await del.click();

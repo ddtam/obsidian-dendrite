@@ -772,7 +772,6 @@ class DendriteView extends ItemView {
         m.addSeparator();
         item('Card properties…', 'sliders-horizontal',
              () => new CardModal(this, this.active).open());
-        m.addSeparator();
         // What this card prints: automatic follows its place in the tree.
         const id = this.active;
         const role = this.roleOf(id);
@@ -817,6 +816,7 @@ class DendriteView extends ItemView {
                 }
             });
         }
+        m.addSeparator();
         const branch = this.byId.get(this.active);
         item('Export this branch to markdown', 'file-output',
              () => this.exportTo(branch, 'md'));
