@@ -108,6 +108,7 @@ class DendriteView extends ItemView {
         this.rendered = new Map();
         this.editing = null;
         this.undo = [];
+        this.redo = [];
         this.selfWrites = new Set();
         this.reloadTimer = null;
         this.scope = new Scope(this.app.scope);
@@ -400,8 +401,10 @@ class DendriteView extends ItemView {
         };
         btn('file-output', 'Export', 'Export the manuscript to markdown, ' +
             'PDF or Word', (e) => this.exportMenu(null, e));
-        btn('undo-2', 'Undo', 'Undo the last structural change (Ctrl+Z)',
-            () => this.doUndo());
+        btn('undo-2', 'Undo', 'Undo the last change to the tree or a ' +
+            'card\'s text (Ctrl+Z)', () => this.doUndo());
+        btn('redo-2', 'Redo', 'Redo what was undone (Ctrl+Shift+Z or ' +
+            'Ctrl+Y)', () => this.doRedo());
         btn('file-text', 'Index', 'Open the index note as markdown',
             () => this.plugin.openAsMarkdown(this.file));
         btn('settings', 'Settings', 'This manuscript\'s settings',
@@ -1061,11 +1064,19 @@ class DendriteView extends ItemView {
             return false;
         });
         s.register(['Mod'], 'z', () => {
-            if (this.undoEmptyNew()) return false;
+            if (this.undoInEditor()) return false;
             if (this.editing) return true;
             this.doUndo();
             return false;
         });
+        // Redo, in normal mode; in a card the editor keeps its own.
+        for (const [mods, key] of [[['Mod', 'Shift'], 'z'], [['Mod'], 'y']]) {
+            s.register(mods, key, () => {
+                if (this.editing) return true;
+                this.doRedo();
+                return false;
+            });
+        }
     }
 
     // ---- dragging cards -------------------------------------------------
@@ -1208,8 +1219,7 @@ class DendriteView extends ItemView {
         const target = this.byId.get(targetId);
         const before = core.serialiseTree(this.root);
         if (!core.moveNode(node, target, where)) return;
-        this.undo.push({ tree: before, active: id, files: [] });
-        if (this.undo.length > UNDO_DEPTH) this.undo.shift();
+        this.pushUndo({ tree: before, active: id, files: [] });
         this.active = id;
         await this.writeIndex();
         await this.sweepStatuses();
@@ -1268,8 +1278,10 @@ class DendriteView extends ItemView {
         let f = this.cardFile(id);
         if (!f) f = await this.createCardFile(id);
         const raw = await this.app.vault.read(f);
+        // The text as it was before this visit, for undo once it is left.
         const ed = { id, file: f, dirty: false, timer: null,
-                     saving: Promise.resolve() };
+                     saving: Promise.resolve(),
+                     before: core.splitFrontmatter(raw).body };
         const editor = cardEditor(this.app, this, {
             value: core.splitFrontmatter(raw).body,
             file: f,
@@ -1289,7 +1301,7 @@ class DendriteView extends ItemView {
             onEscape: () => { this.endEdit(); },
             onFind: () => { this.openFind(); },
             onRedraw: () => { if (this.find) this.paintFind(); },
-            onUndo: () => this.undoEmptyNew(),
+            onUndo: () => this.undoInEditor(),
         }, this.plugin.settings.obsidianEditor !== false);
         ed.editor = editor;
         // The text box's own commands (bold, Tab, lists) are Dendrite's;
@@ -1341,6 +1353,17 @@ class DendriteView extends ItemView {
         this.editing = null;
         ed.editor.destroy();
         if (ed.changed) await this.plugin.lintCard(ed.file);
+        // The editor's own history goes with it, so the visit becomes one
+        // step in the board's undo, beside tree changes in the order made.
+        if (ed.changed) {
+            const after = core.splitFrontmatter(
+                await this.app.vault.read(ed.file)).body;
+            if (after !== ed.before) {
+                this.pushUndo({ active: ed.id, files: [], text: true,
+                    restores: [{ path: ed.file.path, body: ed.before,
+                                 ifBody: after }] });
+            }
+        }
         this.invalidate(ed.id);
         const card = this.cardEls.get(ed.id);
         if (card) {
@@ -1490,10 +1513,19 @@ class DendriteView extends ItemView {
 
     // ---- structure -------------------------------------------------------
 
-    snapshot(files = [], created = []) {
-        this.undo.push({ tree: core.serialiseTree(this.root),
-                         active: this.active, files, created });
+    /**
+     * Record a step for undo. A new step ends any redo, since the steps
+     * it would redo no longer follow from the current state.
+     */
+    pushUndo(entry) {
+        this.undo.push(entry);
         if (this.undo.length > UNDO_DEPTH) this.undo.shift();
+        this.redo = [];
+    }
+
+    snapshot(files = [], created = []) {
+        this.pushUndo({ tree: core.serialiseTree(this.root),
+                         active: this.active, files, created });
     }
 
     async writeIndex() {
@@ -1549,6 +1581,15 @@ class DendriteView extends ItemView {
         const node = this.byId.get(ed.id);
         if (!node) return;
         const before = core.serialiseTree(this.root);
+        // What was typed in this visit before the split is a step of its
+        // own, before the split's, so undoing the split does not also
+        // bring back text that now lives in the new card.
+        await this.save(ed);
+        if (original !== ed.before) {
+            this.pushUndo({ active: ed.id, files: [], text: true,
+                restores: [{ path: ed.file.path, body: ed.before,
+                             ifBody: original }] });
+        }
         const srcText = await this.app.vault.read(ed.file);
         // Read fresh, not from the board's last drawing: a status set a
         // moment ago may not have been drawn yet.
@@ -1577,6 +1618,7 @@ class DendriteView extends ItemView {
         ed.dirty = true;
         ed.changed = true;
         await this.save(ed);
+        ed.before = cut.keep;
         // A card that moved part of itself into a child and stopped
         // printing has a status only if text is left behind: unsplit,
         // until the split is finished or the rest is kept as notes.
@@ -1585,13 +1627,12 @@ class DendriteView extends ItemView {
             await this.setStatus(ed.id,
                 core.leftover(cut.keep) ? 'unsplit' : null);
         }
-        this.undo.push({
+        this.pushUndo({
             tree: before, active: ed.id, files: [],
             created: [{ path: made.path, body: cut.moved }],
             restores: [{ path: ed.file.path, body: original,
                          ifBody: cut.keep, text: srcText }],
         });
-        if (this.undo.length > UNDO_DEPTH) this.undo.shift();
         this.render();
         // Rebuilding the board moved the editor; put the cursor back at
         // the cut, ready to move the next piece.
@@ -1644,13 +1685,12 @@ class DendriteView extends ItemView {
         this.invalidate(node.id);
         this.invalidate(target.id);
         await this.app.fileManager.trashFile(src);
-        this.undo.push({
+        this.pushUndo({
             tree: before, active: node.id,
             files: [{ path: src.path, data: srcText }], created: [],
             restores: [{ path: dst.path, body: dstBody, ifBody: merged,
                          text: dstText }],
         });
-        if (this.undo.length > UNDO_DEPTH) this.undo.shift();
         await this.syncLabel(target.id, merged);
         // Merged text is only as mature as the less mature of the two.
         if (core.roleFor(target, (x) => this.roleOf(x)) === 'prose') {
@@ -1699,6 +1739,28 @@ class DendriteView extends ItemView {
     }
 
     /**
+     * Ctrl+Z in a card before anything is typed in this visit, when the
+     * editor's own history is empty: a new card still empty is taken
+     * back, and a card whose last visit is the latest undo step gets its
+     * text from before that visit. False when the editor's undo applies.
+     */
+    undoInEditor() {
+        if (this.undoEmptyNew()) return true;
+        const ed = this.editing;
+        if (!ed || ed.changed) return false;
+        const top = this.undo[this.undo.length - 1];
+        const r = top && top.text && top.active === ed.id && top.restores[0];
+        if (!r || ed.editor.value.trim() !== r.ifBody.trim()) return false;
+        this.undo.pop();
+        ed.editor.replace(r.body, r.body.length);
+        ed.dirty = true;
+        ed.changed = true;
+        ed.fresh = false;
+        this.save(ed);
+        return true;
+    }
+
+    /**
      * Ctrl+Z in a card just made and still empty: undo making it, since
      * the text has nothing of its own to undo. False otherwise.
      */
@@ -1722,7 +1784,7 @@ class DendriteView extends ItemView {
                      indent: () => core.indent(node),
                      outdent: () => core.outdent(node) }[op];
         if (!fn || !fn()) return;
-        this.undo.push({ tree: before, active: this.active, files: [] });
+        this.pushUndo({ tree: before, active: this.active, files: [] });
         await this.writeIndex();
         await this.sweepStatuses();
         this.render();
@@ -1759,49 +1821,91 @@ class DendriteView extends ItemView {
                    'Ctrl+Z in the view restores them.');
     }
 
+    // Leaving a card records its visit first, which is a new step and so
+    // ends any redo; the histories are read only after that.
     async doUndo() {
-        const snap = this.undo.pop();
+        if (this.editing) await this.endEdit();
+        await this.stepHistory(this.undo, this.redo, 'undo');
+    }
+
+    async doRedo() {
+        if (this.editing) await this.endEdit();
+        await this.stepHistory(this.redo, this.undo, 'redo');
+    }
+
+    /**
+     * Take the latest step from one history and apply it, recording on
+     * the other how to reverse what was done: undo feeds redo and redo
+     * feeds undo. Only what was applied is recorded, so a card left alone
+     * because it changed since is not touched by the reverse either.
+     */
+    async stepHistory(from, to, what) {
+        const snap = from.pop();
         if (!snap) {
-            new Notice('Dendrite: nothing to undo.');
+            new Notice(`Dendrite: nothing to ${what}.`);
             return;
         }
-        if (this.editing) await this.endEdit();
-        for (const { path, data } of snap.files) {
-            if (!this.app.vault.getAbstractFileByPath(path)) {
-                await this.app.vault.create(path, data);
+        const vault = this.app.vault;
+        const bodyOf = (data) => core.splitFrontmatter(data).body;
+        const inv = { active: this.active, files: [], created: [],
+                      restores: [], text: snap.text };
+        if (snap.tree !== undefined) {
+            inv.tree = core.serialiseTree(this.root);
+        }
+        for (const { path, data } of snap.files || []) {
+            if (!vault.getAbstractFileByPath(path)) {
+                await vault.create(path, data);
+                inv.created.push({ path, body: bodyOf(data) });
             }
         }
-        // A card note the undone change created goes with it, but only
-        // while it holds what the change put there: text written into it
-        // since is never discarded.
+        // A card note the step created goes with it, but only while it
+        // holds what the step put there: text written into it since is
+        // never discarded.
         for (const entry of snap.created || []) {
             const path = typeof entry === 'string' ? entry : entry.path;
             const expect = typeof entry === 'string' ? '' : entry.body;
-            const f = this.app.vault.getAbstractFileByPath(path);
+            const f = vault.getAbstractFileByPath(path);
             if (!(f instanceof TFile)) continue;
-            const body = core.splitFrontmatter(
-                await this.app.vault.read(f)).body;
-            if (body.trim() === expect.trim()) {
+            const data = await vault.read(f);
+            if (bodyOf(data).trim() === expect.trim()) {
                 this.invalidate(f.basename);
                 await this.app.fileManager.trashFile(f);
+                inv.files.push({ path, data });
             }
         }
-        // A card note the change rewrote gets its text back, if it still
-        // holds what the change left in it.
+        // A card note the step rewrote gets its text back, if it still
+        // holds what the step left in it.
         for (const r of snap.restores || []) {
-            const f = this.app.vault.getAbstractFileByPath(r.path);
+            const f = vault.getAbstractFileByPath(r.path);
             if (!(f instanceof TFile)) continue;
-            const body = core.splitFrontmatter(
-                await this.app.vault.read(f)).body;
-            if (body.trim() !== r.ifBody.trim()) continue;
-            await this.app.vault.process(f, (data) => (r.text !== undefined ?
-                r.text : core.splitFrontmatter(data).fm + r.body));
+            const data = await vault.read(f);
+            if (bodyOf(data).trim() !== r.ifBody.trim()) {
+                if (snap.text) {
+                    new Notice('Dendrite: the card changed since, so its ' +
+                               `text was not ${what === 'undo' ? 'undone'
+                                   : 'redone'}.`);
+                }
+                continue;
+            }
+            let next = null;
+            await vault.process(f, (d) => {
+                next = r.text !== undefined ? r.text
+                    : core.splitFrontmatter(d).fm + r.body;
+                return next;
+            });
+            inv.restores.push({ path: r.path, text: data,
+                                ifBody: bodyOf(next) });
             this.invalidate(f.basename);
         }
-        this.root = core.parseIndex(snap.tree + '\n').root;
-        this.reindex();
-        this.active = snap.active;
-        await this.writeIndex();
+        // A text step leaves the tree as it stands.
+        if (snap.tree !== undefined) {
+            this.root = core.parseIndex(snap.tree + '\n').root;
+            this.reindex();
+        }
+        if (this.byId.has(snap.active)) this.active = snap.active;
+        if (snap.tree !== undefined) await this.writeIndex();
+        to.push(inv);
+        if (to.length > UNDO_DEPTH) to.shift();
         this.render();
     }
 

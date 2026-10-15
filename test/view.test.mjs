@@ -464,8 +464,21 @@ test('undoing a new card removes its note unless text was written',
     const kept = view.active;
     type(view, 'Some words');
     await view.endEdit();
+    // The typing is undone first, then the card; redo brings both back.
     await view.doUndo();
+    assert.equal(text(cardPath(kept)), '');
+    await view.doUndo();
+    assert.equal(text(cardPath(kept)), undefined);
+    await view.doRedo();
+    await view.doRedo();
     assert.equal(text(cardPath(kept)), 'Some words', 'text is never lost');
+    assert.ok(view.byId.has(kept), 'and the card is back in the tree');
+    // Text written into a new card from outside keeps its note.
+    await view.doUndo();
+    const f = app.vault.getAbstractFileByPath(cardPath(kept));
+    await app.vault.process(f, () => 'Written in a tab.');
+    await view.doUndo();
+    assert.equal(text(cardPath(kept)), 'Written in a tab.');
     assert.deepEqual(view.unlinkedCards().map((f) => f.basename), [kept]);
 });
 
@@ -648,7 +661,7 @@ test('arrow keys navigate from the pane even when no scope handles them',
 
 test('moving a selection to a new card below or a child, and undoing it',
      async () => {
-    const { view, read, text } = await open(
+    const { view, app, read, text } = await open(
         '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-zzzzz|Z]]\n',
         { 'G-aaaaa': 'Keep this.\n\nMove this.\n\nAnd keep this.',
           'G-zzzzz': 'Z' });
@@ -676,14 +689,23 @@ test('moving a selection to a new card below or a child, and undoing it',
     await view.doUndo();
     assert.equal(text(cardPath('G-aaaaa')), 'Keep this.\n\nAnd keep this.');
     assert.equal(text(cardPath(child.id)), undefined, 'new card removed');
-    // Text written into a moved card since is never discarded by undo.
+    // Typing in the moved card is a step of its own, undone and redone.
     await view.startEdit(moved);
     type(view, 'Move this, revised.');
     await view.endEdit();
     await view.doUndo();
+    assert.equal(text(cardPath(moved)), 'Move this.', 'the typing first');
+    await view.doRedo();
+    assert.equal(text(cardPath(moved)), 'Move this, revised.');
+    await view.doUndo();
+    // Text written into a moved card from outside is never discarded.
+    const f = app.vault.getAbstractFileByPath(cardPath(moved));
+    await app.vault.process(f, (d) => d.replace('Move this.',
+                                                'Edited in a tab.'));
+    await view.doUndo();
     assert.equal(text(cardPath('G-aaaaa')),
                  'Keep this.\n\nMove this.\n\nAnd keep this.');
-    assert.equal(text(cardPath(moved)), 'Move this, revised.',
+    assert.equal(text(cardPath(moved)), 'Edited in a tab.',
                  'the edited new card is kept');
 });
 
@@ -1522,4 +1544,69 @@ test('Shift and 1 to 3 set a printing card\'s status, by physical key',
     assert.deepEqual(chips, [['Status: draft', '⇧1'],
                              ['Status: done', '⇧2'],
                              ['Status: revise', '⇧3']]);
+});
+
+test('a card\'s text edits join the undo history with tree changes',
+     async () => {
+    const { view, app, text } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'Original text.', 'G-bbbbb': 'B' });
+    const undoKey = view.scope.keys.find((k) => k.mods.includes('Mod') &&
+                                        k.key === 'z').fn;
+    // Typed by accident, then left: Ctrl+Z on the board brings it back.
+    await view.startEdit('G-aaaaa');
+    type(view, 'Accident.');
+    await view.endEdit();
+    assert.equal(text(cardPath('G-aaaaa')), 'Accident.');
+    await view.doUndo();
+    assert.equal(text(cardPath('G-aaaaa')), 'Original text.');
+    const redoKey = view.scope.keys.find((k) => k.key === 'y').fn;
+    assert.equal(redoKey(), false);
+    await tick(20);
+    assert.equal(text(cardPath('G-aaaaa')), 'Accident.', 'redone');
+    await view.doUndo();
+    // A new change ends what could be redone.
+    view.active = 'G-bbbbb';
+    await view.structural('up');
+    await view.doRedo();
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-bbbbb', 'G-aaaaa'], 'nothing redone');
+    assert.equal(text(cardPath('G-aaaaa')), 'Original text.');
+    await view.doUndo();
+    // Left, then opened again: Ctrl+Z before typing restores it there.
+    await view.startEdit('G-aaaaa');
+    type(view, 'Accident again.');
+    await view.endEdit();
+    await view.startEdit('G-aaaaa');
+    assert.equal(undoKey(), false, 'taken by Dendrite, not the empty editor');
+    await tick(20);
+    assert.equal(view.editing.ta.value, 'Original text.');
+    await view.endEdit();
+    assert.equal(text(cardPath('G-aaaaa')), 'Original text.');
+    // Once typed in, Ctrl+Z is the editor's own.
+    await view.startEdit('G-aaaaa');
+    type(view, 'Original text. More.');
+    assert.equal(undoKey(), true);
+    await view.endEdit();
+    // Text and tree changes undo in the order they were made.
+    view.active = 'G-bbbbb';
+    await view.structural('up');
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-bbbbb', 'G-aaaaa']);
+    await view.doUndo();
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-aaaaa', 'G-bbbbb'], 'the move first');
+    assert.equal(text(cardPath('G-aaaaa')), 'Original text. More.');
+    await view.doUndo();
+    assert.equal(text(cardPath('G-aaaaa')), 'Original text.', 'then the text');
+    // Text changed since, by a sync or another tab, is never overwritten.
+    await view.startEdit('G-bbbbb');
+    type(view, 'B edited.');
+    await view.endEdit();
+    const f = app.vault.getAbstractFileByPath(cardPath('G-bbbbb'));
+    await app.vault.process(f, (d) => d.replace('B edited.', 'From sync.'));
+    const before = h.notices.length;
+    await view.doUndo();
+    assert.equal(text(cardPath('G-bbbbb')), 'From sync.');
+    assert.ok(h.notices.length > before, 'and says why');
 });

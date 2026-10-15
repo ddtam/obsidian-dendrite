@@ -55,7 +55,8 @@ Obsidian has no public API for putting its editor inside another view, so Dendri
 | Alt+↑ / Alt+↓ | Move the card among its siblings |
 | Alt+→ / Alt+← | Indent under the card above / outdent |
 | Ctrl+Backspace | Delete the card and its children |
-| Ctrl+Z | Undo the last structural change; in a new card still empty, undo making it |
+| Ctrl+Z | Undo the last change, to the tree or to a card's text; in a card before you type, undo making it if it is new and empty, or bring back its text from before your last visit |
+| Ctrl+Shift+Z or Ctrl+Y | Redo what was undone, in normal mode |
 | Ctrl+F | Find in the cards, in either mode |
 | 0 to 4 | What the card prints: 0 automatic, 1 heading only, 2 full text, 3 scaffolding, 4 left out; in normal mode |
 | Shift+1 to 3 | The card's status: 1 draft, 2 done, 3 revise; in normal mode, on a card whose text prints, by the physical key on any layout |
@@ -84,6 +85,8 @@ In normal mode, shown as **NORMAL** in the bar, no card is being edited and lett
 On a phone, the active card's toolbar offers the same actions, and a long press opens the card's menu, which has the move and indent items.
 
 **Text is never discarded.** A card saves while you type and again whenever you leave it, Escape included. Deleted cards go to Obsidian's trash, and Ctrl+Z restores them.
+
+**Undo covers both the tree and the cards' text.** Inside a card, Ctrl+Z is the editor's own undo, letter by letter, but that history ends when you leave the card. So each visit that changes a card's text becomes one step in the board's undo, beside moves, inserts and deletes, in the order they were made. Opening a card again and pressing Ctrl+Z before typing brings back its text from before the last visit. Redo, Ctrl+Shift+Z or Ctrl+Y, takes back any undo until you make a new change. A step is only undone or redone while the card still holds the text it left there; a card changed since, by sync or in another tab, is left alone and Dendrite says so.
 
 ## Splitting and merging cards
 
