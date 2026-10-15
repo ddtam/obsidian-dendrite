@@ -909,18 +909,29 @@ test('dragging a card drops it above, below or into another, with undo',
     const ev = (type, x, y, extra = {}) => new h.window.MouseEvent(type,
         Object.assign({ bubbles: true, cancelable: true, button: 0,
                         clientX: x, clientY: y }, extra));
+    const grip = (id) => view.cardEls.get(id)
+        .querySelector('.dendrite-grip');
     const drag = async (id, target) => {
-        view.cardEls.get(id).dispatchEvent(ev('pointerdown', 0, 0));
+        grip(id).dispatchEvent(ev('pointerdown', 0, 0));
         over = target;
         h.window.dispatchEvent(ev('pointermove', 30, 30));
         h.window.dispatchEvent(ev('pointerup', 30, 30));
         await tick(10);
     };
     // A press that does not move is a click, not a drag.
-    view.cardEls.get('G-ccccc').dispatchEvent(ev('pointerdown', 0, 0));
+    grip('G-ccccc').dispatchEvent(ev('pointerdown', 0, 0));
     h.window.dispatchEvent(ev('pointerup', 2, 2));
     await tick(5);
     assert.equal(ids(), index.replace(/^---[\s\S]*?---\n/, ''));
+    // Pressing a card's text selects text; only the handle drags.
+    over = { id: 'G-aaaaa', where: 'above' };
+    view.cardEls.get('G-ccccc').querySelector('.dendrite-card-body')
+        .dispatchEvent(ev('pointerdown', 0, 0));
+    h.window.dispatchEvent(ev('pointermove', 30, 30));
+    h.window.dispatchEvent(ev('pointerup', 30, 30));
+    await tick(5);
+    assert.equal(ids(), index.replace(/^---[\s\S]*?---\n/, ''),
+                 'a press on the text does not drag');
 
     await drag('G-ccccc', { id: 'G-aaaaa', where: 'above' });
     assert.equal(ids(), '- [[G-ccccc|C]]\n- [[G-aaaaa|A]]\n' +

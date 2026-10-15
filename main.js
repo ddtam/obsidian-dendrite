@@ -1552,6 +1552,9 @@ var DendriteView = class extends ItemView {
     const card = group.createDiv({ cls: "dendrite-card" });
     card.dataset.id = n.id;
     if (n.children.length) card.addClass("has-children");
+    const grip = card.createDiv({ cls: "dendrite-grip" });
+    setIcon(grip, "grip-vertical");
+    grip.setAttr("aria-label", "Drag to move this card and its branch");
     const body = card.createDiv({ cls: "dendrite-card-body" });
     const cached = this.rendered.get(n.id);
     const f = this.cardFile(n.id);
@@ -2112,9 +2115,10 @@ var DendriteView = class extends ItemView {
   // ---- dragging cards -------------------------------------------------
   onDragDown(e) {
     if (e.button !== 0 || e.pointerType === "touch") return;
-    if (e.target.closest("textarea, .dendrite-cm, button, a, input, .dendrite-quota, .dendrite-toolbar")) return;
+    if (!e.target.closest(".dendrite-grip")) return;
     const card = e.target.closest(".dendrite-card");
     if (!card) return;
+    e.preventDefault();
     this.drag = {
       id: card.dataset.id,
       x: e.clientX,

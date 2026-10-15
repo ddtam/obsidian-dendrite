@@ -73,7 +73,7 @@ In normal mode, shown as **NORMAL** in the bar, no card is being edited and lett
 | u | Undo |
 | gg / G | First / last card in the column |
 
-**Drag a card** with the mouse or a pen to move it with its branch: over the top half of another card it goes above it, over the bottom half below it, and over the card's right edge it becomes that card's last child. An accent line shows where it will land, columns scroll near their ends, Escape cancels, and Ctrl+Z undoes a drop. A card cannot be dropped into its own branch.
+**Drag a card** by its handle, the grip in its top right corner that shows on hover, with the mouse or a pen, to move it with its branch; a press on the card's text still selects text. Over the top half of another card it goes above it, over the bottom half below it, and over the card's right edge it becomes that card's last child. An accent line shows where it will land, columns scroll near their ends, Escape cancels, and Ctrl+Z undoes a drop. A card cannot be dropped into its own branch.
 
 On a phone, the active card's toolbar offers the same actions, and a long press opens the card's menu, which has the move and indent items.
 
