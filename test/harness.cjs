@@ -15,10 +15,11 @@ global.Event = w.Event;
 global.getComputedStyle = (el) => w.getComputedStyle(el);
 global.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 global.cancelAnimationFrame = (id) => clearTimeout(id);
+w.requestAnimationFrame = global.requestAnimationFrame;
+w.cancelAnimationFrame = global.cancelAnimationFrame;
 
-const P = w.HTMLElement.prototype;
-function make(tag, o = {}, parent) {
-    const el = w.document.createElement(tag);
+function make(tag, o = {}, parent, doc = w.document) {
+    const el = doc.createElement(tag);
     if (typeof o === 'string') o = { cls: o };
     if (o.cls) el.className = o.cls;
     if (o.text !== undefined) el.textContent = o.text;
@@ -27,18 +28,42 @@ function make(tag, o = {}, parent) {
     if (parent) parent.appendChild(el);
     return el;
 }
-P.createDiv = function (o) { return make('div', o, this); };
-P.createSpan = function (o) { return make('span', o, this); };
-P.createEl = function (t, o) { return make(t, o, this); };
-P.empty = function () { while (this.firstChild) this.firstChild.remove(); };
-P.addClass = function (c) { this.classList.add(c); };
-P.removeClass = function (c) { this.classList.remove(c); };
-P.hasClass = function (c) { return this.classList.contains(c); };
-P.toggleClass = function (c, on) { this.classList.toggle(c, !!on); };
-P.setText = function (t) { this.textContent = t; };
-P.setAttr = function (k, v) { this.setAttribute(k, v); };
-P.getAttr = function (k) { return this.getAttribute(k); };
-P.scrollTo = function () {};
+
+/**
+ * Obsidian's element helpers, on a window's elements. A second window
+ * stands in for a popout: its elements are made in its own document.
+ */
+function installHelpers(win) {
+    const P = win.HTMLElement.prototype;
+    P.createDiv = function (o) {
+        return make('div', o, this, this.ownerDocument);
+    };
+    P.createSpan = function (o) {
+        return make('span', o, this, this.ownerDocument);
+    };
+    P.createEl = function (t, o) {
+        return make(t, o, this, this.ownerDocument);
+    };
+    P.empty = function () { while (this.firstChild) this.firstChild.remove(); };
+    P.addClass = function (c) { this.classList.add(c); };
+    P.removeClass = function (c) { this.classList.remove(c); };
+    P.hasClass = function (c) { return this.classList.contains(c); };
+    P.toggleClass = function (c, on) { this.classList.toggle(c, !!on); };
+    P.setText = function (t) { this.textContent = t; };
+    P.setAttr = function (k, v) { this.setAttribute(k, v); };
+    P.getAttr = function (k) { return this.getAttribute(k); };
+    P.scrollTo = function () {};
+}
+installHelpers(w);
+
+/** A second window, as Obsidian opens for a popout. */
+function makePopout() {
+    const win = new JSDOM('<!doctype html><body></body>').window;
+    installHelpers(win);
+    win.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+    win.cancelAnimationFrame = (id) => clearTimeout(id);
+    return win;
+}
 global.createDiv = (o) => make('div', o);
 global.createEl = (t, o) => make(t, o);
 
@@ -302,4 +327,5 @@ Module._load = function (req, ...a) {
     return orig.call(this, req, ...a);
 };
 
-module.exports = { makeApp, notices, TFile, window: w, obsidian };
+module.exports = { makeApp, makePopout, notices, TFile, window: w,
+                   obsidian };

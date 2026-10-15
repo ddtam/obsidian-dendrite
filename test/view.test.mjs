@@ -1080,3 +1080,39 @@ test('a scaffolding card is marked on the board and its children print',
     assert.ok(!card.hasClass('is-left-out'));
     assert.ok(!view.cardEls.get('G-bbbbb').hasClass('is-left-out'));
 });
+
+test('in a popout window, the quota box, its editor and dragging use that ' +
+     'window', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': '---\ndendrite_limit: 8 words\n---\n# A\nplan',
+          'G-bbbbb': 'B' });
+    const pop = h.makePopout();
+    // Obsidian moves a leaf's elements into the popout's document.
+    pop.document.body.appendChild(pop.document.adoptNode(view.contentEl));
+    await view.updateCounts();
+    const q = view.cardEls.get('G-aaaaa').querySelector('.dendrite-quota');
+    q.dispatchEvent(new pop.MouseEvent('mouseenter'));
+    assert.ok(pop.document.querySelector('.dendrite-quota-tip'),
+              'the hover box is in the popout');
+    assert.equal(document.querySelector('.dendrite-quota-tip'), null,
+                 'and not in the main window');
+    q.dispatchEvent(new pop.MouseEvent('click', { bubbles: true }));
+    assert.ok(pop.document.querySelector('.dendrite-quota-pop'),
+              'the quick editor opens in the popout');
+    view.closeQuotaEditor();
+    // A drag is followed in the popout's own window.
+    let over = { id: 'G-aaaaa', where: 'above' };
+    view.dropTargetAt = () => over;
+    const ev = (type, x, y) => new pop.MouseEvent(type, { bubbles: true,
+        cancelable: true, button: 0, clientX: x, clientY: y });
+    view.cardEls.get('G-bbbbb').querySelector('.dendrite-grip')
+        .dispatchEvent(ev('pointerdown', 0, 0));
+    pop.dispatchEvent(ev('pointermove', 30, 30));
+    assert.ok(pop.document.querySelector('.dendrite-ghost'),
+              'the drag label is in the popout');
+    pop.dispatchEvent(ev('pointerup', 30, 30));
+    await tick(10);
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-bbbbb', 'G-aaaaa'], 'the drop landed');
+});

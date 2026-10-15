@@ -1296,17 +1296,9 @@ var DendriteView = class extends ItemView {
       "pointerdown",
       (e) => this.onDragDown(e)
     );
-    this.registerDomEvent(
-      window,
-      "pointermove",
-      (e) => this.onDragMove(e)
-    );
-    this.registerDomEvent(window, "pointerup", (e) => this.onDragUp(e));
-    this.registerDomEvent(
-      window,
-      "pointercancel",
-      () => this.cancelDrag()
-    );
+    this.dragMove = (e) => this.onDragMove(e);
+    this.dragUp = (e) => this.onDragUp(e);
+    this.dragCancel = () => this.cancelDrag();
     this.registerDomEvent(this.contentEl, "contextmenu", async (e) => {
       const card = e.target.closest(".dendrite-card");
       if (!card || e.target.closest("textarea, .dendrite-cm")) return;
@@ -1373,6 +1365,18 @@ var DendriteView = class extends ItemView {
   prefix() {
     return this.file ? prefixOf(this.app, this.file) : null;
   }
+  /**
+   * The document and window the board is in. Dendrite can sit in a
+   * popout window, whose document is not the global one, so anything
+   * placed on the page, or measured or listened for there, goes
+   * through these.
+   */
+  pageDoc() {
+    return this.contentEl.ownerDocument || document;
+  }
+  pageWin() {
+    return this.pageDoc().defaultView || window;
+  }
   cardsFolder() {
     const dir = this.file.parent ? this.file.parent.path : "";
     return normalizePath((dir && dir !== "/" ? dir + "/" : "") + "cards");
@@ -1387,7 +1391,8 @@ var DendriteView = class extends ItemView {
   // ---- rendering -------------------------------------------------------
   render() {
     const ed = this.editing;
-    const keep = ed && ed.editor.el.contains(document.activeElement) && ed.editor.selection();
+    const focused = this.pageDoc().activeElement;
+    const keep = ed && ed.editor.el.contains(focused) && ed.editor.selection();
     this.drawBoard();
     if (keep && this.editing === ed && ed.editor.el.isConnected) {
       ed.editor.focusAt(keep[0], keep[1]);
@@ -1417,7 +1422,7 @@ var DendriteView = class extends ItemView {
     this.nativeScroll = !!Platform.isMobile;
     board.toggleClass("is-native-scroll", this.nativeScroll);
     const NS = "http://www.w3.org/2000/svg";
-    this.flowSvg = document.createElementNS(NS, "svg");
+    this.flowSvg = this.pageDoc().createElementNS(NS, "svg");
     this.flowSvg.classList.add("dendrite-flow");
     board.appendChild(this.flowSvg);
     this.colInners = [];
@@ -1671,7 +1676,7 @@ var DendriteView = class extends ItemView {
   }
   onResize() {
     if (this.resizeFrame) return;
-    this.resizeFrame = requestAnimationFrame(() => {
+    this.resizeFrame = this.pageWin().requestAnimationFrame(() => {
       this.resizeFrame = null;
       this.centre(false);
       if (this.nativeScroll) this.drawFlow();
@@ -1679,7 +1684,7 @@ var DendriteView = class extends ItemView {
   }
   scheduleFlow() {
     if (this.flowFrame) return;
-    this.flowFrame = requestAnimationFrame(() => {
+    this.flowFrame = this.pageWin().requestAnimationFrame(() => {
       this.flowFrame = null;
       this.drawFlow();
     });
@@ -1731,7 +1736,7 @@ var DendriteView = class extends ItemView {
     const NS = "http://www.w3.org/2000/svg";
     const draw = (cls, d) => {
       if (!d) return;
-      const path = document.createElementNS(NS, "path");
+      const path = this.pageDoc().createElementNS(NS, "path");
       path.setAttribute("class", cls);
       path.setAttribute("d", d);
       svg.appendChild(path);
@@ -1795,7 +1800,7 @@ var DendriteView = class extends ItemView {
    * flow redrawn in each frame so it never trails the cards.
    */
   animateOffsets(targets, smooth) {
-    if (this.anim) cancelAnimationFrame(this.anim);
+    if (this.anim) this.pageWin().cancelAnimationFrame(this.anim);
     this.anim = null;
     const from = targets.map((_, d) => this.colOffset(d));
     if (!smooth) {
@@ -1816,9 +1821,9 @@ var DendriteView = class extends ItemView {
         }
       });
       this.drawFlow();
-      this.anim = k < 1 ? requestAnimationFrame(step) : null;
+      this.anim = k < 1 ? this.pageWin().requestAnimationFrame(step) : null;
     };
-    this.anim = requestAnimationFrame(step);
+    this.anim = this.pageWin().requestAnimationFrame(step);
   }
   /** The wheel scrolls the column under it, flow redrawn the same frame. */
   onWheel(e) {
@@ -1829,7 +1834,7 @@ var DendriteView = class extends ItemView {
     if (!col) return;
     e.preventDefault();
     if (this.anim) {
-      cancelAnimationFrame(this.anim);
+      this.pageWin().cancelAnimationFrame(this.anim);
       this.anim = null;
     }
     const d = Number(col.dataset.depth);
@@ -1928,7 +1933,11 @@ var DendriteView = class extends ItemView {
       [null, `Prints automatically (${auto})`, "wand"],
       ["section", "Prints its heading only", "heading"],
       ["prose", "Prints its full text", "text"],
-      ["scaffolding", "Scaffolding: left out, its children print in its place", "layers"],
+      [
+        "scaffolding",
+        "Scaffolding: prints its children only",
+        "layers"
+      ],
       ["notes", "Left out of the manuscript", "eye-off"]
     ]) {
       m.addItem((i) => {
@@ -1982,7 +1991,7 @@ var DendriteView = class extends ItemView {
       return;
     }
     const r = anchor.getBoundingClientRect();
-    m.showAtPosition({ x: r.left, y: r.bottom });
+    m.showAtPosition({ x: r.left, y: r.bottom }, this.pageDoc());
   }
   // ---- interaction -----------------------------------------------------
   onClick(e) {
@@ -2119,13 +2128,19 @@ var DendriteView = class extends ItemView {
     const card = e.target.closest(".dendrite-card");
     if (!card) return;
     e.preventDefault();
+    this.cancelDrag();
+    const win = this.pageWin();
     this.drag = {
       id: card.dataset.id,
       x: e.clientX,
       y: e.clientY,
       started: false,
-      target: null
+      target: null,
+      win
     };
+    win.addEventListener("pointermove", this.dragMove);
+    win.addEventListener("pointerup", this.dragUp);
+    win.addEventListener("pointercancel", this.dragCancel);
   }
   onDragMove(e) {
     const d = this.drag;
@@ -2134,14 +2149,14 @@ var DendriteView = class extends ItemView {
       if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) return;
       d.started = true;
       const node = this.byId.get(d.id);
-      d.ghost = document.body.createDiv({
+      d.ghost = this.pageDoc().body.createDiv({
         cls: "dendrite-ghost",
         text: node ? node.label || node.id : d.id
       });
       const src = this.cardEls.get(d.id);
       if (src) src.addClass("is-dragging");
       this.board.addClass("is-dragging-card");
-      const sel = window.getSelection && window.getSelection();
+      const sel = this.pageWin().getSelection();
       if (sel) sel.removeAllRanges();
     }
     e.preventDefault();
@@ -2168,6 +2183,9 @@ var DendriteView = class extends ItemView {
     const d = this.drag;
     this.drag = null;
     if (!d) return;
+    d.win.removeEventListener("pointermove", this.dragMove);
+    d.win.removeEventListener("pointerup", this.dragUp);
+    d.win.removeEventListener("pointercancel", this.dragCancel);
     if (d.ghost) d.ghost.remove();
     if (this.board) this.board.removeClass("is-dragging-card");
     this.showDropTarget(null);
@@ -2181,7 +2199,8 @@ var DendriteView = class extends ItemView {
    */
   dropTargetAt(x, y) {
     const d = this.drag;
-    const el = document.elementFromPoint ? document.elementFromPoint(x, y) : null;
+    const doc = this.pageDoc();
+    const el = doc.elementFromPoint ? doc.elementFromPoint(x, y) : null;
     const card = el && el.closest && el.closest(".dendrite-card");
     if (!d || !card) return null;
     const node = this.byId.get(d.id);
@@ -2250,7 +2269,7 @@ var DendriteView = class extends ItemView {
     ta.setSelectionRange(r.start, r.end);
     let done = false;
     try {
-      done = r.text ? document.execCommand("insertText", false, r.text) : r.start === r.end || document.execCommand("delete");
+      done = r.text ? this.pageDoc().execCommand("insertText", false, r.text) : r.start === r.end || this.pageDoc().execCommand("delete");
     } catch (err) {
       done = false;
     }
@@ -3164,7 +3183,9 @@ var DendriteView = class extends ItemView {
   }
   showQuotaTip(id, anchor) {
     this.hideQuotaTip();
-    const tip = document.body.createDiv({ cls: "dendrite-quota-tip" });
+    const tip = this.pageDoc().body.createDiv(
+      { cls: "dendrite-quota-tip" }
+    );
     const r = this.quotaReports && this.quotaReports.get(id);
     if (r) this.showQuota(tip, r);
     else tip.setText("No quota. Click to set one.");
@@ -3172,7 +3193,7 @@ var DendriteView = class extends ItemView {
     tip.style.left = a.left + "px";
     tip.style.top = a.top - 6 + "px";
     this.quotaTip = tip;
-    requestAnimationFrame(() => tip.addClass("is-shown"));
+    this.pageWin().requestAnimationFrame(() => tip.addClass("is-shown"));
   }
   hideQuotaTip() {
     if (this.quotaTip) this.quotaTip.remove();
@@ -3185,7 +3206,9 @@ var DendriteView = class extends ItemView {
     if (!f) return;
     const fm = this.cardProps(id);
     const q = core.parseLimit(fm.dendrite_limit);
-    const pop = document.body.createDiv({ cls: "dendrite-quota-pop" });
+    const pop = this.pageDoc().body.createDiv(
+      { cls: "dendrite-quota-pop" }
+    );
     const amount = pop.createEl("input", { type: "text" });
     amount.placeholder = "500, or 1/4";
     amount.value = q ? core.fmtNum(q.amount) : "";
@@ -3231,8 +3254,9 @@ var DendriteView = class extends ItemView {
     const outside = (e) => {
       if (!pop.contains(e.target)) this.closeQuotaEditor();
     };
-    setTimeout(() => document.addEventListener("mousedown", outside), 0);
-    this.quotaPop = { pop, scope, outside };
+    const doc = this.pageDoc();
+    setTimeout(() => doc.addEventListener("mousedown", outside), 0);
+    this.quotaPop = { pop, scope, outside, doc };
     amount.focus();
     amount.select();
   }
@@ -3241,7 +3265,7 @@ var DendriteView = class extends ItemView {
     if (!q) return;
     this.quotaPop = null;
     if (this.app.keymap) this.app.keymap.popScope(q.scope);
-    document.removeEventListener("mousedown", q.outside);
+    q.doc.removeEventListener("mousedown", q.outside);
     q.pop.remove();
     this.contentEl.focus();
   }
