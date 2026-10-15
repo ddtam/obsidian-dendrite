@@ -26,13 +26,16 @@ const pandoc = require('./pandoc.js');
 
 const VIEW = 'dendrite-view';
 
-// What a card prints, as the card menu and its corner icon show it.
+// What a card prints, as the card menu and its corner icon show it, with
+// the number key that sets it in normal mode: most printed to least.
 const ROLE_ITEMS = [
-    ['section', 'Prints its heading only', 'heading'],
-    ['prose', 'Prints its full text', 'text'],
-    ['scaffolding', 'Scaffolding: prints its children only', 'layers'],
-    ['notes', 'Left out of the manuscript', 'eye-off'],
+    ['section', 'Prints its heading only', 'heading', '1'],
+    ['prose', 'Prints its full text', 'text', '2'],
+    ['scaffolding', 'Scaffolding: prints its children only', 'layers', '3'],
+    ['notes', 'Left out of the manuscript', 'eye-off', '4'],
 ];
+const ROLE_KEYS = new Map([['0', null],
+                           ...ROLE_ITEMS.map((r) => [r[3], r[0]])]);
 const PREVIEW = 'dendrite-preview';
 const DEFAULTS = {
     writingFolder: 'Writing',
@@ -802,11 +805,22 @@ class DendriteView extends ItemView {
         const node = this.byId.get(id);
         const auto = node && node.children.length ? 'heading only' :
             'full text';
-        for (const [value, title, icon] of
-            [[null, `Prints automatically (${auto})`, 'wand'],
+        const doc = this.pageDoc();
+        for (const [value, title, icon, key] of
+            [[null, `Prints automatically (${auto})`, 'wand', '0'],
              ...ROLE_ITEMS]) {
+            // The title, with its key as a chip at the right; the chip
+            // draws its digit from data-key, so the title's text stays
+            // the title alone.
+            const label = doc.createDocumentFragment();
+            const row = label.appendChild(doc.createElement('span'));
+            row.className = 'dendrite-menu-row';
+            row.appendChild(doc.createElement('span')).textContent = title;
+            const chip = row.appendChild(doc.createElement('kbd'));
+            chip.className = 'dendrite-menu-key';
+            chip.dataset.key = key;
             m.addItem((i) => {
-                i.setTitle(title).setIcon(icon)
+                i.setTitle(label).setIcon(icon)
                     .onClick(() => this.setRole(id, value));
                 if (typeof i.setChecked === 'function') {
                     i.setChecked(role === value);
@@ -1359,6 +1373,12 @@ class DendriteView extends ItemView {
         if (statusKey) {
             e.preventDefault();
             statusKey();
+            return;
+        }
+        // 0 to 4 set what the selected card prints, as its menus show.
+        if (ROLE_KEYS.has(e.key) && this.active) {
+            e.preventDefault();
+            this.setRole(this.active, ROLE_KEYS.get(e.key));
             return;
         }
         if (!this.plugin.settings.vimKeys) return;

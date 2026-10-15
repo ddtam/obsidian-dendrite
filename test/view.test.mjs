@@ -1450,3 +1450,37 @@ test('a text selection dragged out of the card keeps the keyboard in it',
         view.contentEl.remove();
     }
 });
+
+test('number keys set a card\'s role, and the menus show each key',
+     async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    view.plugin.settings.vimKeys = false;
+    await view.select('G-bbbbb');
+    const press = async (key) => {
+        view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
+            { key, bubbles: true, cancelable: true }));
+        await tick(20);
+    };
+    const role = () => (/dendrite_role: (\w+)/.exec(
+        read(cardPath('G-bbbbb'))) || [])[1];
+    for (const [key, want] of [['1', 'section'], ['2', 'prose'],
+                               ['3', 'scaffolding'], ['4', 'notes'],
+                               ['0', undefined]]) {
+        await press(key);
+        assert.equal(role(), want, `key ${key}`);
+    }
+    // Typing a digit into a card is text, not a role.
+    await view.startEdit('G-bbbbb');
+    await press('3');
+    assert.equal(role(), undefined);
+    await view.endEdit();
+    view.roleMenu('G-bbbbb', view.cardEls.get('G-bbbbb'));
+    const keys = h.obsidian.lastMenu.items.map((i) => [i.title,
+        i.titleContent && i.titleContent.querySelector('[data-key]')
+            .dataset.key]);
+    assert.deepEqual(keys.map((k) => k[1]), ['0', '1', '2', '3', '4']);
+    assert.equal(keys[3][0], 'Scaffolding: prints its children only',
+                 'the title reads without its key');
+});

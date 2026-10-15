@@ -296,9 +296,13 @@ const obsidian = {
         addItem(fn) {
             const self = this;
             const item = {
+                // A title may be page content, as in Obsidian; its text
+                // is what a reader sees as the title.
                 setTitle(x) {
-                    self.titles.push(x);
-                    this.title = x;
+                    const t = typeof x === 'string' ? x : x.textContent;
+                    self.titles.push(t);
+                    this.title = t;
+                    this.titleContent = typeof x === 'string' ? null : x;
                     return this;
                 },
                 setIcon() { return this; },

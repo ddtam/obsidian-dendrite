@@ -1272,11 +1272,15 @@ var { cardEditor } = require_editor();
 var pandoc = require_pandoc();
 var VIEW = "dendrite-view";
 var ROLE_ITEMS = [
-  ["section", "Prints its heading only", "heading"],
-  ["prose", "Prints its full text", "text"],
-  ["scaffolding", "Scaffolding: prints its children only", "layers"],
-  ["notes", "Left out of the manuscript", "eye-off"]
+  ["section", "Prints its heading only", "heading", "1"],
+  ["prose", "Prints its full text", "text", "2"],
+  ["scaffolding", "Scaffolding: prints its children only", "layers", "3"],
+  ["notes", "Left out of the manuscript", "eye-off", "4"]
 ];
+var ROLE_KEYS = new Map([
+  ["0", null],
+  ...ROLE_ITEMS.map((r) => [r[3], r[0]])
+]);
 var PREVIEW = "dendrite-preview";
 var DEFAULTS = {
   writingFolder: "Writing",
@@ -2019,12 +2023,20 @@ var DendriteView = class extends ItemView {
     const role = this.roleOf(id);
     const node = this.byId.get(id);
     const auto = node && node.children.length ? "heading only" : "full text";
-    for (const [value, title, icon] of [
-      [null, `Prints automatically (${auto})`, "wand"],
+    const doc = this.pageDoc();
+    for (const [value, title, icon, key] of [
+      [null, `Prints automatically (${auto})`, "wand", "0"],
       ...ROLE_ITEMS
     ]) {
+      const label = doc.createDocumentFragment();
+      const row = label.appendChild(doc.createElement("span"));
+      row.className = "dendrite-menu-row";
+      row.appendChild(doc.createElement("span")).textContent = title;
+      const chip = row.appendChild(doc.createElement("kbd"));
+      chip.className = "dendrite-menu-key";
+      chip.dataset.key = key;
       m.addItem((i) => {
-        i.setTitle(title).setIcon(icon).onClick(() => this.setRole(id, value));
+        i.setTitle(label).setIcon(icon).onClick(() => this.setRole(id, value));
         if (typeof i.setChecked === "function") {
           i.setChecked(role === value);
         }
@@ -2570,6 +2582,11 @@ var DendriteView = class extends ItemView {
     if (statusKey) {
       e.preventDefault();
       statusKey();
+      return;
+    }
+    if (ROLE_KEYS.has(e.key) && this.active) {
+      e.preventDefault();
+      this.setRole(this.active, ROLE_KEYS.get(e.key));
       return;
     }
     if (!this.plugin.settings.vimKeys) return;

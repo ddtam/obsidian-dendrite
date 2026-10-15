@@ -57,6 +57,7 @@ Obsidian has no public API for putting its editor inside another view, so Dendri
 | Ctrl+Backspace | Delete the card and its children |
 | Ctrl+Z | Undo the last structural change; in a new card still empty, undo making it |
 | Ctrl+F | Find in the cards, in either mode |
+| 0 to 4 | What the card prints: 0 automatic, 1 heading only, 2 full text, 3 scaffolding, 4 left out; in normal mode |
 
 ### Vim-style keys
 
@@ -141,7 +142,7 @@ Each card has a role, which decides what of it prints:
 | Scaffolding | nothing from the card; its children print in its place, a heading level up and numbered as its siblings | never by default |
 | Left out | nothing from the card or its branch | never by default |
 
-Every card shows its role as an icon in its top right corner, faint when the role follows from the tree and stronger when set on the card; clicking the icon offers the roles. Set a card's role there or from its right-click menu; it is stored as `dendrite_role` (`section`, `prose`, `scaffolding` or `notes`) on the card. An outline card in the first column, holding a heading and your notes, is set to **Heading only** so its notes stay out even before it has children. A scaffolding card, such as a question the sections beneath it answer, shows with a dotted outline and muted text; a left-out card shows with a dashed outline; a heading-only card shows its notes muted. `%% comments %%` never print.
+Every card shows its role as an icon in its top right corner, faint when the role follows from the tree and stronger when set on the card; clicking the icon offers the roles, each with its number key, and in normal mode the keys 0 to 4 set the selected card's role directly. Set a card's role there or from its right-click menu; it is stored as `dendrite_role` (`section`, `prose`, `scaffolding` or `notes`) on the card. An outline card in the first column, holding a heading and your notes, is set to **Heading only** so its notes stay out even before it has children. A scaffolding card, such as a question the sections beneath it answer, shows with a dotted outline and muted text; a left-out card shows with a dashed outline; a heading-only card shows its notes muted. `%% comments %%` never print.
 
 ## Card status
 

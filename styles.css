@@ -874,3 +874,19 @@
     color: var(--text-on-accent);
     background-color: var(--interactive-accent);
 }
+
+/* A menu item's key, as a chip at its right edge. The digit comes from
+   data-key, so the item's text is its title alone. */
+.dendrite-menu-row {
+    display: flex;
+    align-items: center;
+    gap: var(--size-4-3, 12px);
+}
+
+.dendrite-menu-key {
+    margin-left: auto;
+}
+
+.dendrite-menu-key::after {
+    content: attr(data-key);
+}
