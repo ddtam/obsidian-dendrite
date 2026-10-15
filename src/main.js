@@ -784,6 +784,8 @@ class DendriteView extends ItemView {
             [null, `Prints automatically (${auto})`, 'wand'],
             ['section', 'Prints its heading only', 'heading'],
             ['prose', 'Prints its full text', 'text'],
+            ['scaffolding', 'Scaffolding: left out, its children print ' +
+                'in its place', 'layers'],
             ['notes', 'Left out of the manuscript', 'eye-off'],
         ]) {
             m.addItem((i) => {
@@ -1953,6 +1955,8 @@ class DendriteView extends ItemView {
             card.toggleClass('is-left-out', out);
             card.toggleClass('is-heading-only',
                              this.roleOf(id) === 'section');
+            card.toggleClass('is-scaffolding',
+                             this.roleOf(id) === 'scaffolding');
         }
     }
 

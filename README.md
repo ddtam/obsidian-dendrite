@@ -134,9 +134,10 @@ Each card has a role, which decides what of it prints:
 | --- | --- | --- |
 | Heading only | its heading line; the rest of its text is notes | a card with children |
 | Full text | its heading, if any, and its text | a card without children |
+| Scaffolding | nothing from the card; its children print in its place, a heading level up and numbered as its siblings | never by default |
 | Left out | nothing from the card or its branch | never by default |
 
-Set a card's role from its right-click menu; it is stored as `dendrite_role` (`section`, `prose` or `notes`) on the card. An outline card in the first column, holding a heading and your notes, is set to **Heading only** so its notes stay out even before it has children. A left-out card shows with a dashed outline; a heading-only card shows its notes muted. `%% comments %%` never print.
+Set a card's role from its right-click menu; it is stored as `dendrite_role` (`section`, `prose`, `scaffolding` or `notes`) on the card. An outline card in the first column, holding a heading and your notes, is set to **Heading only** so its notes stay out even before it has children. A scaffolding card, such as a question the sections beneath it answer, shows with a dotted outline and muted text; a left-out card shows with a dashed outline; a heading-only card shows its notes muted. `%% comments %%` never print.
 
 ## Card status
 

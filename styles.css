@@ -252,6 +252,18 @@
     line-height: var(--line-height-normal);
 }
 
+/* A citekey or URL is one long word: it breaks where it must rather than
+   running out of a narrow card. */
+.dendrite-md, .dendrite-cm, .dendrite-preview-doc {
+    overflow-wrap: anywhere;
+}
+
+/* A footnote marker is raised without opening its line further apart
+   than the others. */
+.dendrite-md sup, .dendrite-cm sup, .dendrite-preview-doc sup {
+    line-height: 0;
+}
+
 .dendrite-md > :first-child {
     margin-top: 0;
 }
@@ -555,6 +567,16 @@
 }
 
 .dendrite-card.is-left-out .dendrite-card-body {
+    color: var(--text-muted);
+}
+
+/* A scaffolding card prints nothing but its branch does: dotted, where a
+   left-out branch is dashed. */
+.dendrite-card.is-scaffolding {
+    border-style: dotted;
+}
+
+.dendrite-card.is-scaffolding .dendrite-card-body {
     color: var(--text-muted);
 }
 

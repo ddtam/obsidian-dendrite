@@ -1055,3 +1055,17 @@ test('an outside change to the index while a card is written keeps ' +
     assert.deepEqual([ta.selectionStart, ta.selectionEnd], [2, 4]);
     view.contentEl.remove();
 });
+
+test('a scaffolding card is marked on the board and its children print',
+     async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Why]]\n' +
+        '    - [[G-bbbbb|Burden]]\n',
+        { 'G-aaaaa': '---\ndendrite_role: scaffolding\n---\n' +
+              '# Why is this research important?\n',
+          'G-bbbbb': '# Clinical burden\nProse.\n' });
+    const card = view.cardEls.get('G-aaaaa');
+    assert.ok(card.hasClass('is-scaffolding'));
+    assert.ok(!card.hasClass('is-left-out'));
+    assert.ok(!view.cardEls.get('G-bbbbb').hasClass('is-left-out'));
+});

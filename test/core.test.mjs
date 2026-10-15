@@ -438,6 +438,76 @@ test('roles decide what a card prints, and segments show what is left out',
     assert.equal(nums.has('N'), false);
 });
 
+test('a titled card under an untitled one takes the next number at ' +
+     'its level', () => {
+    const root = c.makeRoot();
+    const mk = (id, parent) => {
+        const n = c.makeNode(id, id, null);
+        c.appendChild(parent, n);
+        return n;
+    };
+    mk('A', root);
+    const b = mk('B', root);
+    const cc = mk('C', b);
+    mk('D', cc);
+    mk('E', root);
+    const titled = new Set(['A', 'C', 'D', 'E']);
+    const nums = c.sectionNumbers(root.children, (id) => titled.has(id));
+    assert.deepEqual(['A', 'C', 'D', 'E'].map((id) => nums.get(id)),
+                     ['1.', '2.', '2.1', '3.']);
+    assert.equal(nums.has('B'), false);
+});
+
+test('a scaffolding card prints nothing and its children take its place',
+     () => {
+    // 1 Background; 2 Why it matters (scaffolding) over two sections;
+    // 3 Methods.
+    const root = c.makeRoot();
+    const mk = (id, parent) => {
+        const n = c.makeNode(id, id, null);
+        c.appendChild(parent, n);
+        return n;
+    };
+    mk('B', root);
+    const w = mk('W', root);
+    const x = mk('X', w);
+    mk('XP', x);
+    mk('Y', w);
+    mk('M', root);
+    const bodies = {
+        B: '# Background\nText.',
+        W: '# Why is this research important?\nPlanning.',
+        X: '# Clinical burden', XP: 'Burden prose.',
+        Y: '# Gap in current methods\nGap prose.',
+        M: '# Methods\nMethods prose.',
+    };
+    const roles = { W: 'scaffolding', Y: 'prose' };
+    const roleOf = (id) => roles[id] || null;
+    const nums = c.sectionNumbers(root.children,
+                                  (id) => /^#/.test(bodies[id]), roleOf);
+    assert.equal(nums.has('W'), false, 'the scaffolding card is unnumbered');
+    assert.deepEqual(['B', 'X', 'Y', 'M'].map((id) => nums.get(id)),
+                     ['1.', '2.', '3.', '4.'],
+                     'its children are numbered in its place');
+    const out = c.exportMarkdown(root.children, (id) => bodies[id], 1, null,
+                                 roleOf);
+    assert.equal(out, '# Background\n\nText.\n\n# Clinical burden\n\n' +
+                 'Burden prose.\n\n# Gap in current methods\n\n' +
+                 'Gap prose.\n\n# Methods\n\nMethods prose.\n',
+                 'children print a heading level up');
+    const segs = c.exportSegments(root.children, (id) => bodies[id], 1,
+                                  null, roleOf);
+    const by = Object.fromEntries(segs.map((s) => [s.id, s]));
+    assert.equal(by.W.text, '');
+    assert.equal(by.W.left, '# Why is this research important?\nPlanning.',
+                 'the preview shows its text as left out');
+    assert.equal(by.X.depth, 0);
+    const r = c.statusReport(root, () => null, roleOf);
+    assert.equal(r.cards.get('W').prints, false);
+    assert.equal(r.cards.get('W').derived, 'draft',
+                 'it still shows the status of the cards below');
+});
+
 test('status: printing cards carry their own, sections show the worst ' +
      'below, left-out branches do not count', () => {
     const root = c.makeRoot();

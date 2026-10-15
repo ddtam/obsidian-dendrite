@@ -314,14 +314,17 @@ function columns(root) {
  * What a card prints, by its role. A card's role is set in its
  * `dendrite_role` property or follows from its place in the tree:
  *
- *   section  its heading line prints; the rest of its text is notes
- *   prose    its heading line, if any, and its text print
- *   notes    nothing from the card or its branch prints
+ *   section      its heading line prints; the rest of its text is notes
+ *   prose        its heading line, if any, and its text print
+ *   notes        nothing from the card or its branch prints
+ *   scaffolding  nothing from the card prints; its children print in
+ *                its place, a heading level up and numbered as if they
+ *                were its siblings
  *
  * With no role set, a card with children is a section and a card without
  * them is prose. `roleOf(id)` returns the set role or null.
  */
-const ROLES = ['section', 'prose', 'notes'];
+const ROLES = ['section', 'prose', 'notes', 'scaffolding'];
 
 function roleFor(node, roleOf) {
     const set = roleOf ? roleOf(node.id) : null;
@@ -354,6 +357,12 @@ function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf) {
         const role = roleFor(node, roleOf);
         if (role === 'notes') {
             leftOut(node, depth);
+            return;
+        }
+        if (role === 'scaffolding') {
+            segs.push({ id: node.id, depth, text: '',
+                        left: stripComments(raw).trim() });
+            for (const c of node.children) walk(c, depth);
             return;
         }
         const body = stripComments(raw).trim();
@@ -508,26 +517,30 @@ function exportMarkdown(nodes, bodyOf, headingTop, numbers, roleOf) {
  * Section numbers by position, as LaTeX numbers them: every card whose
  * text opens with a heading is numbered among its siblings that do, so
  * moving a section renumbers it. `hasHeading(id)` says which cards do;
- * a card whose role is notes, and its branch, are not numbered.
+ * a card whose role is notes, and its branch, are not numbered. A
+ * scaffolding card, and a card with no heading, are replaced by their
+ * children before counting, so a titled card under an untitled one takes
+ * the next number at its level rather than starting again at 1.
  * Returns id -> `1.`, `1.2` and so on.
  */
 function sectionNumbers(roots, hasHeading, roleOf) {
     const out = new Map();
-    const walk = (nodes, prefix) => {
-        let i = 0;
-        for (const n of nodes) {
-            // A card left out of the manuscript takes no number, and
-            // neither does anything in its branch.
-            if (roleFor(n, roleOf) === 'notes') continue;
-            if (hasHeading(n.id)) {
-                i += 1;
-                const num = prefix ? `${prefix}.${i}` : String(i);
-                out.set(n.id, prefix ? num : num + '.');
-                walk(n.children, num);
-            } else {
-                walk(n.children, prefix);
-            }
+    // A card left out of the manuscript takes no number, and neither
+    // does anything in its branch.
+    const spliced = (nodes) => nodes.flatMap((n) => {
+        const role = roleFor(n, roleOf);
+        if (role === 'notes') return [];
+        if (role === 'scaffolding' || !hasHeading(n.id)) {
+            return spliced(n.children);
         }
+        return [n];
+    });
+    const walk = (nodes, prefix) => {
+        spliced(nodes).forEach((n, k) => {
+            const num = prefix ? `${prefix}.${k + 1}` : String(k + 1);
+            out.set(n.id, prefix ? num : num + '.');
+            walk(n.children, num);
+        });
     };
     walk(roots, '');
     return out;

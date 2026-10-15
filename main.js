@@ -230,7 +230,7 @@ var require_core = __commonJS({
       walk(root, 0);
       return cols;
     }
-    var ROLES = ["section", "prose", "notes"];
+    var ROLES = ["section", "prose", "notes", "scaffolding"];
     function roleFor(node, roleOf) {
       const set = roleOf ? roleOf(node.id) : null;
       if (ROLES.includes(set)) return set;
@@ -255,6 +255,16 @@ var require_core = __commonJS({
         const role = roleFor(node, roleOf);
         if (role === "notes") {
           leftOut(node, depth);
+          return;
+        }
+        if (role === "scaffolding") {
+          segs.push({
+            id: node.id,
+            depth,
+            text: "",
+            left: stripComments(raw).trim()
+          });
+          for (const c of node.children) walk(c, depth);
           return;
         }
         const body = stripComments(raw).trim();
@@ -378,19 +388,20 @@ var require_core = __commonJS({
     }
     function sectionNumbers(roots, hasHeading, roleOf) {
       const out = /* @__PURE__ */ new Map();
-      const walk = (nodes, prefix) => {
-        let i = 0;
-        for (const n of nodes) {
-          if (roleFor(n, roleOf) === "notes") continue;
-          if (hasHeading(n.id)) {
-            i += 1;
-            const num = prefix ? `${prefix}.${i}` : String(i);
-            out.set(n.id, prefix ? num : num + ".");
-            walk(n.children, num);
-          } else {
-            walk(n.children, prefix);
-          }
+      const spliced = (nodes) => nodes.flatMap((n) => {
+        const role = roleFor(n, roleOf);
+        if (role === "notes") return [];
+        if (role === "scaffolding" || !hasHeading(n.id)) {
+          return spliced(n.children);
         }
+        return [n];
+      });
+      const walk = (nodes, prefix) => {
+        spliced(nodes).forEach((n, k) => {
+          const num = prefix ? `${prefix}.${k + 1}` : String(k + 1);
+          out.set(n.id, prefix ? num : num + ".");
+          walk(n.children, num);
+        });
       };
       walk(roots, "");
       return out;
@@ -1914,6 +1925,7 @@ var DendriteView = class extends ItemView {
       [null, `Prints automatically (${auto})`, "wand"],
       ["section", "Prints its heading only", "heading"],
       ["prose", "Prints its full text", "text"],
+      ["scaffolding", "Scaffolding: left out, its children print in its place", "layers"],
       ["notes", "Left out of the manuscript", "eye-off"]
     ]) {
       m.addItem((i) => {
@@ -3038,6 +3050,10 @@ var DendriteView = class extends ItemView {
       card.toggleClass(
         "is-heading-only",
         this.roleOf(id) === "section"
+      );
+      card.toggleClass(
+        "is-scaffolding",
+        this.roleOf(id) === "scaffolding"
       );
     }
   }
