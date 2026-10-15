@@ -803,3 +803,74 @@
 .dendrite-col-inner {
     will-change: transform;
 }
+
+/* Find: a row under the bar. Cards without a match fade; the matches
+   are painted over the rendered text by the browser's highlight
+   registry, so the cards themselves are not changed. */
+.dendrite-find {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 12px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.dendrite-find input {
+    flex: 0 1 360px;
+    min-width: 120px;
+}
+
+.dendrite-find-opt {
+    padding: 2px 6px;
+    height: auto;
+    color: var(--text-muted);
+    background: transparent;
+    box-shadow: none;
+}
+
+.dendrite-find-opt.is-on {
+    color: var(--text-on-accent);
+    background: var(--interactive-accent);
+}
+
+.dendrite-find-count {
+    margin: 0 6px;
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.dendrite-find-count.is-error {
+    color: var(--text-error);
+}
+
+.dendrite-board.is-finding .dendrite-card:not(.is-match) {
+    opacity: 0.3;
+}
+
+.dendrite-board.is-finding .dendrite-card.is-match {
+    opacity: 1;
+}
+
+/* How many matches a card's branch holds, at its bottom right. */
+.dendrite-find-below {
+    position: absolute;
+    right: 6px;
+    bottom: -9px;
+    z-index: 2;
+    padding: 0 6px;
+    border-radius: var(--radius-s);
+    font-size: var(--font-ui-smaller);
+    color: var(--text-on-accent);
+    background: var(--interactive-accent);
+}
+
+::highlight(dendrite-find) {
+    background-color: var(--text-highlight-bg);
+}
+
+::highlight(dendrite-find-current) {
+    color: var(--text-on-accent);
+    background-color: var(--interactive-accent);
+}

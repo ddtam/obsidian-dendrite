@@ -55,7 +55,8 @@ Obsidian has no public API for putting its editor inside another view, so Dendri
 | Alt+↑ / Alt+↓ | Move the card among its siblings |
 | Alt+→ / Alt+← | Indent under the card above / outdent |
 | Ctrl+Backspace | Delete the card and its children |
-| Ctrl+Z | Undo the last structural change |
+| Ctrl+Z | Undo the last structural change; in a new card still empty, undo making it |
+| Ctrl+F | Find in the cards, in either mode |
 
 ### Vim-style keys
 
@@ -72,6 +73,9 @@ In normal mode, shown as **NORMAL** in the bar, no card is being edited and lett
 | dd | Delete the card and its children |
 | u | Undo |
 | gg / G | First / last card in the column |
+| / | Find in the cards |
+
+**Find** (Ctrl+F, or `/`) searches the cards' notes, so cards far from view count too. Separate words must all appear in a card, in any order, and `"quoted text"` must appear exactly; the bar's toggles add match case, a regular expression in place of words, and narrowing to the selected card's branch. Cards without a match fade, each card shows how many matches its branch holds, and the current match is highlighted in its card. Enter and Shift+Enter step through matches in reading order, Ctrl+Enter edits the card with the match selected, and Escape closes the bar.
 
 **Drag a card** with the mouse or a pen to move it with its branch: any card from anywhere on it, and the selected card by the icon in its top right corner, which turns into a grip under the pointer, so its text can still be selected. Over the top half of another card it goes above it, over the bottom half below it, and over the card's right edge it becomes that card's last child. An accent line shows where it will land, columns scroll near their ends, Escape cancels, and Ctrl+Z undoes a drop. A card cannot be dropped into its own branch.
 

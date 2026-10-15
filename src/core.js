@@ -936,7 +936,89 @@ function measure(count, unit, wordsPerPage) {
     return count.words / (wordsPerPage || 500);
 }
 
+// ---- find ------------------------------------------------------------------
+
+/**
+ * A find query as patterns. Plain text is words that must all appear in
+ * a card, in any order, with "quoted text" kept as one exact phrase;
+ * regex mode is one pattern. Returns { patterns, error }.
+ */
+function findPatterns(query, opts = {}) {
+    const flags = 'g' + (opts.matchCase ? '' : 'i');
+    const q = (query || '').trim();
+    if (!q) return { patterns: [] };
+    if (opts.regex) {
+        try {
+            return { patterns: [new RegExp(q, flags)] };
+        } catch (err) {
+            return { patterns: [], error: err.message };
+        }
+    }
+    const terms = [];
+    const re = /"([^"]*)"|(\S+)/g;
+    let m;
+    while ((m = re.exec(q)) !== null) {
+        const t = m[1] !== undefined ? m[1] : m[2];
+        if (t) terms.push(t);
+    }
+    const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return { patterns: terms.map((t) => new RegExp(esc(t), flags)) };
+}
+
+/**
+ * Every match of a query in reading order: `ids` in reading order,
+ * `bodyOf(id)` a card's text. A card matches only when every pattern
+ * does. Returns { matches: [{ id, start, end, comment }], error }, where
+ * `comment` marks a match inside %% comments %%.
+ */
+function findMatches(ids, bodyOf, query, opts = {}) {
+    const { patterns, error } = findPatterns(query, opts);
+    const matches = [];
+    if (!patterns.length) return { matches, error };
+    for (const id of ids) {
+        const body = bodyOf(id) || '';
+        const found = [];
+        let all = true;
+        for (const p of patterns) {
+            p.lastIndex = 0;
+            let hit = false;
+            let m;
+            while ((m = p.exec(body)) !== null) {
+                if (!m[0].length) {
+                    p.lastIndex += 1;
+                    continue;
+                }
+                hit = true;
+                found.push({ start: m.index, end: m.index + m[0].length });
+            }
+            if (!hit) {
+                all = false;
+                break;
+            }
+        }
+        if (!all) continue;
+        const comments = [];
+        const cre = /%%[\s\S]*?%%/g;
+        let c;
+        while ((c = cre.exec(body)) !== null) {
+            comments.push([c.index, c.index + c[0].length]);
+        }
+        // In text order, overlaps dropped, so each stretch counts once.
+        found.sort((a, b) => a.start - b.start || b.end - a.end);
+        let last = -1;
+        for (const f of found) {
+            if (f.start < last) continue;
+            last = f.end;
+            matches.push({ id, start: f.start, end: f.end,
+                           comment: comments.some(
+                               ([a, b]) => f.start >= a && f.end <= b) });
+        }
+    }
+    return { matches, error };
+}
+
 module.exports = {
+    findPatterns, findMatches,
     parseLimit, formatLimit, countText, measure, sectionNumbers,
     alignColumns, parseAmount, convert, quotas, fmtNum,
     splitText, mergeText,

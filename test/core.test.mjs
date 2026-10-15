@@ -598,3 +598,34 @@ test('footnotes are renumbered across cards and gathered at the end', () => {
     assert.deepEqual(r.segments[0].notes, [{ n: 1, text: 'Note B1.' }],
                      'each segment keeps its own notes for the preview');
 });
+
+test('find: words must all be in a card, quotes keep a phrase, regex ' +
+     'and case are options', () => {
+    const bodies = {
+        A: 'Clonal hematopoiesis with TET2 loss.',
+        B: 'TET2 alone here. %% clonal note %%',
+        C: 'Hematopoiesis that is clonal, and TET2.',
+        D: 'Nothing.',
+    };
+    const ids = ['A', 'B', 'C', 'D'];
+    const run = (q, o = {}) => c.findMatches(ids, (id) => bodies[id], q, o);
+    const at = (r) => r.matches.map((m) => m.id + ':' +
+        bodies[m.id].slice(m.start, m.end));
+    assert.deepEqual(at(run('tet2 clonal')),
+                     ['A:Clonal', 'A:TET2', 'B:TET2', 'B:clonal',
+                      'C:clonal', 'C:TET2'],
+                     'every word in the card, in text order, any case');
+    assert.equal(run('tet2 clonal').matches.find(
+        (m) => m.id === 'B' && /clonal/i.test(
+            bodies.B.slice(m.start, m.end))).comment, true,
+                 'a match inside a comment is marked');
+    assert.deepEqual(at(run('"clonal hematopoiesis"')),
+                     ['A:Clonal hematopoiesis'], 'a quoted phrase is exact');
+    assert.deepEqual(at(run('Clonal', { matchCase: true })), ['A:Clonal']);
+    assert.deepEqual(at(run('TET\\d (loss|alone)', { regex: true })),
+                     ['A:TET2 loss', 'B:TET2 alone']);
+    assert.match(run('(', { regex: true }).error, /./, 'a bad regex says so');
+    assert.deepEqual(run('').matches, []);
+    assert.deepEqual(run('x*', { regex: true }).matches, [],
+                     'empty matches are skipped');
+});

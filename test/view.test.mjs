@@ -955,7 +955,8 @@ test('dragging a card drops it above, below or into another, with undo',
     h.window.dispatchEvent(ev('pointerup', 30, 30));
     await tick(10);
     assert.equal(ids(), '- [[G-ccccc|C]]\n- [[G-aaaaa|A]]\n' +
-                 '    - [[G-bbbbb|B]]\n', 'an unselected card drags by its body');
+                 '    - [[G-bbbbb|B]]\n',
+                 'an unselected card drags by its body');
     await view.doUndo();
 
     await drag('G-ccccc', { id: 'G-aaaaa', where: 'above' });
@@ -1224,4 +1225,122 @@ test('a card split from one whose role was set takes that role', async () => {
     const next = view.root.children[3].id;
     assert.doesNotMatch(props(next), /dendrite_role/);
     assert.match(props(next), /dendrite_status: draft/);
+});
+
+test('find fades cards without a match, counts each branch, steps ' +
+     'through matches and edits at one', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Aims]]\n' +
+        '    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n- [[G-ddddd|D]]\n',
+        { 'G-aaaaa': '# Aims', 'G-bbbbb': 'TET2 drives clonal growth.',
+          'G-ccccc': 'Clonal only.',
+          'G-ddddd': 'Clonal and TET2. %% TET2 again %%' });
+    // `/` opens it in vim mode, as Ctrl+F does.
+    view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
+        { key: '/', bubbles: true, cancelable: true }));
+    const f = view.find;
+    assert.ok(f && view.contentEl.contains(f.input),
+              'the find bar is open');
+    const search = async (q) => {
+        f.input.value = q;
+        f.input.dispatchEvent(new h.window.Event('input'));
+        await tick(150);
+    };
+    // jsdom has no highlight registry; a stand-in records the ranges.
+    h.window.CSS = { highlights: new Map() };
+    h.window.Highlight = class { constructor(...r) { this.ranges = r; } };
+    await search('tet2 clonal');
+    assert.equal(f.countEl.textContent, '1 of 5 in 2 cards, 1 in comments');
+    const lit = (name) => (h.window.CSS.highlights.get(name) ||
+        { ranges: [] }).ranges.map((r) => r.toString());
+    assert.deepEqual(lit('dendrite-find-current'), ['TET2'],
+                     'the current match is painted');
+    assert.ok(lit('dendrite-find').includes('clonal'));
+    const card = (id) => view.cardEls.get(id);
+    assert.ok(view.board.hasClass('is-finding'));
+    assert.ok(card('G-bbbbb').hasClass('is-match'));
+    assert.ok(!card('G-ccccc').hasClass('is-match'), 'C lacks TET2');
+    assert.equal(card('G-aaaaa').querySelector('.dendrite-find-below')
+        .textContent, '2 below');
+    assert.equal(view.active, 'G-bbbbb', 'went to the first match');
+    await view.findStep(1);
+    await view.findStep(1);
+    assert.equal(view.active, 'G-ddddd');
+    assert.equal(f.countEl.textContent,
+                 '3 of 5 in 2 cards, 1 in comments');
+    await view.findStep(-1);
+    await view.findStep(-1);
+    await view.findStep(-1);
+    assert.equal(f.index, 4, 'stepping back from the first wraps round');
+    // Editing at a match selects it in the card.
+    await view.findStep(-1);
+    await view.editAtMatch();
+    assert.equal(view.editing.id, 'G-ddddd');
+    const ta = view.editing.ta;
+    assert.equal(ta.value.slice(ta.selectionStart, ta.selectionEnd), 'TET2');
+    // Options: match case, regex, and a bad pattern.
+    await view.endEdit();
+    f.matchCase = true;
+    await search('Clonal');
+    assert.equal(f.countEl.textContent, '2 of 2 in 2 cards',
+                 'from the selected card, D, onwards');
+    f.matchCase = false;
+    f.regex = true;
+    await search('TET\\d (drives|and)');
+    assert.equal(f.countEl.textContent, '1 of 1 in 1 card');
+    await search('(');
+    assert.equal(f.countEl.textContent, 'Not a valid pattern');
+    assert.ok(!view.board.hasClass('is-finding'));
+    view.closeFind();
+    assert.equal(view.find, null);
+    assert.equal(h.window.CSS.highlights.size, 0, 'highlights cleared');
+    delete h.window.CSS;
+    delete h.window.Highlight;
+    assert.ok(!view.contentEl.contains(f.el), 'the bar is gone');
+    assert.ok(!card('G-bbbbb').hasClass('is-match'));
+    assert.equal(view.contentEl.querySelector('.dendrite-find-below'), null);
+});
+
+test('Ctrl+Z in a new card still empty undoes making it', async () => {
+    const { view, text } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n', { 'G-aaaaa': 'A' });
+    view.active = 'G-aaaaa';
+    const undo = view.scope.keys.find((k) => k.mods.includes('Mod') &&
+                                     k.key === 'z').fn;
+    await view.insert('below');
+    const blank = view.active;
+    assert.equal(view.editing.id, blank);
+    assert.equal(undo(), false, 'handled here, not by the text');
+    await tick(20);
+    assert.equal(view.editing, null);
+    assert.equal(view.byId.has(blank), false, 'the card is gone');
+    assert.equal(text(cardPath(blank)), undefined, 'and its note');
+    assert.equal(view.active, 'G-aaaaa');
+    // Once anything is typed, Ctrl+Z is the text's own undo.
+    await view.insert('below');
+    type(view, 'W');
+    assert.equal(undo(), true, 'passed on to the text');
+    type(view, '');
+    assert.equal(undo(), true, 'even once cleared again, to bring it back');
+    assert.ok(view.editing);
+});
+
+test('moving the board tells the window it scrolled, so other plugins\' ' +
+     'popups close', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    h.window.document.body.appendChild(view.contentEl);
+    let scrolls = 0;
+    const heard = () => { scrolls++; };
+    h.window.addEventListener('scroll', heard, { capture: true });
+    const col = view.board.querySelector('.dendrite-col');
+    col.dispatchEvent(new h.window.WheelEvent('wheel',
+        { deltaY: 40, bubbles: true, cancelable: true }));
+    assert.ok(scrolls > 0, 'a wheel scroll is announced');
+    scrolls = 0;
+    view.render();
+    assert.ok(scrolls > 0, 'so is redrawing the board');
+    h.window.removeEventListener('scroll', heard, { capture: true });
+    view.contentEl.remove();
 });

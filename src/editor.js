@@ -64,6 +64,18 @@ function obsidianEditor(app, parent, opts) {
                 opts.onEscape();
                 return false;
             });
+            // Ctrl+Z in a new, empty card takes the card back; otherwise
+            // it is the text's own undo.
+            if (opts.onUndo) {
+                this.scope.register(['Mod'], 'z', () => !opts.onUndo());
+            }
+            // Find searches the manuscript, not this one card.
+            if (opts.onFind) {
+                this.scope.register(['Mod'], 'f', () => {
+                    opts.onFind();
+                    return false;
+                });
+            }
             this.owner.editMode = this;
             this.owner.editor = this.editor;
             // Link suggestions and rendering resolve against the card.

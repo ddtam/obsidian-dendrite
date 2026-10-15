@@ -279,9 +279,20 @@ class DendriteView extends ItemView {
         const focused = this.pageDoc().activeElement;
         const keep = ed && ed.editor.el.contains(focused) &&
             ed.editor.selection();
+        const f = this.find;
+        const typing = f && f.input === focused &&
+            [f.input.selectionStart, f.input.selectionEnd];
         this.drawBoard();
         if (keep && this.editing === ed && ed.editor.el.isConnected) {
             ed.editor.focusAt(keep[0], keep[1]);
+        }
+        // The find bar is drawn again with the board, and keeps its place.
+        if (this.find) {
+            this.renderFind();
+            if (typing) {
+                this.find.input.focus();
+                this.find.input.setSelectionRange(typing[0], typing[1]);
+            }
         }
     }
 
@@ -355,6 +366,8 @@ class DendriteView extends ItemView {
             inner.createDiv({ cls: 'dendrite-spacer' });
         });
         this.applyActive(false);
+        // The cards were rebuilt: anything floating over the old ones goes.
+        this.announceScroll();
         this.updateNumbers();
         this.updateRoles();
         this.updateStatuses();
@@ -527,6 +540,7 @@ class DendriteView extends ItemView {
             // the centre if the card is on the active card's lineage.
             if (this.lineage && this.lineage.has(id)) this.centre(false);
             this.scheduleFlow();
+            if (this.find) this.paintFind();
         }
     }
 
@@ -687,6 +701,19 @@ class DendriteView extends ItemView {
         }
         this.offsets[d] = v;
         inner.style.transform = `translateY(${-v}px)`;
+        this.announceScroll();
+    }
+
+    /**
+     * Columns move by transform, which the browser does not count as a
+     * scroll, so popups that close on scroll, such as another plugin's
+     * citation tooltip, would stay behind. A scroll event says the
+     * content moved; the board's own scroll listener ignores it.
+     */
+    announceScroll() {
+        if (!this.board) return;
+        const win = this.pageWin();
+        this.board.dispatchEvent(new win.Event('scroll'));
     }
 
     /**
@@ -997,7 +1024,13 @@ class DendriteView extends ItemView {
             this.deleteActive();
             return false;
         });
+        // Find, in edit mode too: it searches the whole manuscript.
+        s.register(['Mod'], 'f', () => {
+            this.openFind();
+            return false;
+        });
         s.register(['Mod'], 'z', () => {
+            if (this.undoEmptyNew()) return false;
             if (this.editing) return true;
             this.doUndo();
             return false;
@@ -1208,6 +1241,8 @@ class DendriteView extends ItemView {
             onChange: () => {
                 ed.dirty = true;
                 ed.changed = true;
+                // Typed into, even if cleared again: Ctrl+Z is the text's.
+                ed.fresh = false;
                 // A growing card stays centred while it is written in.
                 this.centre(false);
                 this.scheduleCounts();
@@ -1217,6 +1252,8 @@ class DendriteView extends ItemView {
             },
             onBlur: () => { this.save(ed); },
             onEscape: () => { this.endEdit(); },
+            onFind: () => { this.openFind(); },
+            onUndo: () => this.undoEmptyNew(),
         }, this.plugin.settings.obsidianEditor !== false);
         ed.editor = editor;
         // The text box's own commands (bold, Tab, lists) are Dendrite's;
@@ -1314,6 +1351,7 @@ class DendriteView extends ItemView {
         this.pendingKey = null;
         const k = e.key;
         const act = {
+            '/': () => this.openFind(),
             h: () => this.navigate('left'),
             j: () => this.navigate('down'),
             k: () => this.navigate('up'),
@@ -1599,6 +1637,22 @@ class DendriteView extends ItemView {
         await this.sweepStatuses();
         this.render();
         await this.startEdit(id);
+        // Until something is typed, Ctrl+Z takes the new card back.
+        if (this.editing && this.editing.id === id) this.editing.fresh = true;
+    }
+
+    /**
+     * Ctrl+Z in a card just made and still empty: undo making it, since
+     * the text has nothing of its own to undo. False otherwise.
+     */
+    undoEmptyNew() {
+        const ed = this.editing;
+        if (!ed || !ed.fresh || ed.editor.value.trim()) return false;
+        (async () => {
+            await this.endEdit();
+            await this.doUndo();
+        })();
+        return true;
     }
 
     async structural(op) {
@@ -1737,6 +1791,7 @@ class DendriteView extends ItemView {
         }
         const id = f.basename;
         if (!this.byId.has(id)) return;
+        if (this.find) this.scheduleFind(true);
         if (this.editing && this.editing.id === id) return;
         this.invalidate(id);
         const card = this.cardEls.get(id);
@@ -2268,6 +2323,305 @@ class DendriteView extends ItemView {
         const out = new Map();
         for (const [id, b] of this.bodies) out.set(id, b.body);
         return out;
+    }
+
+    // ---- find ------------------------------------------------------------
+
+    /**
+     * Open the find bar, or focus it when open. Find searches the cards'
+     * notes, not the page, since cards far from view are not rendered.
+     */
+    openFind() {
+        if (!this.find) {
+            const ed = this.editing;
+            this.find = {
+                query: '', matchCase: false, regex: false, branch: null,
+                matches: [], index: -1, error: null, token: 0,
+                returnTo: ed ? { id: ed.id, sel: ed.editor.selection() }
+                    : null,
+            };
+            this.renderFind();
+        }
+        const input = this.find.input;
+        input.focus();
+        input.select();
+    }
+
+    /** The find bar, under the view's bar. */
+    renderFind() {
+        const f = this.find;
+        const bar = this.contentEl.querySelector(':scope > .dendrite-bar');
+        if (!f || !bar) return;
+        if (f.el) f.el.remove();
+        const row = createDiv({ cls: 'dendrite-find' });
+        bar.insertAdjacentElement('afterend', row);
+        f.el = row;
+        const input = row.createEl('input', { type: 'text' });
+        input.placeholder = 'Find in cards: words, "a phrase"';
+        input.value = f.query;
+        input.spellcheck = false;
+        f.input = input;
+        input.addEventListener('input', () => {
+            f.query = input.value;
+            this.scheduleFind(false);
+        });
+        const toggle = (key, icon, title, on) => {
+            const b = row.createEl('button', { cls: 'dendrite-find-opt' });
+            setIcon(b, icon);
+            b.setAttr('aria-label', title);
+            b.toggleClass('is-on', !!f[key]);
+            b.onclick = () => {
+                f[key] = on();
+                b.toggleClass('is-on', !!f[key]);
+                this.runFind(false);
+                input.focus();
+            };
+        };
+        toggle('matchCase', 'case-sensitive', 'Match case',
+               () => !f.matchCase);
+        toggle('regex', 'regex', 'Regular expression', () => !f.regex);
+        toggle('branch', 'git-branch', 'Only the selected card\'s branch',
+               () => (f.branch ? null : this.active));
+        f.countEl = row.createSpan({ cls: 'dendrite-find-count' });
+        const btn = (icon, title, fn) => {
+            const b = row.createEl('button', { cls: 'dendrite-find-opt' });
+            setIcon(b, icon);
+            b.setAttr('aria-label', title);
+            b.onclick = fn;
+        };
+        btn('chevron-up', 'Previous match (Shift+Enter)',
+            () => this.findStep(-1));
+        btn('chevron-down', 'Next match (Enter)', () => this.findStep(1));
+        btn('x', 'Close (Escape)', () => this.closeFind());
+        // Its own keys while typing in it, above the board's.
+        const scope = new Scope(this.app.scope);
+        scope.register([], 'Enter', () => { this.findStep(1); return false; });
+        scope.register(['Shift'], 'Enter', () => {
+            this.findStep(-1);
+            return false;
+        });
+        scope.register(['Mod'], 'Enter', () => {
+            this.editAtMatch();
+            return false;
+        });
+        scope.register([], 'Escape', () => { this.closeFind(); return false; });
+        scope.register(['Mod'], 'f', () => { input.select(); return false; });
+        f.scope = scope;
+        input.addEventListener('focus', () => {
+            if (this.app.keymap) this.app.keymap.pushScope(scope);
+        });
+        input.addEventListener('blur', () => {
+            if (this.app.keymap) this.app.keymap.popScope(scope);
+        });
+        this.showFind();
+    }
+
+    scheduleFind(keep) {
+        clearTimeout(this.findTimer);
+        this.findTimer = setTimeout(() => this.runFind(keep), 80);
+    }
+
+    /**
+     * Search every card, or the branch find was narrowed to. With `keep`
+     * the current match stays where it is, as after an edit; otherwise
+     * find goes to the first match at or after the selected card.
+     */
+    async runFind(keep) {
+        const f = this.find;
+        if (!f) return;
+        const token = ++f.token;
+        const bodies = await this.loadBodies();
+        if (this.find !== f || token !== f.token) return;
+        const ed = this.editing;
+        const bodyOf = (id) => (ed && ed.id === id ? ed.editor.value
+            : bodies.get(id));
+        const top = f.branch && this.byId.get(f.branch);
+        const nodes = top ? [top, ...core.descendants(top)]
+            : core.allNodes(this.root);
+        const ids = nodes.map((n) => n.id);
+        const r = core.findMatches(ids, bodyOf, f.query, f);
+        const was = f.matches[f.index];
+        f.matches = r.matches;
+        f.error = r.error || null;
+        if (!f.matches.length) {
+            f.index = -1;
+        } else if (keep && was) {
+            const k = f.matches.findIndex((m) => m.id === was.id &&
+                m.start >= was.start);
+            f.index = k >= 0 ? k : Math.min(f.index, f.matches.length - 1);
+        } else {
+            const order = new Map(ids.map((id, k) => [id, k]));
+            const here = order.has(this.active) ? order.get(this.active) : 0;
+            const k = f.matches.findIndex((m) => order.get(m.id) >= here);
+            f.index = k >= 0 ? k : 0;
+        }
+        if (!keep && f.index >= 0) await this.goToMatch(f.index);
+        else this.showFind();
+    }
+
+    /** Count, fading, the matches below each card, and highlights. */
+    showFind() {
+        const f = this.find;
+        if (!f || !this.board) return;
+        const n = f.matches.length;
+        const per = new Map();
+        for (const m of f.matches) per.set(m.id, (per.get(m.id) || 0) + 1);
+        if (f.countEl) {
+            const comments = f.matches.filter((m) => m.comment).length;
+            f.countEl.setText(f.error ? 'Not a valid pattern' :
+                !f.query.trim() ? '' :
+                !n ? 'No matches' :
+                `${f.index + 1} of ${n} in ${per.size} card` +
+                (per.size === 1 ? '' : 's') +
+                (comments ? `, ${comments} in comments` : ''));
+            f.countEl.toggleClass('is-error', !!f.error);
+        }
+        const on = !!f.query.trim() && !f.error;
+        this.board.toggleClass('is-finding', on);
+        // What each card holds below it, so a branch shows its matches
+        // before it is opened.
+        const below = new Map();
+        for (const [id, k] of per) {
+            const node = this.byId.get(id);
+            for (let p = node && node.parent; p && p.id; p = p.parent) {
+                below.set(p.id, (below.get(p.id) || 0) + k);
+            }
+        }
+        for (const [id, card] of this.cardEls) {
+            card.toggleClass('is-match', on && per.has(id));
+            const old = card.querySelector(':scope > .dendrite-find-below');
+            if (old) old.remove();
+            if (on && below.get(id)) {
+                const chip = card.createDiv({ cls: 'dendrite-find-below',
+                    text: `${below.get(id)} below` });
+                chip.setAttr('aria-label', 'Matches in this card\'s branch');
+            }
+        }
+        this.paintFind();
+    }
+
+    /** Step to the next match, or back with -1, wrapping round. */
+    async findStep(dir) {
+        const f = this.find;
+        if (!f || !f.matches.length) return;
+        const n = f.matches.length;
+        await this.goToMatch((f.index + dir + n) % n);
+    }
+
+    async goToMatch(i) {
+        const f = this.find;
+        const m = f && f.matches[i];
+        if (!m) return;
+        f.index = i;
+        if (this.editing && this.editing.id !== m.id) await this.endEdit();
+        if (this.find !== f) return;
+        if (this.active !== m.id) {
+            const node = this.byId.get(m.id);
+            if (node && node.parent && node.parent.id) {
+                this.lastChild.set(node.parent.id, m.id);
+            }
+            this.active = m.id;
+        }
+        this.applyActive();
+        this.showFind();
+        // Ending an edit hands focus to the board; typing stays in find.
+        if (f.input && f.input.isConnected) f.input.focus();
+    }
+
+    /** Edit the card holding the current match, with the match selected. */
+    async editAtMatch() {
+        const f = this.find;
+        const m = f && f.matches[f.index];
+        if (!m) return;
+        await this.startEdit(m.id);
+        if (this.editing && this.editing.id === m.id) {
+            this.editing.editor.focusAt(m.start, m.end);
+        }
+    }
+
+    closeFind() {
+        const f = this.find;
+        if (!f) return;
+        this.find = null;
+        clearTimeout(this.findTimer);
+        if (this.app.keymap && f.scope) this.app.keymap.popScope(f.scope);
+        if (f.el) f.el.remove();
+        if (this.board) this.board.removeClass('is-finding');
+        for (const card of this.cardEls.values()) {
+            card.removeClass('is-match');
+            const chip = card.querySelector(':scope > .dendrite-find-below');
+            if (chip) chip.remove();
+        }
+        this.paintFind();
+        const back = f.returnTo;
+        if (back && this.editing && this.editing.id === back.id) {
+            this.editing.editor.focusAt(back.sel[0], back.sel[1]);
+        } else {
+            this.contentEl.focus();
+        }
+    }
+
+    /**
+     * Highlight matches in the rendered cards, without changing them:
+     * the browser's highlight registry paints ranges over the text. The
+     * query is run again over each card's rendered text, since markdown
+     * syntax does not render; the current match is the same-numbered
+     * match in its card.
+     */
+    paintFind() {
+        const win = this.pageWin();
+        const reg = win.CSS && win.CSS.highlights;
+        if (!reg || typeof win.Highlight !== 'function') return;
+        reg.delete('dendrite-find');
+        reg.delete('dendrite-find-current');
+        const f = this.find;
+        if (!f || !f.matches.length) return;
+        const { patterns } = core.findPatterns(f.query, f);
+        const cur = f.matches[f.index];
+        const nth = cur ? f.matches.filter((m) => m.id === cur.id &&
+            m.start < cur.start).length : -1;
+        const doc = this.pageDoc();
+        const all = [];
+        let current = null;
+        const ids = new Set(f.matches.map((m) => m.id));
+        for (const id of ids) {
+            const card = this.cardEls.get(id);
+            const md = card && card.querySelector('.dendrite-md');
+            if (!md || (this.editing && this.editing.id === id)) continue;
+            const nodes = [];
+            let text = '';
+            const walker = doc.createTreeWalker(md, 4);
+            for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+                nodes.push({ t, at: text.length });
+                text += t.data;
+            }
+            const spans = [];
+            for (const p of patterns) {
+                p.lastIndex = 0;
+                let m;
+                while ((m = p.exec(text)) !== null) {
+                    if (!m[0].length) { p.lastIndex += 1; continue; }
+                    spans.push([m.index, m.index + m[0].length]);
+                }
+            }
+            spans.sort((a, b) => a[0] - b[0]);
+            const point = (k) => {
+                let i = nodes.length - 1;
+                while (i > 0 && nodes[i].at > k) i -= 1;
+                return [nodes[i].t, k - nodes[i].at];
+            };
+            spans.forEach(([a, b], k) => {
+                const r = doc.createRange();
+                r.setStart(...point(a));
+                r.setEnd(...point(b));
+                if (id === (cur && cur.id) && k === nth) current = r;
+                else all.push(r);
+            });
+        }
+        reg.set('dendrite-find', new win.Highlight(...all));
+        if (current) {
+            reg.set('dendrite-find-current', new win.Highlight(current));
+        }
     }
 
     // ---- export ----------------------------------------------------------
