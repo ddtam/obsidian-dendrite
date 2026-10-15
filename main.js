@@ -2125,9 +2125,13 @@ var DendriteView = class extends ItemView {
   // ---- dragging cards -------------------------------------------------
   onDragDown(e) {
     if (e.button !== 0 || e.pointerType === "touch") return;
-    if (!e.target.closest(".dendrite-grip")) return;
     const card = e.target.closest(".dendrite-card");
     if (!card) return;
+    const grip = e.target.closest(".dendrite-grip");
+    if (!grip) {
+      if (card.dataset.id === this.active) return;
+      if (e.target.closest("a, button, input, textarea, .dendrite-cm, .dendrite-quota, .dendrite-toolbar")) return;
+    }
     e.preventDefault();
     this.cancelDrag();
     const win = this.pageWin();

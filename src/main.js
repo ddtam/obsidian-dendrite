@@ -984,9 +984,18 @@ class DendriteView extends ItemView {
 
     onDragDown(e) {
         if (e.button !== 0 || e.pointerType === 'touch') return;
-        if (!e.target.closest('.dendrite-grip')) return;
         const card = e.target.closest('.dendrite-card');
         if (!card) return;
+        // Any card but the selected one drags from anywhere on it, for
+        // rearranging broadly; the selected card only by its handle, so
+        // its text can still be selected. Controls never start a drag.
+        const grip = e.target.closest('.dendrite-grip');
+        if (!grip) {
+            if (card.dataset.id === this.active) return;
+            if (e.target.closest('a, button, input, textarea, ' +
+                                 '.dendrite-cm, .dendrite-quota, ' +
+                                 '.dendrite-toolbar')) return;
+        }
         // No text selection or focus change from the press.
         e.preventDefault();
         this.cancelDrag();

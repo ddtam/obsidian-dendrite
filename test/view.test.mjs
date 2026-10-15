@@ -934,15 +934,27 @@ test('dragging a card drops it above, below or into another, with undo',
     h.window.dispatchEvent(ev('pointerup', 2, 2));
     await tick(5);
     assert.equal(ids(), index.replace(/^---[\s\S]*?---\n/, ''));
-    // Pressing a card's text selects text; only the handle drags.
+    // The selected card's text selects text; only its handle drags.
+    await view.select('G-ccccc');
     over = { id: 'G-aaaaa', where: 'above' };
-    view.cardEls.get('G-ccccc').querySelector('.dendrite-card-body')
-        .dispatchEvent(ev('pointerdown', 0, 0));
+    const body = (id) => view.cardEls.get(id)
+        .querySelector('.dendrite-card-body');
+    body('G-ccccc').dispatchEvent(ev('pointerdown', 0, 0));
     h.window.dispatchEvent(ev('pointermove', 30, 30));
     h.window.dispatchEvent(ev('pointerup', 30, 30));
     await tick(5);
     assert.equal(ids(), index.replace(/^---[\s\S]*?---\n/, ''),
-                 'a press on the text does not drag');
+                 'a press on the selected card\'s text does not drag');
+    // Any other card drags from anywhere on it.
+    await view.select('G-aaaaa');
+    over = { id: 'G-aaaaa', where: 'above' };
+    body('G-ccccc').dispatchEvent(ev('pointerdown', 0, 0));
+    h.window.dispatchEvent(ev('pointermove', 30, 30));
+    h.window.dispatchEvent(ev('pointerup', 30, 30));
+    await tick(10);
+    assert.equal(ids(), '- [[G-ccccc|C]]\n- [[G-aaaaa|A]]\n' +
+                 '    - [[G-bbbbb|B]]\n', 'an unselected card drags by its body');
+    await view.doUndo();
 
     await drag('G-ccccc', { id: 'G-aaaaa', where: 'above' });
     assert.equal(ids(), '- [[G-ccccc|C]]\n- [[G-aaaaa|A]]\n' +
