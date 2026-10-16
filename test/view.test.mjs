@@ -1716,4 +1716,12 @@ test('Escape closes find from its box or from the board', async () => {
     view.openFind();
     key(view.contentEl, 'Escape');
     assert.equal(view.find, null, 'closed from the board');
+    // With nothing to close, Escape stops at Dendrite: Obsidian's own
+    // Escape takes a popout's focus back to the main window. What
+    // Obsidian does with a key passed on is not in the harness.
+    assert.equal(esc(), false, 'not passed on to Obsidian');
+    const ev = new h.window.KeyboardEvent('keydown', { key: 'Escape',
+        bubbles: true, cancelable: true });
+    view.contentEl.dispatchEvent(ev);
+    assert.ok(ev.defaultPrevented, 'nor from the board');
 });

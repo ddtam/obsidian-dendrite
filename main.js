@@ -2379,7 +2379,7 @@ var DendriteView = class extends ItemView {
         this.closeFind();
         return false;
       }
-      return true;
+      return false;
     });
     s.register(["Mod"], "Enter", () => {
       if (this.editing) return true;
@@ -2733,9 +2733,9 @@ var DendriteView = class extends ItemView {
     if (this.editing || e.defaultPrevented) return;
     if (e.target.closest("input, textarea, select, .dendrite-cm")) return;
     if (this.arrowKey(e)) return;
-    if (e.key === "Escape" && this.find) {
+    if (e.key === "Escape") {
       e.preventDefault();
-      this.closeFind();
+      if (this.find) this.closeFind();
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;

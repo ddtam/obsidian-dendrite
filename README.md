@@ -177,6 +177,18 @@ Footnotes are numbered across the whole manuscript. Each card can number its own
 
 PDF and Word go through [Pandoc](https://pandoc.org) on the desktop, PDF with `xelatex` from TeX Live. Citations are written in cards as `[@citekey]` and fetched at export, exactly the keys used, from Zotero through [Better BibTeX](https://retorque.re/zotero-better-bibtex/); a key the library lacks stops the export and is named. With Zotero closed, a fallback `.bib` set in the settings is used, or the export stops. The citation style is set per manuscript in its Settings, as a CSL file in the vault; with none, Pandoc's default, Chicago author-date, is used. A PDF opens in a pane beside the board, and a Word file in the system's default app. Obsidian's links become their text and embedded images real images.
 
+## Export from the command line
+
+`scripts/dendrite-export.mjs` shows what a manuscript exports without Obsidian, for checking a draft from a terminal or another tool. It calls the same functions Export, the preview and the quota bars use, and only reads files.
+
+```
+node scripts/dendrite-export.mjs <index.md>            # the markdown Export writes
+node scripts/dendrite-export.mjs <index.md> --report   # words, pages and quota per top-level section
+node scripts/dendrite-export.mjs <index.md> --map      # each card: role, depth, number, printed and left-out words
+```
+
+`--json` gives the report or map as JSON. Cards are found by file name in the index's folder, then anywhere in the vault outside dot-folders. Properties are read as flat `key: value` lines, as Dendrite writes them. A test exports one manuscript both ways and checks the two agree.
+
 ## Development
 
 ```bash

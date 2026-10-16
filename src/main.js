@@ -1058,7 +1058,9 @@ class DendriteView extends ItemView {
                 this.closeFind();
                 return false;
             }
-            return true;
+            // Nothing to close: the key stops here, since Obsidian's own
+            // Escape takes a popout's focus back to the main window.
+            return false;
         });
         // In edit mode every key belongs to the card's text, Ctrl+arrows
         // for moving by word included; Escape is the only way out. These
@@ -1430,10 +1432,11 @@ class DendriteView extends ItemView {
         // closes, so they are also read here; defaultPrevented means the
         // scope already handled the key.
         if (this.arrowKey(e)) return;
-        // Escape closes find here too, for when that scope is not active.
-        if (e.key === 'Escape' && this.find) {
+        // Escape closes find here too, for when that scope is not active,
+        // and otherwise goes no further, as in the scope.
+        if (e.key === 'Escape') {
             e.preventDefault();
-            this.closeFind();
+            if (this.find) this.closeFind();
             return;
         }
         if (e.ctrlKey || e.metaKey || e.altKey) return;
