@@ -639,6 +639,28 @@
     margin-top: 0;
 }
 
+/* Footnotes gathered under a section or at the end: each card's own
+   list is hidden, and the gathered list is Obsidian's own, unchanged
+   but for its back links, which have nowhere to go. */
+.dendrite-pblock.is-notes-gathered .footnotes,
+.dendrite-pblock.is-notes-gathered .footnotes-sep,
+.dendrite-pnotes .footnote-backref {
+    display: none;
+}
+
+.dendrite-pnotes {
+    cursor: default;
+}
+
+.dendrite-pnotes:hover {
+    background: none;
+}
+
+.dendrite-bar-select {
+    margin-left: 8px;
+    font-size: var(--font-ui-smaller);
+}
+
 /* Text that does not print, shown dimmed when asked for. */
 .dendrite-left-out {
     color: var(--text-faint);

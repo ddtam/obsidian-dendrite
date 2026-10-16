@@ -599,6 +599,40 @@ test('footnotes are renumbered across cards and gathered at the end', () => {
                      'each segment keeps its own notes for the preview');
 });
 
+test('the preview can gather footnotes by section or at the end, and ' +
+     'numbers inline ones with the rest', () => {
+    assert.equal(c.inlineToReferences(
+        'As mash^[[@urbut2019], p. 3] does.[^1] `^[x]`\n' +
+        '```\n^[y]\n```\n[^1]: Kept.'),
+        'As mash[^dendrite-inline-1] does.[^1] `^[x]`\n```\n^[y]\n```\n' +
+        '[^1]: Kept.\n\n[^dendrite-inline-1]: [@urbut2019], p. 3',
+        'nested brackets close the note; code is left alone');
+    const r = c.renumberFootnotes([
+        { id: 'A', text: c.inlineToReferences('a^[[@k]] b[^x] c[^x]\n\n' +
+                                              '[^x]: X.') },
+        { id: 'B', text: 'd[^1]\n\n[^1]: Y.' }]).segments;
+    assert.deepEqual(r.map((x) => x.refs), [[1, 2], [3]],
+                     'reading order, inline included; each number once');
+    assert.deepEqual(r[0].notes, [{ n: 1, text: '[@k]' },
+                                  { n: 2, text: 'X.' }]);
+    const segs = [
+        { id: 'A', depth: 0, text: '# A', notes: [] },
+        { id: 'B', depth: 1, text: 'b[^1]', notes: [{ n: 1, text: 'one' }] },
+        { id: 'C', depth: 2, text: 'c[^2]', notes: [{ n: 2, text: 'two' }] },
+        { id: 'D', depth: 0, text: '# D', notes: [] },
+        { id: 'E', depth: 0, text: 'e[^3]', notes: [{ n: 3, text: 'three' }] },
+    ];
+    const shape = (out) => out.map((s) => s.gathered ?
+        'notes:' + s.gathered.map((x) => x.n).join(',') : s.id);
+    assert.deepEqual(shape(c.gatherFootnotes(segs, 'card')),
+                     ['A', 'B', 'C', 'D', 'E'], 'card: unchanged');
+    assert.deepEqual(shape(c.gatherFootnotes(segs, 'section')),
+                     ['A', 'B', 'C', 'notes:1,2', 'D', 'E', 'notes:3'],
+                     'section: after each top-level section with notes');
+    assert.deepEqual(shape(c.gatherFootnotes(segs, 'end')),
+                     ['A', 'B', 'C', 'D', 'E', 'notes:1,2,3']);
+});
+
 test('find: words must all be in a card, quotes keep a phrase, regex ' +
      'and case are options', () => {
     const bodies = {

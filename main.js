@@ -325,9 +325,15 @@ var require_core = __commonJS({
           if (!local.has(label)) local.set(label, ++next);
           return local.get(label);
         };
+        const refs = [];
         const body = kept.join("\n").split(/(`[^`\n]*`)/).map((part) => part.startsWith("`") ? part : part.replace(
           /\[\^([^\]\s]+)\](?!:)/g,
-          (m, label) => `[^${renum(label)}]`
+          (m, label) => {
+            const fresh = !local.has(label);
+            const n = renum(label);
+            if (fresh) refs.push(n);
+            return `[^${n}]`;
+          }
         )).join("");
         const notes = [];
         for (const [label, text] of defs) {
@@ -339,7 +345,8 @@ var require_core = __commonJS({
         all.push(...notes);
         return Object.assign({}, seg, {
           text: body.replace(/\n+$/, ""),
-          notes
+          notes,
+          refs
         });
       });
       all.sort((a, b) => a.n - b.n);
@@ -347,6 +354,83 @@ var require_core = __commonJS({
     }
     function footnoteBlock(notes) {
       return notes.map((x) => `[^${x.n}]: ${x.text}`).join("\n");
+    }
+    function inlineToReferences(text) {
+      let fence = null;
+      let k = 0;
+      const defs = [];
+      const lines = (text || "").split("\n").map((line) => {
+        const f = /^\s*(`{3,}|~{3,})/.exec(line);
+        if (fence) {
+          if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = null;
+          return line;
+        }
+        if (f) {
+          fence = f[1];
+          return line;
+        }
+        let out = "";
+        let i = 0;
+        while (i < line.length) {
+          if (line[i] === "`") {
+            const end = line.indexOf("`", i + 1);
+            if (end < 0) {
+              out += line.slice(i);
+              break;
+            }
+            out += line.slice(i, end + 1);
+            i = end + 1;
+            continue;
+          }
+          if (line[i] === "^" && line[i + 1] === "[") {
+            let depth = 0;
+            let j = i + 1;
+            for (; j < line.length; j++) {
+              if (line[j] === "[") depth++;
+              else if (line[j] === "]" && --depth === 0) break;
+            }
+            if (j < line.length) {
+              const label = `dendrite-inline-${++k}`;
+              defs.push(`[^${label}]: ${line.slice(i + 2, j)}`);
+              out += `[^${label}]`;
+              i = j + 1;
+              continue;
+            }
+          }
+          out += line[i++];
+        }
+        return out;
+      });
+      return defs.length ? lines.join("\n") + "\n\n" + defs.join("\n") : lines.join("\n");
+    }
+    function gatherFootnotes(segments, where) {
+      if (where !== "section" && where !== "end") return segments;
+      const out = [];
+      let group = [];
+      let first = null;
+      const flush = () => {
+        if (group.length) {
+          out.push({
+            id: "dendrite-notes:" + first,
+            depth: 0,
+            text: "",
+            left: "",
+            gathered: group
+          });
+        }
+        group = [];
+      };
+      for (const s of segments) {
+        if (where === "section" && s.depth === 0) {
+          flush();
+          first = s.id;
+        }
+        if (first === null) first = s.id;
+        out.push(s);
+        group.push(...s.notes || []);
+      }
+      flush();
+      return out;
     }
     function normaliseMarkdown(text) {
       const out = [];
@@ -757,6 +841,8 @@ var require_core = __commonJS({
       normaliseMarkdown,
       renumberFootnotes,
       footnoteBlock,
+      inlineToReferences,
+      gatherFootnotes,
       INDENT,
       splitFrontmatter,
       parseIndex,
@@ -1287,6 +1373,11 @@ var STATUS_ITEMS = [
   ["revise", "Status: revise", "flag", "3"]
 ];
 var PREVIEW = "dendrite-preview";
+var NOTES_AT = {
+  section: "Notes under each section",
+  end: "Notes at the end",
+  card: "Notes under each card"
+};
 var DEFAULTS = {
   writingFolder: "Writing",
   headingTop: 1,
@@ -4115,6 +4206,7 @@ var DendritePreview = class extends ItemView {
     this.plugin = plugin;
     this.file = null;
     this.showLeft = false;
+    this.notesAt = "section";
     this.blocks = /* @__PURE__ */ new Map();
     this.segs = /* @__PURE__ */ new Map();
     this.bodies = /* @__PURE__ */ new Map();
@@ -4132,12 +4224,14 @@ var DendritePreview = class extends ItemView {
   getState() {
     return {
       file: this.file ? this.file.path : null,
-      showLeft: this.showLeft
+      showLeft: this.showLeft,
+      notesAt: this.notesAt
     };
   }
   async setState(state, result) {
     const f = state && state.file && this.app.vault.getAbstractFileByPath(state.file);
     this.showLeft = !!(state && state.showLeft);
+    this.notesAt = NOTES_AT[state && state.notesAt] ? state.notesAt : "section";
     if (f instanceof TFile) {
       this.file = f;
       this.build();
@@ -4165,19 +4259,15 @@ var DendritePreview = class extends ItemView {
     }));
     this.registerDomEvent(this.contentEl, "click", (e) => {
       const b = e.target.closest(".dendrite-pblock");
-      if (b && this.file) this.plugin.focusCard(
-        this.file,
-        b.dataset.id,
-        false
-      );
+      if (b && !b.dataset.notes && this.file) {
+        this.plugin.focusCard(this.file, b.dataset.id, false);
+      }
     });
     this.registerDomEvent(this.contentEl, "dblclick", (e) => {
       const b = e.target.closest(".dendrite-pblock");
-      if (b && this.file) this.plugin.focusCard(
-        this.file,
-        b.dataset.id,
-        true
-      );
+      if (b && !b.dataset.notes && this.file) {
+        this.plugin.focusCard(this.file, b.dataset.id, true);
+      }
     });
   }
   async onClose() {
@@ -4203,6 +4293,20 @@ var DendritePreview = class extends ItemView {
     toggle.setAttr("aria-label", "Also show, dimmed, the text that does not print: notes and comments");
     box.addEventListener("change", () => {
       this.showLeft = box.checked;
+      this.app.workspace.requestSaveLayout();
+      this.refresh();
+    });
+    const notesAt = bar.createEl(
+      "select",
+      { cls: "dropdown dendrite-bar-select" }
+    );
+    notesAt.setAttr("aria-label", "Where footnotes are shown");
+    for (const [v, label] of Object.entries(NOTES_AT)) {
+      notesAt.createEl("option", { value: v, text: label });
+    }
+    notesAt.value = this.notesAt;
+    notesAt.addEventListener("change", () => {
+      this.notesAt = notesAt.value;
       this.app.workspace.requestSaveLayout();
       this.refresh();
     });
@@ -4248,16 +4352,21 @@ var DendritePreview = class extends ItemView {
       return !!first && first.type === "heading";
     };
     const numbers = fm.dendrite_number_sections === true ? core.sectionNumbers(root.children, hasHeading, roleOf) : null;
-    const segs = core.renumberFootnotes(core.exportSegments(
-      root.children,
-      (id) => {
-        const b = this.bodies.get(id);
-        return b ? b.body : "";
-      },
-      headingTop,
-      numbers,
-      roleOf
-    )).segments;
+    let printed = core.exportSegments(root.children, (id) => {
+      const b = this.bodies.get(id);
+      return b ? b.body : "";
+    }, headingTop, numbers, roleOf);
+    if (this.notesAt !== "card") {
+      printed = printed.map((x) => Object.assign(
+        {},
+        x,
+        { text: core.inlineToReferences(x.text) }
+      ));
+    }
+    const segs = core.gatherFootnotes(
+      core.renumberFootnotes(printed).segments,
+      this.notesAt
+    );
     const statusOf = (id) => {
       const s = props(id).dendrite_status;
       return core.STATUSES.includes(s) ? s : null;
@@ -4281,15 +4390,19 @@ var DendritePreview = class extends ItemView {
       }
     }
     for (const s of segs) {
-      const key = s.text + "\0" + core.footnoteBlock(s.notes || []) + "\0" + (this.showLeft ? s.left : "");
+      const key = s.text + "\0" + core.footnoteBlock(s.notes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "");
       let b = this.blocks.get(s.id);
       if (!b) {
         const el = createDiv({ cls: "dendrite-pblock" });
         el.dataset.id = s.id;
+        if (s.gathered) {
+          el.addClass("dendrite-pnotes");
+          el.dataset.notes = "true";
+        }
         b = { el, key: null, comp: null };
         this.blocks.set(s.id, b);
       }
-      const empty = !s.text && !(this.showLeft && s.left);
+      const empty = !s.text && !(this.showLeft && s.left) && !s.gathered;
       b.el.toggleClass("is-empty", empty);
       b.el.toggleClass("is-left-out-only", !s.text);
       if (b.key !== key) {
@@ -4329,6 +4442,10 @@ var DendritePreview = class extends ItemView {
     b.el.empty();
     const f = this.cardFile(id);
     const path = f ? f.path : this.file.path;
+    if (s.gathered) {
+      await this.renderNotes(s.gathered, b);
+      return;
+    }
     if (s.text) {
       const notes = s.notes && s.notes.length ? "\n\n" + core.footnoteBlock(s.notes) : "";
       await MarkdownRenderer.render(
@@ -4338,6 +4455,8 @@ var DendritePreview = class extends ItemView {
         path,
         b.comp
       );
+      b.el.toggleClass("is-notes-gathered", this.notesAt !== "card");
+      if (this.notesAt !== "card") renumberRefs(b.el, s.refs || []);
     }
     if (this.showLeft && s.left) {
       await MarkdownRenderer.render(
@@ -4347,6 +4466,30 @@ var DendritePreview = class extends ItemView {
         path,
         b.comp
       );
+    }
+  }
+  /**
+   * A gathered list of footnotes, rendered by Obsidian as a card's own
+   * would be, then numbered as the document numbers them. The
+   * references it needs to render are removed after.
+   */
+  async renderNotes(notes, b) {
+    const md = notes.map((x) => `[^${x.n}]`).join(" ") + "\n\n" + core.footnoteBlock(notes);
+    const el = b.el.createDiv();
+    await MarkdownRenderer.render(
+      this.app,
+      md,
+      el,
+      this.file.path,
+      b.comp
+    );
+    const items = el.querySelectorAll(".footnotes li");
+    items.forEach((li, i) => {
+      if (notes[i]) li.setAttribute("value", String(notes[i].n));
+    });
+    for (const r of [...el.querySelectorAll(".footnote-ref")]) {
+      const p = r.closest("p");
+      if (p && !p.closest(".footnotes")) p.remove();
     }
   }
   /** Highlight the board's active card here, and bring it into view. */
@@ -4361,6 +4504,11 @@ var DendritePreview = class extends ItemView {
     }
   }
 };
+function renumberRefs(el, refs) {
+  for (const a of el.querySelectorAll(".footnote-ref a, a.footnote-ref")) {
+    a.textContent = a.textContent.replace(/\d+/, (d) => String(refs[Number(d) - 1] || d));
+  }
+}
 function quotaSetting(container, name, desc, current, required, draft) {
   let amount = current ? core.fmtNum(current.amount) : "";
   let unit = current ? current.unit : "words";

@@ -436,11 +436,19 @@ function renumberFootnotes(segments) {
             if (!local.has(label)) local.set(label, ++next);
             return local.get(label);
         };
+        // Each note's number, in the order the text first refers to it,
+        // which is the order a renderer numbers them in.
+        const refs = [];
         // References outside inline code, in reading order.
         const body = kept.join('\n').split(/(`[^`\n]*`)/).map((part) =>
             (part.startsWith('`') ? part : part.replace(
                 /\[\^([^\]\s]+)\](?!:)/g,
-                (m, label) => `[^${renum(label)}]`))).join('');
+                (m, label) => {
+                    const fresh = !local.has(label);
+                    const n = renum(label);
+                    if (fresh) refs.push(n);
+                    return `[^${n}]`;
+                }))).join('');
         const notes = [];
         for (const [label, text] of defs) {
             // A definition nothing refers to still keeps its text.
@@ -451,7 +459,7 @@ function renumberFootnotes(segments) {
         notes.sort((a, b) => a.n - b.n);
         all.push(...notes);
         return Object.assign({}, seg, {
-            text: body.replace(/\n+$/, ''), notes });
+            text: body.replace(/\n+$/, ''), notes, refs });
     });
     all.sort((a, b) => a.n - b.n);
     return { segments: out, notes: all };
@@ -459,6 +467,98 @@ function renumberFootnotes(segments) {
 
 function footnoteBlock(notes) {
     return notes.map((x) => `[^${x.n}]: ${x.text}`).join('\n');
+}
+
+/**
+ * Inline footnotes, ^[text], made into numbered ones, so they are
+ * numbered in reading order with the rest and can be gathered with them.
+ * The note runs to the bracket that closes it, so ^[[@key]] is one note.
+ * Code is left alone. Used by the preview only; export leaves inline
+ * footnotes to Pandoc.
+ */
+function inlineToReferences(text) {
+    let fence = null;
+    let k = 0;
+    const defs = [];
+    const lines = (text || '').split('\n').map((line) => {
+        const f = /^\s*(`{3,}|~{3,})/.exec(line);
+        if (fence) {
+            if (f && f[1][0] === fence[0] &&
+                f[1].length >= fence.length) fence = null;
+            return line;
+        }
+        if (f) {
+            fence = f[1];
+            return line;
+        }
+        let out = '';
+        let i = 0;
+        while (i < line.length) {
+            if (line[i] === '`') {
+                const end = line.indexOf('`', i + 1);
+                if (end < 0) {
+                    out += line.slice(i);
+                    break;
+                }
+                out += line.slice(i, end + 1);
+                i = end + 1;
+                continue;
+            }
+            if (line[i] === '^' && line[i + 1] === '[') {
+                let depth = 0;
+                let j = i + 1;
+                for (; j < line.length; j++) {
+                    if (line[j] === '[') depth++;
+                    else if (line[j] === ']' && --depth === 0) break;
+                }
+                if (j < line.length) {
+                    const label = `dendrite-inline-${++k}`;
+                    defs.push(`[^${label}]: ${line.slice(i + 2, j)}`);
+                    out += `[^${label}]`;
+                    i = j + 1;
+                    continue;
+                }
+            }
+            out += line[i++];
+        }
+        return out;
+    });
+    return defs.length ? lines.join('\n') + '\n\n' + defs.join('\n') :
+        lines.join('\n');
+}
+
+/**
+ * Where the preview shows footnotes. 'card': under each card, as
+ * Obsidian renders them. 'section': gathered under each top-level
+ * section, which starts at each segment of depth 0. 'end': all at the
+ * end. In the gathered modes the notes are copied into a segment of
+ * their own, { id, gathered: notes }, placed after the last segment of
+ * its group; a group without notes gets none. Each segment keeps its
+ * notes, which its references need to be drawn.
+ */
+function gatherFootnotes(segments, where) {
+    if (where !== 'section' && where !== 'end') return segments;
+    const out = [];
+    let group = [];
+    let first = null;
+    const flush = () => {
+        if (group.length) {
+            out.push({ id: 'dendrite-notes:' + first, depth: 0, text: '',
+                       left: '', gathered: group });
+        }
+        group = [];
+    };
+    for (const s of segments) {
+        if (where === 'section' && s.depth === 0) {
+            flush();
+            first = s.id;
+        }
+        if (first === null) first = s.id;
+        out.push(s);
+        group.push(...(s.notes || []));
+    }
+    flush();
+    return out;
 }
 
 /**
@@ -1026,6 +1126,7 @@ module.exports = {
     flowPath, threadPath, exportSegments, roleFor, ROLES,
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,
+    inlineToReferences, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
     deriveLabel, stripComments, validPrefix, newId, makeNode, makeRoot,
     insertSibling, appendChild, moveWithin, indent, outdent, remove,

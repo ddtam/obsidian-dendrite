@@ -799,6 +799,53 @@ test('the preview prints by role, follows edits, and links to the board',
     assert.ok(!b.hasClass('is-active'));
 });
 
+test('the preview gathers footnotes under each section or at the end',
+     async () => {
+    // The harness renders markdown as its text, so this checks where each
+    // note goes and its number; Obsidian's own footnote markup, hidden
+    // and renumbered in the cards, needs a look in Obsidian.
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n    - [[G-ddddd|t]]\n' +
+        '    - [[G-bbbbb|p]]\n- [[G-ccccc|Plan]]\n');
+    const card = (id, text) => app.vault.create(cardPath(id), text);
+    await card('G-aaaaa', '# Aims');
+    await card('G-ddddd', 'Aims text.^[[@k]]');
+    await card('G-bbbbb', 'More.[^1]\n\n[^1]: Second\n    goes on.');
+    await card('G-ccccc', '# Plan\nPlan.[^a]\n\n[^a]: Third.');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX });
+    await tick(20);
+    const notes = () => [...view.contentEl.querySelectorAll(
+        '.dendrite-pnotes')].map((b) => b.textContent.split('\n\n')[1]
+        .replace(/\n+$/, ''));
+    assert.deepEqual(notes(), ['[^1]: [@k]\n[^2]: Second\n    goes on.',
+                               '[^3]: Third.'],
+                     'by default, under each top-level section');
+    assert.match(view.blocks.get('G-ddddd').el.textContent,
+                 /^Aims text\.\[\^1\]/, 'an inline note is numbered');
+    assert.ok(view.blocks.get('G-ddddd').el.hasClass('is-notes-gathered'));
+    const select = view.contentEl.querySelector('select');
+    select.value = 'end';
+    select.dispatchEvent(new h.window.Event('change'));
+    await tick(20);
+    assert.deepEqual(notes(), ['[^1]: [@k]\n[^2]: Second\n    goes on.\n' +
+                               '[^3]: Third.']);
+    assert.equal(view.getState().notesAt, 'end');
+    select.value = 'card';
+    select.dispatchEvent(new h.window.Event('change'));
+    await tick(20);
+    assert.deepEqual(notes(), [], 'under each card: nothing gathered');
+    const b = view.blocks.get('G-ddddd').el;
+    assert.equal(b.textContent.trim(), 'Aims text.^[[@k]]',
+                 'inline notes left to Obsidian');
+    assert.ok(!b.hasClass('is-notes-gathered'));
+});
+
 test('card status: chips, tally, keys, and status moving with text',
      async () => {
     const { view, read, app, text } = await open(

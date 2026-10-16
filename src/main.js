@@ -44,6 +44,12 @@ const STATUS_ITEMS = [
     ['revise', 'Status: revise', 'flag', '3'],
 ];
 const PREVIEW = 'dendrite-preview';
+// Where the preview shows footnotes, and the menu's words for each.
+const NOTES_AT = {
+    section: 'Notes under each section',
+    end: 'Notes at the end',
+    card: 'Notes under each card',
+};
 const DEFAULTS = {
     writingFolder: 'Writing',
     headingTop: 1,
@@ -2968,6 +2974,7 @@ class DendritePreview extends ItemView {
         this.plugin = plugin;
         this.file = null;
         this.showLeft = false;
+        this.notesAt = 'section';
         this.blocks = new Map();
         this.segs = new Map();
         this.bodies = new Map();
@@ -2983,13 +2990,15 @@ class DendritePreview extends ItemView {
 
     getState() {
         return { file: this.file ? this.file.path : null,
-                 showLeft: this.showLeft };
+                 showLeft: this.showLeft, notesAt: this.notesAt };
     }
 
     async setState(state, result) {
         const f = state && state.file &&
             this.app.vault.getAbstractFileByPath(state.file);
         this.showLeft = !!(state && state.showLeft);
+        this.notesAt = NOTES_AT[state && state.notesAt] ? state.notesAt :
+            'section';
         if (f instanceof TFile) {
             this.file = f;
             this.build();
@@ -3017,13 +3026,15 @@ class DendritePreview extends ItemView {
         }));
         this.registerDomEvent(this.contentEl, 'click', (e) => {
             const b = e.target.closest('.dendrite-pblock');
-            if (b && this.file) this.plugin.focusCard(this.file,
-                                                      b.dataset.id, false);
+            if (b && !b.dataset.notes && this.file) {
+                this.plugin.focusCard(this.file, b.dataset.id, false);
+            }
         });
         this.registerDomEvent(this.contentEl, 'dblclick', (e) => {
             const b = e.target.closest('.dendrite-pblock');
-            if (b && this.file) this.plugin.focusCard(this.file,
-                                                      b.dataset.id, true);
+            if (b && !b.dataset.notes && this.file) {
+                this.plugin.focusCard(this.file, b.dataset.id, true);
+            }
         });
     }
 
@@ -3050,6 +3061,18 @@ class DendritePreview extends ItemView {
                        'does not print: notes and comments');
         box.addEventListener('change', () => {
             this.showLeft = box.checked;
+            this.app.workspace.requestSaveLayout();
+            this.refresh();
+        });
+        const notesAt = bar.createEl('select',
+                                     { cls: 'dropdown dendrite-bar-select' });
+        notesAt.setAttr('aria-label', 'Where footnotes are shown');
+        for (const [v, label] of Object.entries(NOTES_AT)) {
+            notesAt.createEl('option', { value: v, text: label });
+        }
+        notesAt.value = this.notesAt;
+        notesAt.addEventListener('change', () => {
+            this.notesAt = notesAt.value;
             this.app.workspace.requestSaveLayout();
             this.refresh();
         });
@@ -3105,12 +3128,18 @@ class DendritePreview extends ItemView {
         const numbers = fm.dendrite_number_sections === true ?
             core.sectionNumbers(root.children, hasHeading, roleOf) : null;
         // Footnotes numbered across the whole document, as export does;
-        // each block shows its own beneath it.
-        const segs = core.renumberFootnotes(core.exportSegments(
-            root.children, (id) => {
-                const b = this.bodies.get(id);
-                return b ? b.body : '';
-            }, headingTop, numbers, roleOf)).segments;
+        // shown under each card, each top-level section, or at the end.
+        // Gathered, inline notes are numbered and gathered with the rest.
+        let printed = core.exportSegments(root.children, (id) => {
+            const b = this.bodies.get(id);
+            return b ? b.body : '';
+        }, headingTop, numbers, roleOf);
+        if (this.notesAt !== 'card') {
+            printed = printed.map((x) => Object.assign({}, x,
+                { text: core.inlineToReferences(x.text) }));
+        }
+        const segs = core.gatherFootnotes(
+            core.renumberFootnotes(printed).segments, this.notesAt);
         // Only flagged cards are marked here, with a faint bar, so the
         // preview stays a page to read.
         const statusOf = (id) => {
@@ -3139,15 +3168,22 @@ class DendritePreview extends ItemView {
         }
         for (const s of segs) {
             const key = s.text + '\u0000' + core.footnoteBlock(s.notes || []) +
-                '\u0000' + (this.showLeft ? s.left : '');
+                '\u0000' + (this.showLeft ? s.left : '') + '\u0000' +
+                this.notesAt + '\u0000' +
+                (s.gathered ? core.footnoteBlock(s.gathered) : '');
             let b = this.blocks.get(s.id);
             if (!b) {
                 const el = createDiv({ cls: 'dendrite-pblock' });
                 el.dataset.id = s.id;
+                if (s.gathered) {
+                    el.addClass('dendrite-pnotes');
+                    el.dataset.notes = 'true';
+                }
                 b = { el, key: null, comp: null };
                 this.blocks.set(s.id, b);
             }
-            const empty = !s.text && !(this.showLeft && s.left);
+            const empty = !s.text && !(this.showLeft && s.left) &&
+                !s.gathered;
             b.el.toggleClass('is-empty', empty);
             b.el.toggleClass('is-left-out-only', !s.text);
             if (b.key !== key) {
@@ -3189,16 +3225,46 @@ class DendritePreview extends ItemView {
         const path = f ? f.path : this.file.path;
         // The same tidied text export writes, so the preview shows the
         // document's real spacing.
+        if (s.gathered) {
+            await this.renderNotes(s.gathered, b);
+            return;
+        }
         if (s.text) {
             const notes = s.notes && s.notes.length ?
                 '\n\n' + core.footnoteBlock(s.notes) : '';
             await MarkdownRenderer.render(this.app,
                 core.normaliseMarkdown(s.text + notes), b.el.createDiv(),
                 path, b.comp);
+            // Gathered: Obsidian still draws the references, numbered from
+            // 1 in this card; they take the document's numbers, and the
+            // card's own list is hidden by the stylesheet.
+            b.el.toggleClass('is-notes-gathered', this.notesAt !== 'card');
+            if (this.notesAt !== 'card') renumberRefs(b.el, s.refs || []);
         }
         if (this.showLeft && s.left) {
             await MarkdownRenderer.render(this.app, s.left,
                 b.el.createDiv({ cls: 'dendrite-left-out' }), path, b.comp);
+        }
+    }
+
+    /**
+     * A gathered list of footnotes, rendered by Obsidian as a card's own
+     * would be, then numbered as the document numbers them. The
+     * references it needs to render are removed after.
+     */
+    async renderNotes(notes, b) {
+        const md = notes.map((x) => `[^${x.n}]`).join(' ') + '\n\n' +
+            core.footnoteBlock(notes);
+        const el = b.el.createDiv();
+        await MarkdownRenderer.render(this.app, md, el, this.file.path,
+                                      b.comp);
+        const items = el.querySelectorAll('.footnotes li');
+        items.forEach((li, i) => {
+            if (notes[i]) li.setAttribute('value', String(notes[i].n));
+        });
+        for (const r of [...el.querySelectorAll('.footnote-ref')]) {
+            const p = r.closest('p');
+            if (p && !p.closest('.footnotes')) p.remove();
         }
     }
 
@@ -3212,6 +3278,18 @@ class DendritePreview extends ItemView {
         if (b && b.el.scrollIntoView) {
             b.el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
         }
+    }
+}
+
+/**
+ * A card's footnote references, which a renderer numbers from 1 in each
+ * card, given the document's numbers: the i-th note the card refers to
+ * is `refs[i - 1]`.
+ */
+function renumberRefs(el, refs) {
+    for (const a of el.querySelectorAll('.footnote-ref a, a.footnote-ref')) {
+        a.textContent = a.textContent.replace(/\d+/, (d) =>
+            String(refs[Number(d) - 1] || d));
     }
 }
 
