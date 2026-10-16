@@ -127,9 +127,10 @@ async function exportDocument(o, deps) {
         }
         if (got.down) {
             if (!o.fallbackBib) {
-                return { error: 'Zotero is not running, and no fallback ' +
-                    '.bib is set in Dendrite\'s settings. Nothing was ' +
-                    'exported.' };
+                return { error: 'Zotero did not answer on port ' +
+                    `${o.port || 23119}: is it open, with Better BibTeX? ` +
+                    'No fallback .bib is set in Dendrite\'s settings. ' +
+                    'Nothing was exported.' };
             }
             bibliography = o.fallbackBib;
         } else {

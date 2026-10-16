@@ -167,6 +167,8 @@ A card's status shows at its top right, beside the role icon, in a band at the t
 
 Colours come from the [Pretty Properties](https://github.com/anareaty/pretty-properties) plugin, if it gives `dendrite_status` values a colour, so the Properties panel and the board agree.
 
+To set a role or status on a card and everything below it, use **Whole branch** in its menu, or Alt with the same keys: Alt+0 to Alt+4 for a role, Alt+Shift+1 to 3 for a status, which only cards that print their text take. The whole change is one undo.
+
 ## Preview
 
 **Preview** in the bar opens the manuscript as export would print it, beside the board, updating as cards save. Each card's part is its own block: click one to select that card on the board, double-click to edit it, and the board's active card is highlighted in the preview. **Show left out** also shows, dimmed, the text that does not print, so you can check what your roles leave out. Editing stays in the cards, since the printed text is transformed (headings levelled and numbered, notes and comments dropped).

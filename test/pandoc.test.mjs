@@ -86,7 +86,7 @@ test('with Zotero closed, the fallback .bib is used, or export stops',
     let deps = fakeDeps(null);
     let r = await p.exportDocument({ md: '[@a]', format: 'docx',
                                      output: '/o.docx' }, deps);
-    assert.match(r.error, /Zotero is not running/);
+    assert.match(r.error, /Zotero did not answer on port 23119/);
     deps = fakeDeps(null);
     r = await p.exportDocument({ md: '[@a]', format: 'docx',
         output: '/o.docx', fallbackBib: '/lib.bib' }, deps);
@@ -106,4 +106,26 @@ test('no citations: no Zotero call, no citeproc; Pandoc errors surface',
     r = await p.exportDocument({ md: 'Plain.', format: 'pdf',
                                 output: '/o.pdf' }, deps);
     assert.match(r.error, /Pandoc failed: xelatex not found/);
+});
+
+test('Zotero is asked through Obsidian, not the page', async () => {
+    // In Obsidian a page fetch to Better BibTeX fails its cross-origin
+    // check, which read as Zotero being closed (2026-10-16). The harness
+    // has no cross-origin check, so this shows only that the request goes
+    // through Obsidian's requestUrl, which makes none.
+    const h = require('./harness.cjs');
+    const Plugin = require('../src/main.js');
+    const deps = Plugin.prototype.pandocDeps.call({ pandocEnv: () => ({}) });
+    const before = h.requests.length;
+    h.obsidian.respond = () => ({ status: 200,
+        json: { jsonrpc: '2.0', result: '@article{k, title = {T}}' } });
+    const got = await p.fetchBib(['k'], 23119, deps);
+    assert.deepEqual(got, { bib: '@article{k, title = {T}}' });
+    const req = h.requests[before];
+    assert.equal(req.url, 'http://127.0.0.1:23119/better-bibtex/json-rpc');
+    assert.equal(req.method, 'POST');
+    assert.equal(req.throw, false);
+    h.obsidian.respond = () => { throw new Error('ECONNREFUSED'); };
+    assert.deepEqual(await p.fetchBib(['k'], 23119, deps), { down: true },
+                     'a refused connection is still Zotero being closed');
 });

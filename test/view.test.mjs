@@ -1580,6 +1580,65 @@ test('number keys set a card\'s role, and the menus show each key',
                  'the title reads without its key');
 });
 
+test('Alt with a number sets a role or status on a whole branch, as ' +
+     'one undo', async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-bbbbb|B]]\n        - [[G-ccccc|C]]\n' +
+        '    - [[G-ddddd|D]]\n- [[G-eeeee|E]]\n',
+        { 'G-aaaaa': '# A', 'G-bbbbb': '# B', 'G-ccccc': 'C text',
+          'G-ddddd': 'D text', 'G-eeeee': 'E text' });
+    view.plugin.settings.vimKeys = false;
+    await view.select('G-aaaaa');
+    const press = async (code, shift = false) => {
+        view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
+            { code, key: 'x', altKey: true, shiftKey: shift,
+              bubbles: true, cancelable: true }));
+        await tick(30);
+    };
+    const prop = (id, k) => (new RegExp(`dendrite_${k}: (\\w+)`).exec(
+        read(cardPath(id))) || [])[1];
+    const branch = ['G-aaaaa', 'G-bbbbb', 'G-ccccc', 'G-ddddd'];
+    // Alt+Shift+2: done on every card in the branch that prints text.
+    await press('Digit2', true);
+    assert.deepEqual(branch.map((id) => prop(id, 'status')),
+                     [undefined, undefined, 'done', 'done'],
+                     'headings take no status');
+    assert.equal(prop('G-eeeee', 'status'), 'draft', 'outside untouched');
+    // Alt+4: the whole branch left out, its statuses cleared with it.
+    await press('Digit4');
+    assert.deepEqual(branch.map((id) => prop(id, 'role')),
+                     ['notes', 'notes', 'notes', 'notes']);
+    assert.equal(prop('G-ccccc', 'status'), undefined);
+    assert.equal(prop('G-eeeee', 'role'), undefined);
+    assert.match(h.notices[h.notices.length - 1], /4 cards in the branch/);
+    // One undo puts back every card's role and status.
+    await view.doUndo();
+    await tick(30);
+    assert.deepEqual(branch.map((id) => prop(id, 'role')),
+                     [undefined, undefined, undefined, undefined]);
+    assert.deepEqual(branch.map((id) => prop(id, 'status')),
+                     [undefined, undefined, 'done', 'done']);
+    // The menus: a Whole branch submenu with each key.
+    view.roleMenu('G-aaaaa', view.cardEls.get('G-aaaaa'));
+    const whole = h.obsidian.lastMenu.items.find((i) =>
+        i.title === 'Whole branch');
+    assert.ok(whole && whole.submenu, 'a submenu');
+    const keys = whole.submenu.items.map((i) =>
+        i.titleContent.querySelector('[data-key]').dataset.key);
+    assert.deepEqual(keys, ['Alt+0', 'Alt+1', 'Alt+2', 'Alt+3', 'Alt+4',
+                            'Alt+⇧1', 'Alt+⇧2', 'Alt+⇧3']);
+    await whole.submenu.items[3].click();
+    await tick(30);
+    assert.deepEqual(branch.map((id) => prop(id, 'role')),
+                     ['scaffolding', 'scaffolding', 'scaffolding',
+                      'scaffolding']);
+    // A card with nothing below it has no branch to set.
+    view.roleMenu('G-eeeee', view.cardEls.get('G-eeeee'));
+    assert.ok(!h.obsidian.lastMenu.items.some((i) =>
+        i.title === 'Whole branch'));
+});
+
 test('Shift and 1 to 3 set a printing card\'s status, by physical key',
      async () => {
     const { view, read } = await open(

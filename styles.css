@@ -952,11 +952,14 @@
     margin-left: auto;
 }
 
-/* A checked item's tick follows its title, so in a menu that has one,
-   the items without it keep the tick's room and every key lines up. */
-.menu:has(.menu-item.mod-checked .dendrite-menu-key)
-    .menu-item:not(.mod-checked) .dendrite-menu-row {
-    padding-right: 24px;
+/* A ticked item's tick, moved before its key: the pair sits at the
+   right, the key last, so every key lines up. */
+.dendrite-menu-row > .mod-checked {
+    margin-left: auto;
+}
+
+.dendrite-menu-row > .mod-checked + .dendrite-menu-key {
+    margin-left: 0;
 }
 
 .dendrite-menu-key::after {

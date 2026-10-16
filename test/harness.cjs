@@ -244,6 +244,7 @@ function makeApp() {
 }
 
 const notices = [];
+const requests = [];
 const obsidian = {
     TFile, TFolder,
     Platform: { isDesktopApp: true },
@@ -307,6 +308,13 @@ const obsidian = {
                 },
                 setIcon() { return this; },
                 onClick(f) { this.click = f; return this; },
+                // A submenu, kept off lastMenu, which names the menu shown.
+                setSubmenu() {
+                    const shown = obsidian.lastMenu;
+                    this.submenu = new obsidian.Menu();
+                    obsidian.lastMenu = shown;
+                    return this.submenu;
+                },
             };
             fn(item);
             (this.items = this.items || []).push(item);
@@ -317,6 +325,12 @@ const obsidian = {
         showAtPosition() { this.shown = 'position'; }
     },
     Component: class { load() {} unload() {} },
+    // Obsidian's request outside the page; a test sets `respond`.
+    requestUrl: async (req) => {
+        requests.push(req);
+        return obsidian.respond(req);
+    },
+    respond: () => ({ status: 200, json: {} }),
     MarkdownRenderer: {
         async render(app, md, el) { el.textContent = md; },
     },
@@ -339,5 +353,5 @@ Module._load = function (req, ...a) {
     return orig.call(this, req, ...a);
 };
 
-module.exports = { makeApp, makePopout, notices, TFile, window: w,
-                   obsidian };
+module.exports = { makeApp, makePopout, notices, requests, TFile,
+                   window: w, obsidian };

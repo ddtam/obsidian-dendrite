@@ -17,7 +17,7 @@ const {
     ItemView, MarkdownView, Plugin, PluginSettingTab, Setting,
     MarkdownRenderer,
     Component, Modal, Notice, TFile, TFolder, Scope, setIcon, Platform,
-    normalizePath, Keymap,
+    normalizePath, Keymap, requestUrl,
 } = require('obsidian');
 const core = require('./core.js');
 const textedit = require('./textedit.js');
@@ -34,6 +34,10 @@ const ROLE_ITEMS = [
     ['scaffolding', 'Scaffolding: prints its children only', 'layers', '3'],
     ['notes', 'Left out of the manuscript', 'eye-off', '4'],
 ];
+// What a branch was set to, for the notice that says so.
+const BRANCH_ROLE_NAMES = { '': 'print automatically',
+    section: 'heading only', prose: 'full text',
+    scaffolding: 'scaffolding', notes: 'left out' };
 const ROLE_KEYS = new Map([['0', null],
                            ...ROLE_ITEMS.map((r) => [r[3], r[0]])]);
 
@@ -870,9 +874,75 @@ class DendriteView extends ItemView {
                     .onClick(() => this.setRole(id, value));
                 if (typeof i.setChecked === 'function') {
                     i.setChecked(role === value);
+                    tickBeforeKey(i);
                 }
             });
         }
+        if (node && node.children.length) this.addBranchItems(m, id);
+    }
+
+    /**
+     * Roles and statuses for a card and everything below it, in a submenu
+     * where Obsidian has them, else as items of their own.
+     */
+    addBranchItems(m, id) {
+        let sub = null;
+        m.addSeparator();
+        m.addItem((i) => {
+            i.setTitle('Whole branch').setIcon('list-tree');
+            if (typeof i.setSubmenu === 'function') sub = i.setSubmenu();
+        });
+        const into = sub || m;
+        const lead = sub ? '' : 'Whole branch: ';
+        for (const [value, title, icon, key] of
+            [[null, 'Prints automatically', 'wand', '0'], ...ROLE_ITEMS]) {
+            into.addItem((i) => i.setTitle(this.menuLabel(lead + title,
+                `Alt+${key}`)).setIcon(icon)
+                .onClick(() => this.setBranch(id, 'role', value)));
+        }
+        into.addSeparator();
+        for (const [value, title, icon, key] of STATUS_ITEMS) {
+            into.addItem((i) => i.setTitle(this.menuLabel(lead + title,
+                `Alt+⇧${key}`)).setIcon(icon)
+                .onClick(() => this.setBranch(id, 'status', value)));
+        }
+    }
+
+    /**
+     * Set a role on a card and every card below it, or a status on every
+     * card there that prints its text, as one step to undo.
+     */
+    async setBranch(id, what, value) {
+        const node = this.byId.get(id);
+        if (!node) return;
+        const roleOf = (x) => this.roleOf(x);
+        const key = what === 'role' ? 'dendrite_role' : 'dendrite_status';
+        const restores = [];
+        for (const c of [node, ...core.descendants(node)]) {
+            const f = this.cardFile(c.id);
+            if (!f) continue;
+            if (what === 'status' && core.roleFor(c, roleOf) !== 'prose') {
+                continue;
+            }
+            const cur = what === 'role' ? this.roleOf(c.id) :
+                this.statusOf(c.id);
+            if ((cur || null) === (value || null)) continue;
+            const data = await this.app.vault.read(f);
+            restores.push({ path: f.path, text: data,
+                            ifBody: core.splitFrontmatter(data).body });
+            await writeProps(this.app, f, { [key]: value || null });
+        }
+        if (what === 'role') await this.sweepStatuses();
+        const n = restores.length;
+        if (n) {
+            this.pushUndo({ active: this.active, files: [], created: [],
+                            restores, text: false });
+        }
+        const name = what === 'role' ? (BRANCH_ROLE_NAMES[value || ''])
+            : value;
+        new Notice(n ? `Dendrite: ${n} card${n === 1 ? '' : 's'} in the ` +
+            `branch set to ${name}.` : `Dendrite: the branch is already ` +
+            `${name}.`);
     }
 
     /**
@@ -927,6 +997,7 @@ class DendriteView extends ItemView {
                         .onClick(() => this.setStatus(id, value));
                     if (typeof i.setChecked === 'function') {
                         i.setChecked(info.own === value);
+                        tickBeforeKey(i);
                     }
                 });
             }
@@ -1461,6 +1532,22 @@ class DendriteView extends ItemView {
             if (this.find) this.closeFind();
             return;
         }
+        // Alt with 0 to 4 sets a role on the whole branch, Alt and Shift
+        // with 1 to 3 a status, by the physical key as below.
+        const code = /^(?:Digit|Numpad)(\d)$/.exec(e.code || '');
+        const digit = code ? code[1] : (/^\d$/.test(e.key) ? e.key : null);
+        if (e.altKey && !e.ctrlKey && !e.metaKey && digit && this.active) {
+            const status = e.shiftKey &&
+                STATUS_ITEMS.find((r) => r[3] === digit);
+            if (status) {
+                e.preventDefault();
+                this.setBranch(this.active, 'status', status[0]);
+            } else if (!e.shiftKey && ROLE_KEYS.has(digit)) {
+                e.preventDefault();
+                this.setBranch(this.active, 'role', ROLE_KEYS.get(digit));
+            }
+            return;
+        }
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         const statusKey = { ']': () => this.nextFlagged(1),
                             '[': () => this.nextFlagged(-1),
@@ -1475,8 +1562,6 @@ class DendriteView extends ItemView {
         // The number row by its physical key, since what Shift and a
         // digit type depends on the keyboard layout; the key's own text
         // where no code is given.
-        const code = /^(?:Digit|Numpad)(\d)$/.exec(e.code || '');
-        const digit = code ? code[1] : (/^\d$/.test(e.key) ? e.key : null);
         // Shift and 1 to 3 set a printing card's status.
         const status = e.shiftKey && digit &&
             STATUS_ITEMS.find((r) => r[3] === digit);
@@ -3325,6 +3410,19 @@ class DendritePreview extends ItemView {
 }
 
 /**
+ * A ticked menu item's tick, which Obsidian puts after the title, moved
+ * to just before the item's key, so the keys stay in one column at the
+ * menu's right edge.
+ */
+function tickBeforeKey(item) {
+    const dom = item.dom;
+    const tick = item.checkIconEl ||
+        (dom && dom.querySelector(':scope > .menu-item-icon.mod-checked'));
+    const key = dom && dom.querySelector('.dendrite-menu-key');
+    if (tick && key) key.before(tick);
+}
+
+/**
  * A card's footnote references, which a renderer numbers from 1 in each
  * card, given the document's numbers: the i-th note the card refers to
  * is `refs[i - 1]`.
@@ -3909,7 +4007,14 @@ module.exports = class DendritePlugin extends Plugin {
                 { timeout: 180000, env: this.pandocEnv() },
                 (err, out, stderr) => (err ?
                     rej(Object.assign(err, { stderr })) : res()))),
-            fetch: (u, i) => fetch(u, i),
+            // Through Obsidian rather than the page: Better BibTeX's
+            // server answers the browser's cross-origin check without
+            // allowing it, so a page fetch fails as if Zotero were closed.
+            fetch: async (url, init) => {
+                const r = await requestUrl({ url, method: init.method,
+                    headers: init.headers, body: init.body, throw: false });
+                return { status: r.status, json: async () => r.json };
+            },
         };
     }
 
