@@ -2187,7 +2187,8 @@ class DendriteView extends ItemView {
     }
 
     /**
-     * Show each card's status in its footer and the counts in the bar.
+     * Show each card's status at its top right, beside the role icon,
+     * and the counts in the bar.
      * A printing card shows its own status, a structural card the least
      * finished state below it and how many cards there are flagged.
      */
@@ -2197,11 +2198,10 @@ class DendriteView extends ItemView {
             (id) => this.statusOf(id), (id) => this.roleOf(id));
         this.statusInfo = report.cards;
         for (const [id, card] of this.cardEls) {
-            const foot = card.querySelector(':scope > .dendrite-card-foot');
-            if (!foot) continue;
-            const old = foot.querySelector(':scope > .dendrite-status');
+            const old = card.querySelector(':scope > .dendrite-status');
             if (old) old.remove();
             card.removeClass('is-flagged');
+            card.style.removeProperty('--dendrite-corner');
             const info = report.cards.get(id);
             if (!info) continue;
             const chip = createDiv({ cls: 'dendrite-status' });
@@ -2211,23 +2211,24 @@ class DendriteView extends ItemView {
                 const colour = this.plugin.statusColour(status);
                 if (colour) s.style.setProperty('--dendrite-chip', colour);
             };
-            if (info.own === 'done') show('done', '✓ done');
-            else if (info.own === 'revise') show('revise', 'revise');
+            if (info.own === 'done') show('done', 'done ✓');
+            else if (info.own === 'revise') show('revise', 'revise ⚑');
             else if (info.own === 'unsplit') show('unsplit', 'unsplit');
             if (!info.prints && info.below > 0) {
-                show('revise', `${info.below} to revise`);
+                show('revise', `${info.below} to revise ⚑`);
             } else if (!info.prints && info.derived === 'done' &&
                        !info.own) {
-                show('done', '✓ done');
+                show('done', 'done ✓');
             }
             if (core.isFlag(info.own)) card.addClass('is-flagged');
             if (!chip.childElementCount) continue;
-            const quota = foot.querySelector(':scope > .dendrite-quota');
-            if (quota && quota.nextSibling) {
-                foot.insertBefore(chip, quota.nextSibling);
-            } else {
-                foot.appendChild(chip);
-            }
+            card.appendChild(chip);
+            // The heading beside it keeps clear of the chips as well as
+            // the icon; measured where the card is laid out, else from
+            // the text's length.
+            const w = chip.offsetWidth ||
+                chip.textContent.length * 7 + 12 * chip.childElementCount;
+            card.style.setProperty('--dendrite-corner', `${w + 30}px`);
         }
         if (this.statusEl) {
             const t = report.tally;

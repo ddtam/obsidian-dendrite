@@ -161,7 +161,7 @@ A card's status describes its text, and every card that prints holds one, as `de
 | revise | needs another pass, from your own read or a reviewer's comment |
 | unsplit | set by Dendrite on a card whose text you started moving into children and left some behind |
 
-Only revise and unsplit are coloured, as flags: a chip on the card and a faint bar in the preview. Done shows a quiet tick; draft shows nothing. A section, which prints only its heading, shows how many cards below it are flagged. The bar tallies the statuses, so near submission the draft count is what is left.
+A card's status shows at its top right, beside the role icon, in a band at the top of every card that a leading heading or section number shares and ordinary text starts below. Only revise and unsplit are coloured, as flags: a chip on the card and a faint bar in the preview. Done shows a quiet tick; draft shows nothing. A section, which prints only its heading, shows how many cards below it are flagged. The bar tallies the statuses, so near submission the draft count is what is left.
 
 **+** marks the active card done and **−** sends it to revise; **]** and **[** go to the next and previous flagged card, and a command goes to the next draft. Moved text keeps its card's status and any role set on it, except heading only, and a merge keeps the less mature of the two. A card that stops printing, because it gained children, loses its status; unsplit clears itself once only the heading and comments are left, or with **Keep the leftover text as notes**.
 

@@ -808,9 +808,40 @@
     background: var(--background-modifier-hover);
 }
 
-/* The text keeps clear of the corner icon. */
-.dendrite-card-body {
-    padding-right: 14px;
+/* The card's top is a band for the role icon and the status. Text
+   starts below it; a heading or section number that opens the card sits
+   in it instead, kept clear of the corner by --dendrite-corner, which
+   the status widens. */
+.dendrite-card {
+    --dendrite-corner: 28px;
+    padding-top: 26px;
+}
+
+.dendrite-card:has(> .dendrite-num),
+.dendrite-card:has(> .dendrite-card-body > .dendrite-md >
+    :first-child > :is(h1, h2, h3, h4, h5, h6):first-child),
+.dendrite-card:has(> .dendrite-card-body > .dendrite-md >
+    :is(h1, h2, h3, h4, h5, h6):first-child),
+.dendrite-card:has(> .dendrite-card-body .cm-content >
+    .cm-line:first-child.HyperMD-header) {
+    padding-top: 10px;
+}
+
+.dendrite-card > .dendrite-num,
+.dendrite-md > :first-child > :is(h1, h2, h3, h4, h5, h6):first-child,
+.dendrite-md > :is(h1, h2, h3, h4, h5, h6):first-child,
+.dendrite-card-body .cm-content > .cm-line:first-child.HyperMD-header {
+    padding-right: var(--dendrite-corner);
+}
+
+/* The status, left of the role icon, at the same height. */
+.dendrite-card > .dendrite-status {
+    position: absolute;
+    top: 4px;
+    right: 28px;
+    height: 20px;
+    margin: 0;
+    z-index: 2;
 }
 
 .is-mobile .dendrite-grip {
@@ -939,6 +970,13 @@
 
 .dendrite-menu-key {
     margin-left: auto;
+}
+
+/* A checked item's tick follows its title, so in a menu that has one,
+   the items without it keep the tick's room and every key lines up. */
+.menu:has(.menu-item.mod-checked .dendrite-menu-key)
+    .menu-item:not(.mod-checked) .dendrite-menu-row {
+    padding-right: 24px;
 }
 
 .dendrite-menu-key::after {

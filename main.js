@@ -3458,7 +3458,8 @@ var DendriteView = class extends ItemView {
     await writeProps(this.app, f, { dendrite_status: status || null });
   }
   /**
-   * Show each card's status in its footer and the counts in the bar.
+   * Show each card's status at its top right, beside the role icon,
+   * and the counts in the bar.
    * A printing card shows its own status, a structural card the least
    * finished state below it and how many cards there are flagged.
    */
@@ -3471,11 +3472,10 @@ var DendriteView = class extends ItemView {
     );
     this.statusInfo = report.cards;
     for (const [id, card] of this.cardEls) {
-      const foot = card.querySelector(":scope > .dendrite-card-foot");
-      if (!foot) continue;
-      const old = foot.querySelector(":scope > .dendrite-status");
+      const old = card.querySelector(":scope > .dendrite-status");
       if (old) old.remove();
       card.removeClass("is-flagged");
+      card.style.removeProperty("--dendrite-corner");
       const info = report.cards.get(id);
       if (!info) continue;
       const chip = createDiv({ cls: "dendrite-status" });
@@ -3484,22 +3484,19 @@ var DendriteView = class extends ItemView {
         const colour = this.plugin.statusColour(status);
         if (colour) s.style.setProperty("--dendrite-chip", colour);
       };
-      if (info.own === "done") show("done", "\u2713 done");
-      else if (info.own === "revise") show("revise", "revise");
+      if (info.own === "done") show("done", "done \u2713");
+      else if (info.own === "revise") show("revise", "revise \u2691");
       else if (info.own === "unsplit") show("unsplit", "unsplit");
       if (!info.prints && info.below > 0) {
-        show("revise", `${info.below} to revise`);
+        show("revise", `${info.below} to revise \u2691`);
       } else if (!info.prints && info.derived === "done" && !info.own) {
-        show("done", "\u2713 done");
+        show("done", "done \u2713");
       }
       if (core.isFlag(info.own)) card.addClass("is-flagged");
       if (!chip.childElementCount) continue;
-      const quota = foot.querySelector(":scope > .dendrite-quota");
-      if (quota && quota.nextSibling) {
-        foot.insertBefore(chip, quota.nextSibling);
-      } else {
-        foot.appendChild(chip);
-      }
+      card.appendChild(chip);
+      const w = chip.offsetWidth || chip.textContent.length * 7 + 12 * chip.childElementCount;
+      card.style.setProperty("--dendrite-corner", `${w + 30}px`);
     }
     if (this.statusEl) {
       const t = report.tally;
