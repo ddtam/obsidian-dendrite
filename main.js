@@ -288,11 +288,13 @@ var require_core = __commonJS({
     function renumberFootnotes(segments) {
       let next = 0;
       const all = [];
+      const byText = /* @__PURE__ */ new Map();
+      const given = /* @__PURE__ */ new Set();
       const out = segments.map((seg) => {
         const local = /* @__PURE__ */ new Map();
         const defs = /* @__PURE__ */ new Map();
         const kept = [];
-        const lines = (seg.text || "").split("\n");
+        const lines = inlineToReferences(seg.text || "").split("\n");
         let fence = null;
         let inDef = null;
         for (const line of lines) {
@@ -321,31 +323,47 @@ var require_core = __commonJS({
           inDef = null;
           kept.push(line);
         }
+        const textOf = (label) => defs.has(label) ? defs.get(label).join("\n").replace(/\s+$/, "") : null;
         const renum = (label) => {
-          if (!local.has(label)) local.set(label, ++next);
+          if (!local.has(label)) {
+            const t = textOf(label);
+            const key = t === null ? null : t.replace(/\s+/g, " ").trim();
+            let n = key !== null && byText.get(key);
+            if (!n) {
+              n = ++next;
+              if (key) byText.set(key, n);
+            }
+            local.set(label, n);
+          }
           return local.get(label);
         };
         const refs = [];
         const body = kept.join("\n").split(/(`[^`\n]*`)/).map((part) => part.startsWith("`") ? part : part.replace(
           /\[\^([^\]\s]+)\](?!:)/g,
           (m, label) => {
-            const fresh = !local.has(label);
             const n = renum(label);
-            if (fresh) refs.push(n);
+            if (!refs.includes(n)) refs.push(n);
             return `[^${n}]`;
           }
         )).join("");
         const notes = [];
-        for (const [label, text] of defs) {
+        const cardNotes = [];
+        for (const label of defs.keys()) {
           const n = renum(label);
-          const def = text.join("\n").replace(/\s+$/, "");
-          notes.push({ n, text: def });
+          const note = { n, text: textOf(label) };
+          if (!cardNotes.some((x) => x.n === n)) cardNotes.push(note);
+          if (!given.has(n)) {
+            given.add(n);
+            notes.push(note);
+          }
         }
         notes.sort((a, b) => a.n - b.n);
+        cardNotes.sort((a, b) => a.n - b.n);
         all.push(...notes);
         return Object.assign({}, seg, {
           text: body.replace(/\n+$/, ""),
           notes,
+          cardNotes,
           refs
         });
       });
@@ -1650,6 +1668,9 @@ var DendriteView = class extends ItemView {
     board.addEventListener("scroll", (e) => {
       if (e.target !== board) this.scheduleFlow();
     }, true);
+    for (const t of ["copy", "cut"]) {
+      board.addEventListener(t, () => this.holdBoardScroll(), true);
+    }
     if (!this.nativeScroll) {
       board.addEventListener(
         "wheel",
@@ -2058,6 +2079,21 @@ var DendriteView = class extends ItemView {
       this.anim = k < 1 ? this.pageWin().requestAnimationFrame(step) : null;
     };
     this.anim = this.pageWin().requestAnimationFrame(step);
+  }
+  /** Keep the board's horizontal scroll where it is for a moment. */
+  holdBoardScroll() {
+    const board = this.board;
+    const x = board.scrollLeft;
+    const hold = (e) => {
+      if (e.target === board && board.scrollLeft !== x) {
+        board.scrollLeft = x;
+      }
+    };
+    board.addEventListener("scroll", hold);
+    this.pageWin().setTimeout(
+      () => board.removeEventListener("scroll", hold),
+      300
+    );
   }
   /** The wheel scrolls the column under it, flow redrawn the same frame. */
   onWheel(e) {
@@ -4352,21 +4388,12 @@ var DendritePreview = class extends ItemView {
       return !!first && first.type === "heading";
     };
     const numbers = fm.dendrite_number_sections === true ? core.sectionNumbers(root.children, hasHeading, roleOf) : null;
-    let printed = core.exportSegments(root.children, (id) => {
-      const b = this.bodies.get(id);
-      return b ? b.body : "";
-    }, headingTop, numbers, roleOf);
-    if (this.notesAt !== "card") {
-      printed = printed.map((x) => Object.assign(
-        {},
-        x,
-        { text: core.inlineToReferences(x.text) }
-      ));
-    }
-    const segs = core.gatherFootnotes(
-      core.renumberFootnotes(printed).segments,
-      this.notesAt
-    );
+    const segs = core.gatherFootnotes(core.renumberFootnotes(
+      core.exportSegments(root.children, (id) => {
+        const b = this.bodies.get(id);
+        return b ? b.body : "";
+      }, headingTop, numbers, roleOf)
+    ).segments, this.notesAt);
     const statusOf = (id) => {
       const s = props(id).dendrite_status;
       return core.STATUSES.includes(s) ? s : null;
@@ -4390,7 +4417,7 @@ var DendritePreview = class extends ItemView {
       }
     }
     for (const s of segs) {
-      const key = s.text + "\0" + core.footnoteBlock(s.notes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "");
+      const key = s.text + "\0" + core.footnoteBlock(s.cardNotes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "");
       let b = this.blocks.get(s.id);
       if (!b) {
         const el = createDiv({ cls: "dendrite-pblock" });
@@ -4447,7 +4474,7 @@ var DendritePreview = class extends ItemView {
       return;
     }
     if (s.text) {
-      const notes = s.notes && s.notes.length ? "\n\n" + core.footnoteBlock(s.notes) : "";
+      const notes = s.cardNotes && s.cardNotes.length ? "\n\n" + core.footnoteBlock(s.cardNotes) : "";
       await MarkdownRenderer.render(
         this.app,
         core.normaliseMarkdown(s.text + notes),

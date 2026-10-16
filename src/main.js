@@ -350,6 +350,13 @@ class DendriteView extends ItemView {
         board.addEventListener('scroll', (e) => {
             if (e.target !== board) this.scheduleFlow();
         }, true);
+        // A copy or cut can be handled by another plugin that focuses a
+        // hidden textarea, and the browser then scrolls the board to show
+        // it, moving every column sideways. The board's position is held
+        // for a moment after one.
+        for (const t of ['copy', 'cut']) {
+            board.addEventListener(t, () => this.holdBoardScroll(), true);
+        }
         if (!this.nativeScroll) {
             board.addEventListener('wheel', (e) => this.onWheel(e),
                                    { passive: false });
@@ -768,6 +775,20 @@ class DendriteView extends ItemView {
                 this.pageWin().requestAnimationFrame(step) : null;
         };
         this.anim = this.pageWin().requestAnimationFrame(step);
+    }
+
+    /** Keep the board's horizontal scroll where it is for a moment. */
+    holdBoardScroll() {
+        const board = this.board;
+        const x = board.scrollLeft;
+        const hold = (e) => {
+            if (e.target === board && board.scrollLeft !== x) {
+                board.scrollLeft = x;
+            }
+        };
+        board.addEventListener('scroll', hold);
+        this.pageWin().setTimeout(
+            () => board.removeEventListener('scroll', hold), 300);
     }
 
     /** The wheel scrolls the column under it, flow redrawn the same frame. */
@@ -3129,17 +3150,11 @@ class DendritePreview extends ItemView {
             core.sectionNumbers(root.children, hasHeading, roleOf) : null;
         // Footnotes numbered across the whole document, as export does;
         // shown under each card, each top-level section, or at the end.
-        // Gathered, inline notes are numbered and gathered with the rest.
-        let printed = core.exportSegments(root.children, (id) => {
-            const b = this.bodies.get(id);
-            return b ? b.body : '';
-        }, headingTop, numbers, roleOf);
-        if (this.notesAt !== 'card') {
-            printed = printed.map((x) => Object.assign({}, x,
-                { text: core.inlineToReferences(x.text) }));
-        }
-        const segs = core.gatherFootnotes(
-            core.renumberFootnotes(printed).segments, this.notesAt);
+        const segs = core.gatherFootnotes(core.renumberFootnotes(
+            core.exportSegments(root.children, (id) => {
+                const b = this.bodies.get(id);
+                return b ? b.body : '';
+            }, headingTop, numbers, roleOf)).segments, this.notesAt);
         // Only flagged cards are marked here, with a faint bar, so the
         // preview stays a page to read.
         const statusOf = (id) => {
@@ -3167,7 +3182,8 @@ class DendritePreview extends ItemView {
             }
         }
         for (const s of segs) {
-            const key = s.text + '\u0000' + core.footnoteBlock(s.notes || []) +
+            const key = s.text + '\u0000' +
+                core.footnoteBlock(s.cardNotes || []) +
                 '\u0000' + (this.showLeft ? s.left : '') + '\u0000' +
                 this.notesAt + '\u0000' +
                 (s.gathered ? core.footnoteBlock(s.gathered) : '');
@@ -3230,8 +3246,8 @@ class DendritePreview extends ItemView {
             return;
         }
         if (s.text) {
-            const notes = s.notes && s.notes.length ?
-                '\n\n' + core.footnoteBlock(s.notes) : '';
+            const notes = s.cardNotes && s.cardNotes.length ?
+                '\n\n' + core.footnoteBlock(s.cardNotes) : '';
             await MarkdownRenderer.render(this.app,
                 core.normaliseMarkdown(s.text + notes), b.el.createDiv(),
                 path, b.comp);

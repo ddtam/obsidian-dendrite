@@ -389,20 +389,26 @@ function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf) {
  * would collide once joined. Every reference is given a new number in
  * reading order across all the segments, and each segment's definitions,
  * with their indented continuation lines, are taken out of its text and
- * returned under their new numbers. Inline footnotes, ^[text], need no
- * number; code is left alone. Returns { segments, notes }: the segments
- * with references renumbered and definitions removed, each also holding
- * `notes`, its own definitions; and every definition, in order, for the
- * end of the document.
+ * returned under their new numbers. Inline footnotes, ^[text], are
+ * made numbered ones first, so all are numbered in one sequence. Notes
+ * with the same text, such as one citation cited twice, become one note
+ * that each reference points to. Code is left alone. Returns
+ * { segments, notes }: the segments with references renumbered and
+ * definitions removed, each also holding `notes`, the notes it is first
+ * to give, `cardNotes`, every note it refers to, and `refs`, the numbers
+ * it refers to in order of first reference; and every note, in order,
+ * for the end of the document.
  */
 function renumberFootnotes(segments) {
     let next = 0;
     const all = [];
+    const byText = new Map();
+    const given = new Set();
     const out = segments.map((seg) => {
         const local = new Map();
         const defs = new Map();
         const kept = [];
-        const lines = (seg.text || '').split('\n');
+        const lines = inlineToReferences(seg.text || '').split('\n');
         let fence = null;
         let inDef = null;
         for (const line of lines) {
@@ -432,8 +438,19 @@ function renumberFootnotes(segments) {
             inDef = null;
             kept.push(line);
         }
+        const textOf = (label) => defs.has(label) ?
+            defs.get(label).join('\n').replace(/\s+$/, '') : null;
         const renum = (label) => {
-            if (!local.has(label)) local.set(label, ++next);
+            if (!local.has(label)) {
+                const t = textOf(label);
+                const key = t === null ? null : t.replace(/\s+/g, ' ').trim();
+                let n = key !== null && byText.get(key);
+                if (!n) {
+                    n = ++next;
+                    if (key) byText.set(key, n);
+                }
+                local.set(label, n);
+            }
             return local.get(label);
         };
         // Each note's number, in the order the text first refers to it,
@@ -444,22 +461,27 @@ function renumberFootnotes(segments) {
             (part.startsWith('`') ? part : part.replace(
                 /\[\^([^\]\s]+)\](?!:)/g,
                 (m, label) => {
-                    const fresh = !local.has(label);
                     const n = renum(label);
-                    if (fresh) refs.push(n);
+                    if (!refs.includes(n)) refs.push(n);
                     return `[^${n}]`;
                 }))).join('');
         const notes = [];
-        for (const [label, text] of defs) {
+        const cardNotes = [];
+        for (const label of defs.keys()) {
             // A definition nothing refers to still keeps its text.
             const n = renum(label);
-            const def = text.join('\n').replace(/\s+$/, '');
-            notes.push({ n, text: def });
+            const note = { n, text: textOf(label) };
+            if (!cardNotes.some((x) => x.n === n)) cardNotes.push(note);
+            if (!given.has(n)) {
+                given.add(n);
+                notes.push(note);
+            }
         }
         notes.sort((a, b) => a.n - b.n);
+        cardNotes.sort((a, b) => a.n - b.n);
         all.push(...notes);
         return Object.assign({}, seg, {
-            text: body.replace(/\n+$/, ''), notes, refs });
+            text: body.replace(/\n+$/, ''), notes, cardNotes, refs });
     });
     all.sort((a, b) => a.n - b.n);
     return { segments: out, notes: all };

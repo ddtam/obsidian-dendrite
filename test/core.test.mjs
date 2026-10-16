@@ -590,13 +590,38 @@ test('footnotes are renumbered across cards and gathered at the end', () => {
     const out = c.exportMarkdown(root.children, (id) => bodies[id], 1);
     assert.equal(out,
         'First claim[^1] and second[^2].\n\n' +
-        'Another claim[^3], an inline one^[inline], and `[^1]` in code.\n\n' +
-        'Named[^4].\n\n```\n[^1]: not a footnote\n```\n\n' +
+        'Another claim[^3], an inline one[^4], and `[^1]` in code.\n\n' +
+        'Named[^5].\n\n```\n[^1]: not a footnote\n```\n\n' +
         '[^1]: Note A1.\n[^2]: Note A2,\n    continued.\n' +
-        '[^3]: Note B1.\n[^4]: Smith, named.\n');
+        '[^3]: Note B1.\n[^4]: inline\n[^5]: Smith, named.\n',
+        'an inline note is numbered with the rest');
     const r = c.renumberFootnotes([{ id: 'B', text: bodies.B }]);
-    assert.deepEqual(r.segments[0].notes, [{ n: 1, text: 'Note B1.' }],
+    assert.deepEqual(r.segments[0].notes,
+                     [{ n: 1, text: 'Note B1.' }, { n: 2, text: 'inline' }],
                      'each segment keeps its own notes for the preview');
+});
+
+test('footnotes with the same text become one note', () => {
+    const root = c.makeRoot();
+    for (const id of ['A', 'B']) c.appendChild(root, c.makeNode(id, id, null));
+    const bodies = {
+        A: 'Mash^[[@urbut2019]] and Metzner.[^m]\n\n[^m]: [@metzner2025]',
+        B: 'Again mash^[[@urbut2019]], and^[[@urbut2019], p. 3] Metzner' +
+           '^[[@metzner2025]].',
+    };
+    assert.equal(c.exportMarkdown(root.children, (id) => bodies[id], 1),
+        'Mash[^1] and Metzner.[^2]\n\n' +
+        'Again mash[^1], and[^3] Metzner[^2].\n\n' +
+        '[^1]: [@urbut2019]\n[^2]: [@metzner2025]\n' +
+        '[^3]: [@urbut2019], p. 3\n',
+        'inline or numbered, the same text is one note; a page differs');
+    const segs = c.renumberFootnotes(root.children.map((n) =>
+        ({ id: n.id, text: bodies[n.id] }))).segments;
+    assert.deepEqual(segs[1].notes, [{ n: 3, text: '[@urbut2019], p. 3' }],
+                     'a card gives only the notes it is first to give');
+    assert.deepEqual(segs[1].cardNotes.map((x) => x.n), [1, 2, 3],
+                     'but renders every note it refers to');
+    assert.deepEqual(segs[1].refs, [1, 3, 2], 'in order of reference');
 });
 
 test('the preview can gather footnotes by section or at the end, and ' +

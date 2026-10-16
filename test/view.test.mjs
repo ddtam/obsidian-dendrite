@@ -841,8 +841,8 @@ test('the preview gathers footnotes under each section or at the end',
     await tick(20);
     assert.deepEqual(notes(), [], 'under each card: nothing gathered');
     const b = view.blocks.get('G-ddddd').el;
-    assert.equal(b.textContent.trim(), 'Aims text.^[[@k]]',
-                 'inline notes left to Obsidian');
+    assert.equal(b.textContent.trim(), 'Aims text.[^1]\n\n[^1]: [@k]',
+                 'under each card, an inline note has its number too');
     assert.ok(!b.hasClass('is-notes-gathered'));
 });
 
@@ -1411,6 +1411,28 @@ test('moving the board tells the window it scrolled, so other plugins\' ' +
     view.render();
     assert.ok(scrolls > 0, 'so is redrawing the board');
     h.window.removeEventListener('scroll', heard, { capture: true });
+    view.contentEl.remove();
+});
+
+test('a copy does not leave the board scrolled sideways', async () => {
+    // Seen in Obsidian: at Ctrl+C another handler focused a hidden
+    // textarea, the browser scrolled the board to show it, from 1008 to
+    // 0, and every column jumped right.
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    h.window.document.body.appendChild(view.contentEl);
+    const board = view.board;
+    board.scrollLeft = 1008;
+    const card = view.cardEls.get('G-aaaaa');
+    card.dispatchEvent(new h.window.Event('copy', { bubbles: true }));
+    board.scrollLeft = 0;
+    board.dispatchEvent(new h.window.Event('scroll'));
+    assert.equal(board.scrollLeft, 1008, 'put back at once');
+    await tick(400);
+    board.scrollLeft = 300;
+    board.dispatchEvent(new h.window.Event('scroll'));
+    assert.equal(board.scrollLeft, 300, 'a later scroll is left alone');
     view.contentEl.remove();
 });
 
