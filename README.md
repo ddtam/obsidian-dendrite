@@ -181,6 +181,23 @@ Footnotes are numbered across the whole manuscript. Each card can number its own
 
 PDF and Word go through [Pandoc](https://pandoc.org) on the desktop, PDF with `xelatex` from TeX Live. Citations are written in cards as `[@citekey]` and fetched at export, exactly the keys used, from Zotero through [Better BibTeX](https://retorque.re/zotero-better-bibtex/); a key the library lacks stops the export and is named. With Zotero closed, a fallback `.bib` set in the settings is used, or the export stops. The citation style is set per manuscript in its Settings, as a CSL file in the vault; with none, Pandoc's default, Chicago author-date, is used. A PDF opens in a pane beside the board, and a Word file in the system's default app. Obsidian's links become their text and embedded images real images.
 
+### How the PDF and Word files look
+
+Set in the manuscript's settings, under **PDF and Word**, or as properties on the index note:
+
+| Property | For | Example | Unset |
+| --- | --- | --- | --- |
+| `dendrite_font` | PDF | `Arial` | Latin Modern, LaTeX's own |
+| `dendrite_font_size` | PDF | `10` (points: 8, 9, 10, 11, 12, 14, 17 or 20) | 10 |
+| `dendrite_margin` | PDF | `2cm`, `1in` (a bare number is cm) | 2.5cm |
+| `dendrite_paper` | PDF | `a4` or `letter` | letter |
+| `dendrite_line_spacing` | PDF | `1.15` | single |
+| `dendrite_page_numbers` | PDF | `false` to leave them off | numbered consecutively at the foot |
+| `dendrite_pandoc_defaults` | both | `styles/grant.yaml`, a Pandoc defaults file for anything else | none |
+| `dendrite_reference_docx` | Word | `styles/reference.docx`, whose styles Word export copies | Pandoc's |
+
+The font must be installed on the computer that exports. Word takes its fonts and sizes only from a reference document: **Make reference.docx** in the settings writes Pandoc's own beside the index, to open in Word, restyle and save. The settings win over a defaults file.
+
 ## Export from the command line
 
 `scripts/dendrite-export.mjs` shows what a manuscript exports without Obsidian, for checking a draft from a terminal or another tool. It calls the same functions Export, the preview and the quota bars use, and only reads files.

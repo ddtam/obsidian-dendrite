@@ -1295,7 +1295,9 @@ var require_pandoc = __commonJS({
       }
       return missing.length ? { missing } : { bib };
     }
+    var ARTICLE_SIZES = [10, 11, 12];
     function pandocArgs(o) {
+      const st = o.style || {};
       const args = [
         o.input,
         "--from",
@@ -1304,12 +1306,26 @@ var require_pandoc = __commonJS({
         o.output,
         "--standalone"
       ];
+      if (st.defaults) args.unshift(`--defaults=${st.defaults}`);
       if (o.format === "pdf") {
         args.push(
           `--pdf-engine=${o.engine || "xelatex"}`,
           "-V",
-          "geometry:margin=2.5cm"
+          `geometry:margin=${st.margin || "2.5cm"}`
         );
+        if (st.paper) args.push("-V", `papersize=${st.paper}`);
+        if (st.font) args.push("-V", `mainfont=${st.font}`);
+        if (st.fontSize) {
+          if (!ARTICLE_SIZES.includes(st.fontSize)) {
+            args.push("-V", "documentclass=extarticle");
+          }
+          args.push("-V", `fontsize=${st.fontSize}pt`);
+        }
+        if (st.lineSpacing) args.push("-V", `linestretch=${st.lineSpacing}`);
+        if (st.pageNumbers === false) args.push("-V", "pagestyle=empty");
+      }
+      if (o.format === "docx" && st.referenceDocx) {
+        args.push(`--reference-doc=${st.referenceDocx}`);
       }
       if (o.bibliography) {
         args.push("--citeproc", "--bibliography", o.bibliography);
@@ -1347,7 +1363,8 @@ var require_pandoc = __commonJS({
         engine: o.engine,
         bibliography,
         csl: o.csl,
-        resourcePath: o.resourcePath
+        resourcePath: o.resourcePath,
+        style: o.style
       });
       try {
         await deps.run(o.pandoc || "pandoc", args);
@@ -3456,7 +3473,8 @@ var DendriteView = class extends ItemView {
       wordsPerPage: wpp > 0 ? wpp : 500,
       headingTop: top >= 1 && top <= 6 ? top : this.plugin.settings.headingTop,
       number: fm.dendrite_number_sections === true,
-      csl: typeof fm.dendrite_csl === "string" && fm.dendrite_csl.trim() ? fm.dendrite_csl.trim() : null
+      csl: typeof fm.dendrite_csl === "string" && fm.dendrite_csl.trim() ? fm.dendrite_csl.trim() : null,
+      style: exportStyle(fm)
     };
   }
   cardProps(id) {
@@ -4324,6 +4342,36 @@ var DendriteView = class extends ItemView {
     await this.app.workspace.getLeaf("tab").openFile(out);
     new Notice(`Dendrite: exported to ${path}`);
   }
+  /**
+   * Write Pandoc's default reference.docx beside the index, never over
+   * one that exists. Returns its path from the vault root, or null.
+   */
+  async makeReferenceDocx() {
+    const nodePath = require("path");
+    const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
+    const parent = this.file.parent && this.file.parent.path !== "/" ? this.file.parent.path + "/" : "";
+    const rel = normalizePath(parent + "reference.docx");
+    if (this.app.vault.getAbstractFileByPath(rel)) {
+      new Notice(`Dendrite: ${rel} already exists; it is used as is.`);
+      return rel;
+    }
+    try {
+      await this.plugin.pandocDeps().run(
+        this.plugin.settings.pandocPath || "pandoc",
+        [
+          "-o",
+          nodePath.join(base, rel),
+          "--print-default-data-file",
+          "reference.docx"
+        ]
+      );
+    } catch (err) {
+      new Notice(`Dendrite: Pandoc could not write reference.docx: ${err.message || err}`);
+      return null;
+    }
+    new Notice(`Dendrite: wrote ${rel}. Open it in Word, set the Normal and heading styles, and save.`);
+    return rel;
+  }
   async exportPandoc(text, format, dir, name, ms) {
     const s = this.plugin.settings;
     const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
@@ -4331,12 +4379,18 @@ var DendriteView = class extends ItemView {
     const rel = normalizePath(`${dir}/${name}.${format}`);
     const output = nodePath.join(base, rel);
     const csl = ms.csl ? nodePath.join(base, ms.csl) : null;
+    const inVault = (p) => p ? nodePath.join(base, p) : null;
+    const style = Object.assign({}, ms.style, {
+      defaults: inVault(ms.style.defaults),
+      referenceDocx: inVault(ms.style.referenceDocx)
+    });
     const notice = new Notice("Dendrite: exporting to " + (format === "pdf" ? "PDF" : "Word") + "\u2026", 0);
     const result = await pandoc.exportDocument({
       md: text,
       format,
       output,
       csl,
+      style,
       port: s.zoteroPort,
       fallbackBib: s.fallbackBib || null,
       pandoc: s.pandocPath || "pandoc",
@@ -4655,6 +4709,25 @@ var DendritePreview = class extends ItemView {
     }
   }
 };
+function textProp(v) {
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+function exportStyle(fm) {
+  const size = parseFloat(String(fm.dendrite_font_size || ""));
+  const spacing = Number(fm.dendrite_line_spacing);
+  let margin = textProp(String(fm.dendrite_margin || ""));
+  if (margin && /^\d+(\.\d+)?$/.test(margin)) margin += "cm";
+  return {
+    font: textProp(fm.dendrite_font),
+    fontSize: size > 0 ? size : null,
+    margin,
+    paper: ["letter", "a4"].includes(fm.dendrite_paper) ? fm.dendrite_paper : null,
+    lineSpacing: spacing > 0 ? spacing : null,
+    pageNumbers: fm.dendrite_page_numbers !== false,
+    defaults: textProp(fm.dendrite_pandoc_defaults),
+    referenceDocx: textProp(fm.dendrite_reference_docx)
+  };
+}
 function nodeRequest(url, init) {
   const http = require("http");
   return new Promise((resolve, reject) => {
@@ -4751,6 +4824,53 @@ var ManuscriptModal = class extends Modal {
     new Setting(contentEl).setName("Citation style").setDesc("A CSL style file in the vault, as a path from the vault root, for PDF and Word export. Empty: Pandoc's default, Chicago author-date.").addText((t) => t.setPlaceholder("styles/nature.csl").setValue(ms.csl || "").onChange((v) => {
       draft.dendrite_csl = v.trim() || null;
     }));
+    const st = ms.style;
+    new Setting(contentEl).setName("PDF and Word").setHeading();
+    const text = (name, desc, value, key, placeholder) => new Setting(contentEl).setName(name).setDesc(desc).addText((t) => t.setPlaceholder(placeholder || "").setValue(value === null || value === void 0 ? "" : String(value)).onChange((v) => {
+      draft[key] = v.trim() || null;
+    }));
+    text(
+      "Font",
+      "For PDF, any font installed on this computer. Empty: Latin Modern, LaTeX's own.",
+      st.font,
+      "dendrite_font",
+      "Arial"
+    );
+    text("Font size", "In points, for PDF. 8, 9, 10, 11, 12, 14, 17 or 20. Empty: 10.", st.fontSize, "dendrite_font_size", "10");
+    text("Margin", "For PDF, on every side, such as 2cm or 1in. Empty: 2.5cm.", st.margin, "dendrite_margin", "2.5cm");
+    new Setting(contentEl).setName("Paper").setDesc("For PDF.").addDropdown((d) => d.addOption("letter", "US Letter").addOption("a4", "A4").setValue(st.paper || "letter").onChange((v) => {
+      draft.dendrite_paper = v === "letter" ? null : v;
+    }));
+    text(
+      "Line spacing",
+      "For PDF: 1 is single, 1.5 one and a half. Empty: single.",
+      st.lineSpacing,
+      "dendrite_line_spacing",
+      "1"
+    );
+    new Setting(contentEl).setName("Page numbers").setDesc("For PDF, at the foot of each page, numbered consecutively.").addToggle((tg) => tg.setValue(st.pageNumbers).onChange((v) => {
+      draft.dendrite_page_numbers = v ? null : false;
+    }));
+    text(
+      "Pandoc defaults file",
+      "For anything else a call asks, a Pandoc defaults file in the vault, as a path from the vault root. The settings above win over it.",
+      st.defaults,
+      "dendrite_pandoc_defaults",
+      "styles/grant.yaml"
+    );
+    text(
+      "Word reference document",
+      "A .docx whose styles Word export copies, fonts and sizes included, as a path from the vault root. Set its styles in Word.",
+      st.referenceDocx,
+      "dendrite_reference_docx",
+      "styles/reference.docx"
+    );
+    if (Platform.isDesktopApp) {
+      new Setting(contentEl).setDesc("No reference document yet? This writes Pandoc's own beside the index, to open in Word, restyle and save.").addButton((b) => b.setButtonText("Make reference.docx").onClick(async () => {
+        const rel = await view.makeReferenceDocx();
+        if (rel) draft.dendrite_reference_docx = rel;
+      }));
+    }
     new Setting(contentEl).setName("Top section heading level").setDesc("Export writes top-level sections at this level.").addDropdown((d) => {
       for (let i = 1; i <= 4; i++) d.addOption(String(i), "H" + i);
       d.setValue(String(ms.headingTop)).onChange((v) => {

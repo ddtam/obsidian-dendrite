@@ -151,3 +151,29 @@ test('Zotero is asked with Node\'s http, which sends no browser headers',
     assert.deepEqual(await p.fetchBib(['k'], port, deps), { down: true },
                      'nothing listening is Zotero being closed');
 });
+
+test('the manuscript\'s style reaches Pandoc: font, size, margin, paper, ' +
+     'spacing, page numbers, defaults and Word\'s reference', () => {
+    const base = { input: 'in.md', output: 'o.pdf', format: 'pdf' };
+    const v = (args) => args.filter((a, i) => args[i - 1] === '-V');
+    assert.deepEqual(v(p.pandocArgs(base)), ['geometry:margin=2.5cm'],
+                     'nothing set: Pandoc\'s look, 2.5cm margins');
+    const style = { font: 'Arial', fontSize: 10, margin: '2cm',
+                    paper: 'a4', lineSpacing: 1.15, pageNumbers: false,
+                    defaults: '/v/grant.yaml',
+                    referenceDocx: '/v/ref.docx' };
+    const pdf = p.pandocArgs(Object.assign({ style }, base));
+    assert.deepEqual(v(pdf), ['geometry:margin=2cm', 'papersize=a4',
+        'mainfont=Arial', 'fontsize=10pt', 'linestretch=1.15',
+        'pagestyle=empty']);
+    assert.equal(pdf[0], '--defaults=/v/grant.yaml',
+                 'a defaults file first, so the settings win over it');
+    assert.ok(!pdf.some((a) => a.startsWith('--reference-doc')));
+    assert.ok(v(p.pandocArgs(Object.assign({}, base,
+        { style: { fontSize: 9 } }))).includes('documentclass=extarticle'),
+        'a size article lacks');
+    const docx = p.pandocArgs({ input: 'in.md', output: 'o.docx',
+                                format: 'docx', style });
+    assert.ok(docx.includes('--reference-doc=/v/ref.docx'));
+    assert.deepEqual(v(docx), [], 'PDF settings stay out of Word');
+});

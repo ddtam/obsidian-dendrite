@@ -2171,6 +2171,7 @@ class DendriteView extends ItemView {
             number: fm.dendrite_number_sections === true,
             csl: typeof fm.dendrite_csl === 'string' &&
                 fm.dendrite_csl.trim() ? fm.dendrite_csl.trim() : null,
+            style: exportStyle(fm),
         };
     }
 
@@ -3056,6 +3057,36 @@ class DendriteView extends ItemView {
         new Notice(`Dendrite: exported to ${path}`);
     }
 
+    /**
+     * Write Pandoc's default reference.docx beside the index, never over
+     * one that exists. Returns its path from the vault root, or null.
+     */
+    async makeReferenceDocx() {
+        const nodePath = require('path');
+        const base = this.app.vault.adapter.getBasePath ?
+            this.app.vault.adapter.getBasePath() : '';
+        const parent = this.file.parent && this.file.parent.path !== '/' ?
+            this.file.parent.path + '/' : '';
+        const rel = normalizePath(parent + 'reference.docx');
+        if (this.app.vault.getAbstractFileByPath(rel)) {
+            new Notice(`Dendrite: ${rel} already exists; it is used as is.`);
+            return rel;
+        }
+        try {
+            await this.plugin.pandocDeps().run(
+                this.plugin.settings.pandocPath || 'pandoc',
+                ['-o', nodePath.join(base, rel),
+                 '--print-default-data-file', 'reference.docx']);
+        } catch (err) {
+            new Notice('Dendrite: Pandoc could not write ' +
+                       `reference.docx: ${err.message || err}`);
+            return null;
+        }
+        new Notice(`Dendrite: wrote ${rel}. Open it in Word, set the ` +
+                   'Normal and heading styles, and save.');
+        return rel;
+    }
+
     async exportPandoc(text, format, dir, name, ms) {
         const s = this.plugin.settings;
         const base = this.app.vault.adapter.getBasePath ?
@@ -3064,10 +3095,14 @@ class DendriteView extends ItemView {
         const rel = normalizePath(`${dir}/${name}.${format}`);
         const output = nodePath.join(base, rel);
         const csl = ms.csl ? nodePath.join(base, ms.csl) : null;
+        const inVault = (p) => (p ? nodePath.join(base, p) : null);
+        const style = Object.assign({}, ms.style, {
+            defaults: inVault(ms.style.defaults),
+            referenceDocx: inVault(ms.style.referenceDocx) });
         const notice = new Notice('Dendrite: exporting to ' +
             (format === 'pdf' ? 'PDF' : 'Word') + '…', 0);
         const result = await pandoc.exportDocument({
-            md: text, format, output, csl,
+            md: text, format, output, csl, style,
             port: s.zoteroPort, fallbackBib: s.fallbackBib || null,
             pandoc: s.pandocPath || 'pandoc',
             engine: format === 'pdf' ? (s.pdfEngine || 'xelatex') : null,
@@ -3409,6 +3444,36 @@ class DendritePreview extends ItemView {
     }
 }
 
+/** A text property, trimmed, or null. */
+function textProp(v) {
+    return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+/**
+ * How PDF and Word export look, from the index's properties: font, font
+ * size in points (`10` or `10pt`), margin (a bare number is in cm),
+ * paper (letter or a4), line
+ * spacing, page numbers (on unless false), a Pandoc defaults file and a
+ * Word reference document, both paths from the vault root.
+ */
+function exportStyle(fm) {
+    const size = parseFloat(String(fm.dendrite_font_size || ''));
+    const spacing = Number(fm.dendrite_line_spacing);
+    let margin = textProp(String(fm.dendrite_margin || ''));
+    if (margin && /^\d+(\.\d+)?$/.test(margin)) margin += 'cm';
+    return {
+        font: textProp(fm.dendrite_font),
+        fontSize: size > 0 ? size : null,
+        margin,
+        paper: ['letter', 'a4'].includes(fm.dendrite_paper) ?
+            fm.dendrite_paper : null,
+        lineSpacing: spacing > 0 ? spacing : null,
+        pageNumbers: fm.dendrite_page_numbers !== false,
+        defaults: textProp(fm.dendrite_pandoc_defaults),
+        referenceDocx: textProp(fm.dendrite_reference_docx),
+    };
+}
+
 /**
  * A POST with Node's http, answered as { status, json() }. Only what the
  * Zotero request needs: no redirects, no User-Agent, no Origin.
@@ -3542,6 +3607,56 @@ class ManuscriptModal extends Modal {
                 .setValue(ms.csl || '').onChange((v) => {
                     draft.dendrite_csl = v.trim() || null;
                 }));
+        const st = ms.style;
+        new Setting(contentEl).setName('PDF and Word').setHeading();
+        const text = (name, desc, value, key, placeholder) =>
+            new Setting(contentEl).setName(name).setDesc(desc)
+                .addText((t) => t.setPlaceholder(placeholder || '')
+                    .setValue(value === null || value === undefined ? '' :
+                        String(value))
+                    .onChange((v) => { draft[key] = v.trim() || null; }));
+        text('Font', 'For PDF, any font installed on this computer. ' +
+             'Empty: Latin Modern, LaTeX\'s own.', st.font,
+             'dendrite_font', 'Arial');
+        text('Font size', 'In points, for PDF. 8, 9, 10, 11, 12, 14, 17 ' +
+             'or 20. Empty: 10.', st.fontSize, 'dendrite_font_size', '10');
+        text('Margin', 'For PDF, on every side, such as 2cm or 1in. ' +
+             'Empty: 2.5cm.', st.margin, 'dendrite_margin', '2.5cm');
+        new Setting(contentEl).setName('Paper')
+            .setDesc('For PDF.')
+            .addDropdown((d) => d.addOption('letter', 'US Letter')
+                .addOption('a4', 'A4').setValue(st.paper || 'letter')
+                .onChange((v) => {
+                    draft.dendrite_paper = v === 'letter' ? null : v;
+                }));
+        text('Line spacing', 'For PDF: 1 is single, 1.5 one and a half. ' +
+             'Empty: single.', st.lineSpacing, 'dendrite_line_spacing',
+             '1');
+        new Setting(contentEl).setName('Page numbers')
+            .setDesc('For PDF, at the foot of each page, numbered ' +
+                     'consecutively.')
+            .addToggle((tg) => tg.setValue(st.pageNumbers)
+                .onChange((v) => {
+                    draft.dendrite_page_numbers = v ? null : false;
+                }));
+        text('Pandoc defaults file', 'For anything else a call asks, a ' +
+             'Pandoc defaults file in the vault, as a path from the vault ' +
+             'root. The settings above win over it.', st.defaults,
+             'dendrite_pandoc_defaults', 'styles/grant.yaml');
+        text('Word reference document', 'A .docx whose styles Word export ' +
+             'copies, fonts and sizes included, as a path from the vault ' +
+             'root. Set its styles in Word.', st.referenceDocx,
+             'dendrite_reference_docx', 'styles/reference.docx');
+        if (Platform.isDesktopApp) {
+            new Setting(contentEl).setDesc('No reference document yet? ' +
+                'This writes Pandoc\'s own beside the index, to open in ' +
+                'Word, restyle and save.')
+                .addButton((b) => b.setButtonText('Make reference.docx')
+                    .onClick(async () => {
+                        const rel = await view.makeReferenceDocx();
+                        if (rel) draft.dendrite_reference_docx = rel;
+                    }));
+        }
         new Setting(contentEl).setName('Top section heading level')
             .setDesc('Export writes top-level sections at this level.')
             .addDropdown((d) => {

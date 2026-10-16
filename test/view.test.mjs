@@ -1050,8 +1050,10 @@ test('dragging a card drops it above, below or into another, with undo',
 test('PDF export from the board uses the manuscript\'s citation style',
      async () => {
     const { view } = await open(
-        '---\ndendrite_prefix: G\ndendrite_csl: styles/apa.csl\n---\n' +
-        '- [[G-aaaaa|A]]\n',
+        '---\ndendrite_prefix: G\ndendrite_csl: styles/apa.csl\n' +
+        'dendrite_font: Arial\ndendrite_font_size: 10pt\n' +
+        'dendrite_margin: 2\ndendrite_reference_docx: styles/ref.docx\n' +
+        '---\n- [[G-aaaaa|A]]\n',
         { 'G-aaaaa': 'As shown [@smith2020].' });
     view.app.vault.adapter = { getBasePath: () => '/vault' };
     const runs = [];
@@ -1072,6 +1074,14 @@ test('PDF export from the board uses the manuscript\'s citation style',
               'written beside the index, in the vault');
     assert.equal(args[args.indexOf('--csl') + 1], '/vault/styles/apa.csl');
     assert.deepEqual(shown, [['W/Grant/exports/Grant.pdf', 'pdf']]);
+    // The index's style: Arial 10pt, a bare margin in cm.
+    for (const v of ['mainfont=Arial', 'fontsize=10pt',
+                     'geometry:margin=2cm']) {
+        assert.ok(args.includes(v), v);
+    }
+    await view.exportTo(null, 'docx');
+    assert.ok(runs[1].includes('--reference-doc=/vault/styles/ref.docx'),
+              'Word takes its styles from the reference, in the vault');
 });
 
 test('the index and every card get their type, kept beside existing ones',

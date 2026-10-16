@@ -91,13 +91,36 @@ async function fetchBib(keys, port, deps) {
     return missing.length ? { missing } : { bib };
 }
 
-/** Pandoc's arguments for one export. */
+// Sizes LaTeX's article class takes; others need extarticle.
+const ARTICLE_SIZES = [10, 11, 12];
+
+/**
+ * Pandoc's arguments for one export. `o.style` holds what the manuscript
+ * sets: font, fontSize (points), margin, paper, lineSpacing, pageNumbers,
+ * defaults (a Pandoc defaults file) and referenceDocx (Word's styles).
+ * A defaults file comes first, so the manuscript's own settings win.
+ */
 function pandocArgs(o) {
+    const st = o.style || {};
     const args = [o.input, '--from', 'markdown', '-o', o.output,
                   '--standalone'];
+    if (st.defaults) args.unshift(`--defaults=${st.defaults}`);
     if (o.format === 'pdf') {
         args.push(`--pdf-engine=${o.engine || 'xelatex'}`,
-                  '-V', 'geometry:margin=2.5cm');
+                  '-V', `geometry:margin=${st.margin || '2.5cm'}`);
+        if (st.paper) args.push('-V', `papersize=${st.paper}`);
+        if (st.font) args.push('-V', `mainfont=${st.font}`);
+        if (st.fontSize) {
+            if (!ARTICLE_SIZES.includes(st.fontSize)) {
+                args.push('-V', 'documentclass=extarticle');
+            }
+            args.push('-V', `fontsize=${st.fontSize}pt`);
+        }
+        if (st.lineSpacing) args.push('-V', `linestretch=${st.lineSpacing}`);
+        if (st.pageNumbers === false) args.push('-V', 'pagestyle=empty');
+    }
+    if (o.format === 'docx' && st.referenceDocx) {
+        args.push(`--reference-doc=${st.referenceDocx}`);
     }
     if (o.bibliography) {
         args.push('--citeproc', '--bibliography', o.bibliography);
@@ -109,7 +132,8 @@ function pandocArgs(o) {
 
 /**
  * Export markdown to PDF or Word. `o` holds md, format ('pdf' | 'docx'),
- * output, csl, port, fallbackBib, pandoc, engine, resourcePath, resolve.
+ * output, csl, port, fallbackBib, pandoc, engine, resourcePath, resolve,
+ * and style, as pandocArgs takes it.
  * Returns { ok } or { error } with a message for the writer.
  */
 async function exportDocument(o, deps) {
@@ -141,7 +165,8 @@ async function exportDocument(o, deps) {
     await deps.writeFile(input, text);
     const args = pandocArgs({ input, output: o.output, format: o.format,
                               engine: o.engine, bibliography, csl: o.csl,
-                              resourcePath: o.resourcePath });
+                              resourcePath: o.resourcePath,
+                              style: o.style });
     try {
         await deps.run(o.pandoc || 'pandoc', args);
     } catch (err) {
