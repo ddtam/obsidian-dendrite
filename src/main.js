@@ -4211,10 +4211,40 @@ module.exports = class DendritePlugin extends Plugin {
             else await new Promise((r) => setTimeout(r, 150));
         }
         if (!file) return;
-        const open = this.app.workspace.getLeavesOfType('pdf')
-            .find((l) => l.view.file && l.view.file.path === rel);
-        const leaf = open || this.app.workspace.getLeaf('split', 'vertical');
+        await this.app.workspace.revealLeaf(
+            await this.exportLeaf(file), { focus: false });
+    }
+
+    /**
+     * Where an exported PDF opens, without taking room from the board: a
+     * tab already showing an export from the same folder, else a new tab
+     * beside the manuscript's preview, else, with no preview, a split.
+     */
+    async exportLeaf(file) {
+        const ws = this.app.workspace;
+        const dir = file.parent ? file.parent.path : '';
+        const shown = ws.getLeavesOfType('pdf').find((l) => l.view.file &&
+            (l.view.file.parent ? l.view.file.parent.path : '') === dir);
+        if (shown) {
+            await shown.openFile(file, { active: false });
+            return shown;
+        }
+        // The manuscript's index sits beside its exports folder.
+        const home = dir.replace(/\/?exports$/, '');
+        const previews = ws.getLeavesOfType(PREVIEW);
+        const preview = previews.find((l) => l.view.file &&
+            (l.view.file.parent ? l.view.file.parent.path : '') === home) ||
+            previews[0];
+        let leaf;
+        if (preview && preview.parent && ws.createLeafInParent) {
+            const at = preview.parent.children ?
+                preview.parent.children.indexOf(preview) + 1 : 0;
+            leaf = ws.createLeafInParent(preview.parent, at);
+        } else {
+            leaf = ws.getLeaf('split', 'vertical');
+        }
         await leaf.openFile(file, { active: false });
+        return leaf;
     }
 
     /** The preview for a manuscript, opened beside the board or reused. */

@@ -1084,6 +1084,58 @@ test('PDF export from the board uses the manuscript\'s citation style',
               'Word takes its styles from the reference, in the vault');
 });
 
+test('an exported PDF opens beside the preview, or in the tab already ' +
+     'showing an export, never by splitting the board', async () => {
+    const Plugin = require('../src/main.js');
+    const tfile = (path) => new h.TFile(path);
+    const made = [];
+    const shown = [];
+    const leaf = (type, file, parent) => ({ type, parent,
+        view: { file }, openFile: async (f) => { shown.push(f.path); } });
+    const group = { children: [] };
+    const preview = leaf('dendrite-preview', tfile('W/Grant/Grant.md'),
+                         group);
+    group.children.push(leaf('markdown', null, group), preview);
+    const leaves = { 'dendrite-preview': [preview], pdf: [] };
+    const files = new Map();
+    const ws = {
+        getLeavesOfType: (t) => leaves[t] || [],
+        createLeafInParent: (parent, at) => {
+            const l = leaf('pdf', null, parent);
+            made.push(['tab', parent === group, at]);
+            return l;
+        },
+        getLeaf: (how) => { made.push(['split', how]); return leaf('pdf'); },
+        revealLeaf: async () => {},
+    };
+    const self = { app: { workspace: ws, vault: {
+        getAbstractFileByPath: (p) => files.get(p) } } };
+    self.exportLeaf = Plugin.prototype.exportLeaf;
+    files.set('W/Grant/exports/Grant.pdf',
+              tfile('W/Grant/exports/Grant.pdf'));
+    await Plugin.prototype.showExport.call(self,
+        'W/Grant/exports/Grant.pdf', '/v/x.pdf', 'pdf');
+    assert.deepEqual(made, [['tab', true, 2]], 'a new tab after the preview');
+    // A branch export later reuses the tab showing the first.
+    const tab = { type: 'pdf', parent: group,
+        view: { file: files.get('W/Grant/exports/Grant.pdf') },
+        openFile: async (f) => { shown.push('reused ' + f.path); } };
+    leaves.pdf.push(tab);
+    files.set('W/Grant/exports/Grant - Aims.pdf',
+              tfile('W/Grant/exports/Grant - Aims.pdf'));
+    await Plugin.prototype.showExport.call(self,
+        'W/Grant/exports/Grant - Aims.pdf', '/v/y.pdf', 'pdf');
+    assert.equal(made.length, 1, 'no new tab, no split');
+    assert.equal(shown[shown.length - 1],
+                 'reused W/Grant/exports/Grant - Aims.pdf');
+    // With no preview open, a split, as before.
+    leaves.pdf = [];
+    leaves['dendrite-preview'] = [];
+    await Plugin.prototype.showExport.call(self,
+        'W/Grant/exports/Grant.pdf', '/v/x.pdf', 'pdf');
+    assert.deepEqual(made[1], ['split', 'split']);
+});
+
 test('the index and every card get their type, kept beside existing ones',
      async () => {
     const { view, read } = await open(
