@@ -108,24 +108,46 @@ test('no citations: no Zotero call, no citeproc; Pandoc errors surface',
     assert.match(r.error, /Pandoc failed: xelatex not found/);
 });
 
-test('Zotero is asked through Obsidian, not the page', async () => {
-    // In Obsidian a page fetch to Better BibTeX fails its cross-origin
-    // check, which read as Zotero being closed (2026-10-16). The harness
-    // has no cross-origin check, so this shows only that the request goes
-    // through Obsidian's requestUrl, which makes none.
-    const h = require('./harness.cjs');
+test('Zotero is asked with Node\'s http, which sends no browser headers',
+     async () => {
+    // Zotero drops a request carrying a browser User-Agent or an Origin
+    // without answering (2026-10-16, checked with curl), so a page fetch
+    // and Obsidian's requestUrl both read as Zotero being closed. A local
+    // server stands in for Zotero here and refuses the same way.
+    const http = require('http');
+    const seen = [];
+    const server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+            seen.push({ headers: req.headers, body });
+            if (/Mozilla/.test(req.headers['user-agent'] || '') ||
+                req.headers.origin) {
+                req.socket.destroy();
+                return;
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ jsonrpc: '2.0',
+                                     result: '@article{k, title = {T}}' }));
+        });
+    });
+    require('./harness.cjs');
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const port = server.address().port;
+    try {
+        const Plugin = require('../src/main.js');
+        const deps = Plugin.prototype.pandocDeps.call(
+            { pandocEnv: () => ({}) });
+        assert.deepEqual(await p.fetchBib(['k'], port, deps),
+                         { bib: '@article{k, title = {T}}' });
+        assert.equal(JSON.parse(seen[0].body).method, 'item.export');
+        assert.equal(seen[0].headers['user-agent'], undefined);
+        assert.equal(seen[0].headers.origin, undefined);
+    } finally {
+        await new Promise((r) => server.close(r));
+    }
     const Plugin = require('../src/main.js');
     const deps = Plugin.prototype.pandocDeps.call({ pandocEnv: () => ({}) });
-    const before = h.requests.length;
-    h.obsidian.respond = () => ({ status: 200,
-        json: { jsonrpc: '2.0', result: '@article{k, title = {T}}' } });
-    const got = await p.fetchBib(['k'], 23119, deps);
-    assert.deepEqual(got, { bib: '@article{k, title = {T}}' });
-    const req = h.requests[before];
-    assert.equal(req.url, 'http://127.0.0.1:23119/better-bibtex/json-rpc');
-    assert.equal(req.method, 'POST');
-    assert.equal(req.throw, false);
-    h.obsidian.respond = () => { throw new Error('ECONNREFUSED'); };
-    assert.deepEqual(await p.fetchBib(['k'], 23119, deps), { down: true },
-                     'a refused connection is still Zotero being closed');
+    assert.deepEqual(await p.fetchBib(['k'], port, deps), { down: true },
+                     'nothing listening is Zotero being closed');
 });

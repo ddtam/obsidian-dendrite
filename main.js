@@ -1383,8 +1383,7 @@ var {
   setIcon,
   Platform,
   normalizePath,
-  Keymap,
-  requestUrl
+  Keymap
 } = require("obsidian");
 var core = require_core();
 var textedit = require_textedit();
@@ -4656,6 +4655,34 @@ var DendritePreview = class extends ItemView {
     }
   }
 };
+function nodeRequest(url, init) {
+  const http = require("http");
+  return new Promise((resolve, reject) => {
+    const body = init.body || "";
+    const req = http.request(url, {
+      method: init.method,
+      headers: Object.assign(
+        {},
+        init.headers,
+        { "Content-Length": Buffer.byteLength(body) }
+      ),
+      timeout: 3e4
+    }, (res) => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => {
+        data += c;
+      });
+      res.on("end", () => resolve({
+        status: res.statusCode,
+        json: async () => JSON.parse(data)
+      }));
+    });
+    req.on("timeout", () => req.destroy(new Error("timed out")));
+    req.on("error", reject);
+    req.end(body);
+  });
+}
 function tickBeforeKey(item) {
   const dom = item.dom;
   const tick = item.checkIconEl || dom && dom.querySelector(":scope > .menu-item-icon.mod-checked");
@@ -5134,19 +5161,11 @@ module.exports = class DendritePlugin extends Plugin {
         { timeout: 18e4, env: this.pandocEnv() },
         (err, out, stderr) => err ? rej(Object.assign(err, { stderr })) : res()
       )),
-      // Through Obsidian rather than the page: Better BibTeX's
-      // server answers the browser's cross-origin check without
-      // allowing it, so a page fetch fails as if Zotero were closed.
-      fetch: async (url, init) => {
-        const r = await requestUrl({
-          url,
-          method: init.method,
-          headers: init.headers,
-          body: init.body,
-          throw: false
-        });
-        return { status: r.status, json: async () => r.json };
-      }
+      // Through Node rather than the page or Obsidian: Zotero drops,
+      // unanswered, a request with a browser's User-Agent or an
+      // Origin, which both of those send, so either fails as if
+      // Zotero were closed. Node's http sends neither.
+      fetch: (url, init) => nodeRequest(url, init)
     };
   }
   /**
