@@ -1610,3 +1610,41 @@ test('a card\'s text edits join the undo history with tree changes',
     assert.equal(text(cardPath('G-bbbbb')), 'From sync.');
     assert.ok(h.notices.length > before, 'and says why');
 });
+
+test('Escape closes find from its box or from the board', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'Alpha', 'G-bbbbb': 'Beta alpha' });
+    const key = (el, k, shift = false) => el.dispatchEvent(
+        new h.window.KeyboardEvent('keydown', { key: k, shiftKey: shift,
+            bubbles: true, cancelable: true }));
+    view.openFind();
+    const f = view.find;
+    f.input.value = 'alpha';
+    f.input.dispatchEvent(new h.window.Event('input'));
+    await tick(150);
+    // In the box, the keys work even where no scope delivers them.
+    key(f.input, 'Enter');
+    await tick(20);
+    assert.equal(f.index, 1, 'Enter steps');
+    key(f.input, 'Enter', true);
+    await tick(20);
+    assert.equal(f.index, 0, 'Shift+Enter steps back');
+    key(f.input, 'Escape');
+    assert.equal(view.find, null, 'Escape in the box closes it');
+    // From the board: a card being edited is left first, then find.
+    view.openFind();
+    await view.startEdit('G-aaaaa');
+    const esc = view.scope.keys.find((k) => k.key === 'Escape' &&
+                                     !k.mods.length).fn;
+    esc();
+    await tick(20);
+    assert.equal(view.editing, null);
+    assert.ok(view.find, 'find stays while the card is left');
+    assert.equal(esc(), false, 'handled');
+    assert.equal(view.find, null, 'then closes');
+    // And from the board's own keys, where no scope is active.
+    view.openFind();
+    key(view.contentEl, 'Escape');
+    assert.equal(view.find, null, 'closed from the board');
+});

@@ -1022,9 +1022,16 @@ class DendriteView extends ItemView {
                 this.cancelDrag();
                 return false;
             }
-            if (!this.editing) return true;
-            this.endEdit();
-            return false;
+            // Leaving a card comes first; with no card open, find closes.
+            if (this.editing) {
+                this.endEdit();
+                return false;
+            }
+            if (this.find) {
+                this.closeFind();
+                return false;
+            }
+            return true;
         });
         // In edit mode every key belongs to the card's text, Ctrl+arrows
         // for moving by word included; Escape is the only way out. These
@@ -1396,6 +1403,12 @@ class DendriteView extends ItemView {
         // closes, so they are also read here; defaultPrevented means the
         // scope already handled the key.
         if (this.arrowKey(e)) return;
+        // Escape closes find here too, for when that scope is not active.
+        if (e.key === 'Escape' && this.find) {
+            e.preventDefault();
+            this.closeFind();
+            return;
+        }
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         const statusKey = { ']': () => this.nextFlagged(1),
                             '[': () => this.nextFlagged(-1),
@@ -2580,6 +2593,19 @@ class DendriteView extends ItemView {
         scope.register([], 'Escape', () => { this.closeFind(); return false; });
         scope.register(['Mod'], 'f', () => { input.select(); return false; });
         f.scope = scope;
+        // The same keys on the box itself, for wherever Obsidian does not
+        // hand a key to the scope above; a key it handled arrives with
+        // its default prevented and is left alone.
+        input.addEventListener('keydown', (e) => {
+            if (e.defaultPrevented || e.isComposing) return;
+            const mod = e.ctrlKey || e.metaKey;
+            if (e.key === 'Escape') this.closeFind();
+            else if (e.key === 'Enter' && mod) this.editAtMatch();
+            else if (e.key === 'Enter') this.findStep(e.shiftKey ? -1 : 1);
+            else return;
+            e.preventDefault();
+            e.stopPropagation();
+        });
         input.addEventListener('focus', () => {
             if (this.app.keymap) this.app.keymap.pushScope(scope);
         });

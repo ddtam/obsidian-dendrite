@@ -2244,9 +2244,15 @@ var DendriteView = class extends ItemView {
         this.cancelDrag();
         return false;
       }
-      if (!this.editing) return true;
-      this.endEdit();
-      return false;
+      if (this.editing) {
+        this.endEdit();
+        return false;
+      }
+      if (this.find) {
+        this.closeFind();
+        return false;
+      }
+      return true;
     });
     s.register(["Mod"], "Enter", () => {
       if (this.editing) return true;
@@ -2600,6 +2606,11 @@ var DendriteView = class extends ItemView {
     if (this.editing || e.defaultPrevented) return;
     if (e.target.closest("input, textarea, select, .dendrite-cm")) return;
     if (this.arrowKey(e)) return;
+    if (e.key === "Escape" && this.find) {
+      e.preventDefault();
+      this.closeFind();
+      return;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const statusKey = {
       "]": () => this.nextFlagged(1),
@@ -3759,6 +3770,16 @@ var DendriteView = class extends ItemView {
       return false;
     });
     f.scope = scope;
+    input.addEventListener("keydown", (e) => {
+      if (e.defaultPrevented || e.isComposing) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (e.key === "Escape") this.closeFind();
+      else if (e.key === "Enter" && mod) this.editAtMatch();
+      else if (e.key === "Enter") this.findStep(e.shiftKey ? -1 : 1);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
     input.addEventListener("focus", () => {
       if (this.app.keymap) this.app.keymap.pushScope(scope);
     });
