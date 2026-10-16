@@ -2201,7 +2201,6 @@ class DendriteView extends ItemView {
             const old = card.querySelector(':scope > .dendrite-status');
             if (old) old.remove();
             card.removeClass('is-flagged');
-            card.style.removeProperty('--dendrite-corner');
             const info = report.cards.get(id);
             if (!info) continue;
             const chip = createDiv({ cls: 'dendrite-status' });
@@ -2223,12 +2222,6 @@ class DendriteView extends ItemView {
             if (core.isFlag(info.own)) card.addClass('is-flagged');
             if (!chip.childElementCount) continue;
             card.appendChild(chip);
-            // The heading beside it keeps clear of the chips as well as
-            // the icon; measured where the card is laid out, else from
-            // the text's length.
-            const w = chip.offsetWidth ||
-                chip.textContent.length * 7 + 12 * chip.childElementCount;
-            card.style.setProperty('--dendrite-corner', `${w + 30}px`);
         }
         if (this.statusEl) {
             const t = report.tally;

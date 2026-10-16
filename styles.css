@@ -808,30 +808,10 @@
     background: var(--background-modifier-hover);
 }
 
-/* The card's top is a band for the role icon and the status. Text
-   starts below it; a heading or section number that opens the card sits
-   in it instead, kept clear of the corner by --dendrite-corner, which
-   the status widens. */
+/* The card's top is a band for the role icon and the status, as its
+   footer is for the quota and the tools; all its text starts below. */
 .dendrite-card {
-    --dendrite-corner: 28px;
     padding-top: 26px;
-}
-
-.dendrite-card:has(> .dendrite-num),
-.dendrite-card:has(> .dendrite-card-body > .dendrite-md >
-    :first-child > :is(h1, h2, h3, h4, h5, h6):first-child),
-.dendrite-card:has(> .dendrite-card-body > .dendrite-md >
-    :is(h1, h2, h3, h4, h5, h6):first-child),
-.dendrite-card:has(> .dendrite-card-body .cm-content >
-    .cm-line:first-child.HyperMD-header) {
-    padding-top: 10px;
-}
-
-.dendrite-card > .dendrite-num,
-.dendrite-md > :first-child > :is(h1, h2, h3, h4, h5, h6):first-child,
-.dendrite-md > :is(h1, h2, h3, h4, h5, h6):first-child,
-.dendrite-card-body .cm-content > .cm-line:first-child.HyperMD-header {
-    padding-right: var(--dendrite-corner);
 }
 
 /* The status, left of the role icon, at the same height. */

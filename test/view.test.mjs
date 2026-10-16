@@ -859,14 +859,10 @@ test('card status: chips, tally, keys, and status moving with text',
     const chips = (id) => [...view.cardEls.get(id)
         .querySelectorAll('.dendrite-status-chip')].map((c) => c.textContent);
     assert.deepEqual(chips('G-bbbbb'), ['done ✓']);
-    // At the top right beside the role icon, not in the footer, and the
-    // heading beside it is told how much room the corner takes.
+    // At the top right beside the role icon, not in the footer.
     const done = view.cardEls.get('G-bbbbb');
     assert.ok(done.querySelector(':scope > .dendrite-status'));
     assert.ok(!done.querySelector('.dendrite-card-foot .dendrite-status'));
-    assert.match(done.style.getPropertyValue('--dendrite-corner'), /px$/);
-    assert.equal(view.cardEls.get('G-ddddd').style
-        .getPropertyValue('--dendrite-corner'), '', 'no status, no room');
     assert.deepEqual(chips('G-ccccc'), ['revise ⚑']);
     assert.deepEqual(chips('G-aaaaa'), ['1 to revise ⚑'],
                      'a section counts what is flagged below it');
