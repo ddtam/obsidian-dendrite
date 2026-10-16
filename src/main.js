@@ -3454,7 +3454,8 @@ function textProp(v) {
  * size in points (`10` or `10pt`), margin (a bare number is in cm),
  * paper (letter or a4), line
  * spacing, page numbers (on unless false), a Pandoc defaults file and a
- * Word reference document, both paths from the vault root.
+ * Word reference document, both paths from the vault root, and the
+ * reference list's heading (References unless set; false for none).
  */
 function exportStyle(fm) {
     const size = parseFloat(String(fm.dendrite_font_size || ''));
@@ -3471,6 +3472,8 @@ function exportStyle(fm) {
         pageNumbers: fm.dendrite_page_numbers !== false,
         defaults: textProp(fm.dendrite_pandoc_defaults),
         referenceDocx: textProp(fm.dendrite_reference_docx),
+        referencesTitle: fm.dendrite_references_title === false ? false :
+            textProp(fm.dendrite_references_title),
     };
 }
 
@@ -3639,6 +3642,10 @@ class ManuscriptModal extends Modal {
                 .onChange((v) => {
                     draft.dendrite_page_numbers = v ? null : false;
                 }));
+        text('Reference list heading', 'Over the list of references, for ' +
+             'a citation style that prints one. Empty: References.',
+             st.referencesTitle || null, 'dendrite_references_title',
+             'References');
         text('Pandoc defaults file', 'For anything else a call asks, a ' +
              'Pandoc defaults file in the vault, as a path from the vault ' +
              'root. The settings above win over it.', st.defaults,

@@ -1064,7 +1064,7 @@ test('PDF export from the board uses the manuscript\'s citation style',
         writeFile: async () => {}, remove: () => {},
         run: async (cmd, args) => { runs.push(args); },
         fetch: async () => ({ json: async () => (
-            { result: '@article{smith2020}' }) }),
+            { result: '[{"id":"smith2020"}]' }) }),
     });
     view.plugin.showExport = async (rel, full, fmt) =>
         shown.push([rel, fmt]);

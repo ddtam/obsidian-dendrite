@@ -47,7 +47,7 @@ const fakeDeps = (zotero, opts = {}) => {
             const keys = JSON.parse(init.body).params[0];
             const known = keys.every((k) => zotero[k]);
             return { json: async () => (known ?
-                { result: keys.map((k) => zotero[k]).join('\n') } :
+                { result: JSON.stringify(keys.map((k) => zotero[k])) } :
                 { error: { message: 'not found' } }) };
         },
     };
@@ -55,8 +55,8 @@ const fakeDeps = (zotero, opts = {}) => {
 
 test('export fetches exactly the cited keys and runs Pandoc with them',
      async () => {
-    const deps = fakeDeps({ smith2020: '@article{smith2020}',
-                            lee2019: '@book{lee2019}' });
+    const deps = fakeDeps({ smith2020: { id: 'smith2020', PMID: '1' },
+                            lee2019: { id: 'lee2019' } });
     const r = await p.exportDocument({
         md: 'Text [@smith2020; @lee2019].', format: 'pdf',
         output: '/vault/exports/G.pdf', csl: '/vault/style.csl' }, deps);
@@ -67,13 +67,32 @@ test('export fetches exactly the cited keys and runs Pandoc with them',
     assert.ok(args.includes('--pdf-engine=xelatex'));
     assert.equal(args[args.indexOf('--csl') + 1], '/vault/style.csl');
     const bib = args[args.indexOf('--bibliography') + 1];
-    assert.equal(files[bib], '@article{smith2020}\n@book{lee2019}');
+    assert.match(bib, /\.json$/, 'CSL JSON, which Pandoc reads by name');
+    assert.deepEqual(JSON.parse(files[bib]),
+                     [{ id: 'smith2020', PMID: '1' }, { id: 'lee2019' }],
+                     'with the PMID a style can print');
     assert.deepEqual(Object.keys(deps.files), [],
                      'temporary files are removed');
 });
 
+test('the reference list gets a heading, References unless the ' +
+     'manuscript names another or none', () => {
+    const base = { input: 'in.md', output: 'o.pdf', format: 'pdf',
+                   bibliography: '/t/b.json' };
+    const meta = (style) => {
+        const a = p.pandocArgs(Object.assign({ style }, base));
+        return a.filter((x, i) => a[i - 1] === '-M');
+    };
+    assert.deepEqual(meta(), ['reference-section-title=References']);
+    assert.deepEqual(meta({ referencesTitle: 'Bibliography' }),
+                     ['reference-section-title=Bibliography']);
+    assert.deepEqual(meta({ referencesTitle: false }), []);
+    assert.ok(!p.pandocArgs({ input: 'i', output: 'o', format: 'pdf' })
+        .includes('-M'), 'no citations, no heading');
+});
+
 test('a key Zotero lacks is named and nothing is exported', async () => {
-    const deps = fakeDeps({ smith2020: '@article{smith2020}' });
+    const deps = fakeDeps({ smith2020: { id: 'smith2020' } });
     const r = await p.exportDocument({
         md: 'Text [@smith2020; @ghost2024].', format: 'docx',
         output: '/o.docx' }, deps);
@@ -128,7 +147,7 @@ test('Zotero is asked with Node\'s http, which sends no browser headers',
             }
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ jsonrpc: '2.0',
-                                     result: '@article{k, title = {T}}' }));
+                result: JSON.stringify([{ id: 'k', title: 'T' }]) }));
         });
     });
     require('./harness.cjs');
@@ -139,8 +158,9 @@ test('Zotero is asked with Node\'s http, which sends no browser headers',
         const deps = Plugin.prototype.pandocDeps.call(
             { pandocEnv: () => ({}) });
         assert.deepEqual(await p.fetchBib(['k'], port, deps),
-                         { bib: '@article{k, title = {T}}' });
-        assert.equal(JSON.parse(seen[0].body).method, 'item.export');
+                         { bib: '[{"id":"k","title":"T"}]' });
+        assert.deepEqual(JSON.parse(seen[0].body).params,
+                         [['k'], 'Better CSL JSON']);
         assert.equal(seen[0].headers['user-agent'], undefined);
         assert.equal(seen[0].headers.origin, undefined);
     } finally {

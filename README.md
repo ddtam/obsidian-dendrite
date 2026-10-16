@@ -181,6 +181,10 @@ Footnotes are numbered across the whole manuscript. Each card can number its own
 
 PDF and Word go through [Pandoc](https://pandoc.org) on the desktop, PDF with `xelatex` from TeX Live. Citations are written in cards as `[@citekey]` and fetched at export, exactly the keys used, from Zotero through [Better BibTeX](https://retorque.re/zotero-better-bibtex/); a key the library lacks stops the export and is named. With Zotero closed, a fallback `.bib` set in the settings is used, or the export stops. The citation style is set per manuscript in its Settings, as a CSL file in the vault; with none, Pandoc's default, Chicago author-date, is used. A PDF opens in a pane beside the board, and a Word file in the system's default app. Obsidian's links become their text and embedded images real images.
 
+### Citations as PubMed IDs
+
+`styles/pmid-only.csl` in this repository prints each citation as `(PMID: 30478440)`, or by its DOI when the item has no PMID, such as a preprint, and prints no reference list. Copy it into the vault and set it as the manuscript's citation style. A footnote holding only a citation, `^[[@key]]`, then prints just the PMID. The PMID comes from the Zotero item's Extra field, as a line `PMID: 30478440`; export fetches items from Better BibTeX as CSL JSON, which carries it.
+
 ### How the PDF and Word files look
 
 Set in the manuscript's settings, under **PDF and Word**, or as properties on the index note:
@@ -195,6 +199,7 @@ Set in the manuscript's settings, under **PDF and Word**, or as properties on th
 | `dendrite_page_numbers` | PDF | `false` to leave them off | numbered consecutively at the foot |
 | `dendrite_pandoc_defaults` | both | `styles/grant.yaml`, a Pandoc defaults file for anything else | none |
 | `dendrite_reference_docx` | Word | `styles/reference.docx`, whose styles Word export copies | Pandoc's |
+| `dendrite_references_title` | both | `Bibliography`, the heading over the reference list; `false` for none | References |
 
 The font must be installed on the computer that exports. Word takes its fonts and sizes only from a reference document: **Make reference.docx** in the settings writes Pandoc's own beside the index, to open in Word, restyle and save. The settings win over a defaults file.
 

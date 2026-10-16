@@ -7,7 +7,8 @@
  *
  * Citations are written in cards as Pandoc keys, `[@key]`. At export,
  * exactly the keys used are fetched from Better BibTeX through Zotero's
- * local JSON-RPC endpoint. A key the library does not hold stops the
+ * local JSON-RPC endpoint, as CSL JSON, the form citation styles read,
+ * which carries an item's PMID from its Extra field as `PMID`. A key the library does not hold stops the
  * export and is named, rather than rendering as "???" in the output.
  */
 
@@ -53,9 +54,9 @@ function toPandoc(md, resolve) {
 }
 
 /**
- * Fetch BibLaTeX for the keys from Better BibTeX. Returns { bib } or
- * { missing } naming keys the library does not hold, or { down } when
- * Zotero does not answer.
+ * Fetch the keys' items from Better BibTeX as CSL JSON. Returns { bib },
+ * the JSON text of one array, or { missing } naming keys the library
+ * does not hold, or { down } when Zotero does not answer.
  */
 async function fetchBib(keys, port, deps) {
     const call = async (ks) => {
@@ -64,9 +65,18 @@ async function fetchBib(keys, port, deps) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ jsonrpc: '2.0', method: 'item.export',
-                                       params: [ks, 'Better BibLaTeX'] }),
+                                       params: [ks, 'Better CSL JSON'] }),
             });
         return res.json();
+    };
+    const items = (r) => {
+        if (!r || typeof r.result !== 'string') return null;
+        try {
+            const a = JSON.parse(r.result);
+            return Array.isArray(a) ? a : null;
+        } catch (err) {
+            return null;
+        }
     };
     let first;
     try {
@@ -74,10 +84,10 @@ async function fetchBib(keys, port, deps) {
     } catch (err) {
         return { down: true };
     }
-    if (first && typeof first.result === 'string') return { bib: first.result };
+    if (items(first)) return { bib: JSON.stringify(items(first)) };
     // One call failed as a whole; find which keys the library lacks.
     const missing = [];
-    let bib = '';
+    const all = [];
     for (const k of keys) {
         let r;
         try {
@@ -85,10 +95,10 @@ async function fetchBib(keys, port, deps) {
         } catch (err) {
             return { down: true };
         }
-        if (r && typeof r.result === 'string') bib += r.result + '\n';
+        if (items(r)) all.push(...items(r));
         else missing.push(k);
     }
-    return missing.length ? { missing } : { bib };
+    return missing.length ? { missing } : { bib: JSON.stringify(all) };
 }
 
 // Sizes LaTeX's article class takes; others need extarticle.
@@ -97,7 +107,8 @@ const ARTICLE_SIZES = [10, 11, 12];
 /**
  * Pandoc's arguments for one export. `o.style` holds what the manuscript
  * sets: font, fontSize (points), margin, paper, lineSpacing, pageNumbers,
- * defaults (a Pandoc defaults file) and referenceDocx (Word's styles).
+ * defaults (a Pandoc defaults file), referenceDocx (Word's styles) and
+ * referencesTitle (the reference list's heading; false for none).
  * A defaults file comes first, so the manuscript's own settings win.
  */
 function pandocArgs(o) {
@@ -125,6 +136,12 @@ function pandocArgs(o) {
     if (o.bibliography) {
         args.push('--citeproc', '--bibliography', o.bibliography);
         if (o.csl) args.push('--csl', o.csl);
+        // A heading over the reference list, which Pandoc otherwise runs
+        // on from the last paragraph; a style without a list prints none.
+        if (st.referencesTitle !== false) {
+            args.push('-M', 'reference-section-title=' +
+                      (st.referencesTitle || 'References'));
+        }
     }
     if (o.resourcePath) args.push('--resource-path', o.resourcePath);
     return args;
@@ -158,7 +175,7 @@ async function exportDocument(o, deps) {
             }
             bibliography = o.fallbackBib;
         } else {
-            bibliography = deps.join(dir, `dendrite-${Date.now()}.bib`);
+            bibliography = deps.join(dir, `dendrite-${Date.now()}.json`);
             await deps.writeFile(bibliography, got.bib);
         }
     }

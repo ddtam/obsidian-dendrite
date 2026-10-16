@@ -1268,11 +1268,20 @@ var require_pandoc = __commonJS({
             body: JSON.stringify({
               jsonrpc: "2.0",
               method: "item.export",
-              params: [ks, "Better BibLaTeX"]
+              params: [ks, "Better CSL JSON"]
             })
           }
         );
         return res.json();
+      };
+      const items = (r) => {
+        if (!r || typeof r.result !== "string") return null;
+        try {
+          const a = JSON.parse(r.result);
+          return Array.isArray(a) ? a : null;
+        } catch (err) {
+          return null;
+        }
       };
       let first;
       try {
@@ -1280,9 +1289,9 @@ var require_pandoc = __commonJS({
       } catch (err) {
         return { down: true };
       }
-      if (first && typeof first.result === "string") return { bib: first.result };
+      if (items(first)) return { bib: JSON.stringify(items(first)) };
       const missing = [];
-      let bib = "";
+      const all = [];
       for (const k of keys) {
         let r;
         try {
@@ -1290,10 +1299,10 @@ var require_pandoc = __commonJS({
         } catch (err) {
           return { down: true };
         }
-        if (r && typeof r.result === "string") bib += r.result + "\n";
+        if (items(r)) all.push(...items(r));
         else missing.push(k);
       }
-      return missing.length ? { missing } : { bib };
+      return missing.length ? { missing } : { bib: JSON.stringify(all) };
     }
     var ARTICLE_SIZES = [10, 11, 12];
     function pandocArgs(o) {
@@ -1330,6 +1339,9 @@ var require_pandoc = __commonJS({
       if (o.bibliography) {
         args.push("--citeproc", "--bibliography", o.bibliography);
         if (o.csl) args.push("--csl", o.csl);
+        if (st.referencesTitle !== false) {
+          args.push("-M", "reference-section-title=" + (st.referencesTitle || "References"));
+        }
       }
       if (o.resourcePath) args.push("--resource-path", o.resourcePath);
       return args;
@@ -1351,7 +1363,7 @@ var require_pandoc = __commonJS({
           }
           bibliography = o.fallbackBib;
         } else {
-          bibliography = deps.join(dir, `dendrite-${Date.now()}.bib`);
+          bibliography = deps.join(dir, `dendrite-${Date.now()}.json`);
           await deps.writeFile(bibliography, got.bib);
         }
       }
@@ -4725,7 +4737,8 @@ function exportStyle(fm) {
     lineSpacing: spacing > 0 ? spacing : null,
     pageNumbers: fm.dendrite_page_numbers !== false,
     defaults: textProp(fm.dendrite_pandoc_defaults),
-    referenceDocx: textProp(fm.dendrite_reference_docx)
+    referenceDocx: textProp(fm.dendrite_reference_docx),
+    referencesTitle: fm.dendrite_references_title === false ? false : textProp(fm.dendrite_references_title)
   };
 }
 function nodeRequest(url, init) {
@@ -4851,6 +4864,13 @@ var ManuscriptModal = class extends Modal {
     new Setting(contentEl).setName("Page numbers").setDesc("For PDF, at the foot of each page, numbered consecutively.").addToggle((tg) => tg.setValue(st.pageNumbers).onChange((v) => {
       draft.dendrite_page_numbers = v ? null : false;
     }));
+    text(
+      "Reference list heading",
+      "Over the list of references, for a citation style that prints one. Empty: References.",
+      st.referencesTitle || null,
+      "dendrite_references_title",
+      "References"
+    );
     text(
       "Pandoc defaults file",
       "For anything else a call asks, a Pandoc defaults file in the vault, as a path from the vault root. The settings above win over it.",

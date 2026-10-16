@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" class="in-text"
+       version="1.0">
+  <info>
+    <title>PMID only</title>
+    <id>pmid-only</id>
+    <updated>2026-10-16T00:00:00+00:00</updated>
+  </info>
+  <!-- Each citation as its PubMed ID; an item PubMed lacks, such as a
+       preprint, by its DOI, else its short title. No reference list. -->
+  <citation>
+    <layout prefix="(" suffix=")" delimiter="; ">
+      <choose>
+        <if variable="PMID">
+          <text variable="PMID" prefix="PMID: "/>
+        </if>
+        <else-if variable="DOI">
+          <text variable="DOI" prefix="doi:"/>
+        </else-if>
+        <else>
+          <text variable="title" form="short"/>
+        </else>
+      </choose>
+    </layout>
+  </citation>
+</style>
