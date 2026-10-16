@@ -317,6 +317,38 @@
     margin: 6px -8px -6px -6px;
 }
 
+/* The card's short id, faint at the footer's right; a click copies it,
+   and find marks it when the query is the id. */
+.dendrite-id {
+    margin-left: auto;
+    padding: 0 4px;
+    border-radius: var(--radius-s);
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smallest, 11px);
+    color: var(--text-faint);
+    cursor: copy;
+    user-select: none;
+}
+
+.dendrite-id:hover {
+    color: var(--text-muted);
+    background: var(--background-modifier-hover);
+}
+
+.dendrite-id.is-match {
+    color: var(--text-normal);
+    background: var(--text-highlight-bg);
+}
+
+.dendrite-id.is-current {
+    color: var(--text-on-accent);
+    background: var(--interactive-accent);
+}
+
+.dendrite-id + .dendrite-toolbar {
+    margin-left: 4px;
+}
+
 .dendrite-toolbar {
     display: flex;
     gap: 2px;

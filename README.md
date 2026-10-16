@@ -135,6 +135,8 @@ Dendrite adds a value to each note's `type` property, keeping any values already
 
 The index shows each card by a label: the card's heading line if it starts with one, else the first of its `aliases`, else its first words. Dendrite keeps the index's labels in step with the cards, so edit a label in the card, not in the index.
 
+Each card also shows the end of its file name, such as `lchl3` for `DRAC-RAC-2026-lchl3`, faintly at its bottom right. It never changes, so it is a stable way to refer to a card in notes or conversation: a click copies it, and typing it into find selects that card and marks the id.
+
 ## What prints: card roles
 
 Each card has a role, which decides what of it prints:

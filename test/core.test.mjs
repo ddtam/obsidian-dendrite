@@ -658,6 +658,17 @@ test('the preview can gather footnotes by section or at the end, and ' +
                      ['A', 'B', 'C', 'D', 'E', 'notes:1,2,3']);
 });
 
+test('find: a card\'s short or full id finds that card', () => {
+    assert.equal(c.shortId('DRAC-RAC-2026-lchl3'), 'lchl3');
+    const bodies = { 'G-ab12c': 'Text.', 'G-zz9yy': 'Cites ab12c here.' };
+    const ids = Object.keys(bodies);
+    const run = (q) => c.findMatches(ids, (id) => bodies[id], q).matches
+        .map((m) => m.id + (m.card ? ':card' : ':' + m.start));
+    assert.deepEqual(run('ab12c'), ['G-ab12c:card', 'G-zz9yy:6']);
+    assert.deepEqual(run(' g-AB12C '), ['G-ab12c:card'], 'the full id too');
+    assert.deepEqual(run('ab12'), ['G-zz9yy:6'], 'only the whole id');
+});
+
 test('find: words must all be in a card, quotes keep a phrase, regex ' +
      'and case are options', () => {
     const bodies = {

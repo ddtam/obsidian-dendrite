@@ -1097,7 +1097,15 @@ function findMatches(ids, bodyOf, query, opts = {}) {
     const { patterns, error } = findPatterns(query, opts);
     const matches = [];
     if (!patterns.length) return { matches, error };
+    // A card's own id, short or full, finds that card, as the first match
+    // in it; { card: true } with no stretch of text.
+    const q = (query || '').trim().toLowerCase();
     for (const id of ids) {
+        if (q && (q === shortId(id).toLowerCase() ||
+                  q === id.toLowerCase())) {
+            matches.push({ id, start: 0, end: 0, comment: false,
+                           card: true });
+        }
         const body = bodyOf(id) || '';
         const found = [];
         let all = true;
@@ -1139,8 +1147,14 @@ function findMatches(ids, bodyOf, query, opts = {}) {
     return { matches, error };
 }
 
+/** The part of a card id after the prefix: `DRAC-2026-lchl3` -> `lchl3`. */
+function shortId(id) {
+    const s = String(id || '');
+    return s.slice(s.lastIndexOf('-') + 1);
+}
+
 module.exports = {
-    findPatterns, findMatches,
+    findPatterns, findMatches, shortId,
     parseLimit, formatLimit, countText, measure, sectionNumbers,
     alignColumns, parseAmount, convert, quotas, fmtNum,
     splitText, mergeText,

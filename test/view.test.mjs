@@ -1680,6 +1680,46 @@ test('a card\'s text edits join the undo history with tree changes',
     assert.ok(h.notices.length > before, 'and says why');
 });
 
+test('each card shows its short id, which copies on a click and finds ' +
+     'the card', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n',
+        { 'G-aaaaa': 'Alpha', 'G-bbbbb': 'Beta', 'G-ccccc': 'See bbbbb' });
+    const tag = (id) => view.cardEls.get(id).querySelector(
+        ':scope > .dendrite-card-foot > .dendrite-id');
+    assert.equal(tag('G-bbbbb').textContent, 'bbbbb');
+    const nav = view.pageWin().navigator;
+    const copied = [];
+    Object.defineProperty(nav, 'clipboard', { configurable: true,
+        value: { writeText: async (t) => { copied.push(t); } } });
+    view.active = 'G-aaaaa';
+    view.applyActive();
+    tag('G-bbbbb').dispatchEvent(new h.window.MouseEvent('click',
+        { bubbles: true }));
+    await tick(10);
+    assert.deepEqual(copied, ['bbbbb']);
+    assert.equal(h.notices[h.notices.length - 1], 'Copied bbbbb');
+    assert.equal(view.active, 'G-aaaaa', 'the click does not select it');
+    // Find: the id finds its card, first, before text that mentions it.
+    view.openFind();
+    const f = view.find;
+    f.input.value = 'BBBBB';
+    f.input.dispatchEvent(new h.window.Event('input'));
+    await tick(150);
+    assert.deepEqual(f.matches.map((m) => [m.id, !!m.card]),
+                     [['G-bbbbb', true], ['G-ccccc', false]]);
+    assert.equal(view.active, 'G-bbbbb', 'the card is selected');
+    assert.ok(view.cardEls.get('G-bbbbb').hasClass('is-match'));
+    assert.ok(tag('G-bbbbb').hasClass('is-current'), 'its id is marked');
+    await view.findStep(1);
+    assert.ok(tag('G-bbbbb').hasClass('is-match'));
+    assert.ok(!tag('G-bbbbb').hasClass('is-current'));
+    view.closeFind();
+    assert.ok(!tag('G-bbbbb').hasClass('is-match'), 'cleared with find');
+    delete nav.clipboard;
+});
+
 test('Escape closes find from its box or from the board', async () => {
     const { view } = await open(
         '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',

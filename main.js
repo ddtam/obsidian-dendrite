@@ -783,7 +783,17 @@ var require_core = __commonJS({
       const { patterns, error } = findPatterns(query, opts);
       const matches = [];
       if (!patterns.length) return { matches, error };
+      const q = (query || "").trim().toLowerCase();
       for (const id of ids) {
+        if (q && (q === shortId(id).toLowerCase() || q === id.toLowerCase())) {
+          matches.push({
+            id,
+            start: 0,
+            end: 0,
+            comment: false,
+            card: true
+          });
+        }
         const body = bodyOf(id) || "";
         const found = [];
         let all = true;
@@ -828,9 +838,14 @@ var require_core = __commonJS({
       }
       return { matches, error };
     }
+    function shortId(id) {
+      const s = String(id || "");
+      return s.slice(s.lastIndexOf("-") + 1);
+    }
     module2.exports = {
       findPatterns,
       findMatches,
+      shortId,
       parseLimit,
       formatLimit,
       countText,
@@ -1822,6 +1837,15 @@ var DendriteView = class extends ItemView {
     }
     const foot = card.createDiv({ cls: "dendrite-card-foot" });
     this.renderQuotaWidget(foot, n.id);
+    const tag = foot.createSpan({
+      cls: "dendrite-id",
+      text: core.shortId(n.id)
+    });
+    tag.setAttr("aria-label", `${n.id}: click to copy ${core.shortId(n.id)}`);
+    tag.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.copyId(n.id);
+    });
     this.cardEls.set(n.id, card);
     if (this.observer) this.observer.observe(card);
     if (this.resizer) this.resizer.observe(card);
@@ -2112,6 +2136,15 @@ var DendriteView = class extends ItemView {
     this.setColOffset(d, this.colOffset(d) + e.deltaY * unit);
     this.drawFlow();
   }
+  async copyId(id) {
+    const short = core.shortId(id);
+    try {
+      await this.pageWin().navigator.clipboard.writeText(short);
+      new Notice(`Copied ${short}`);
+    } catch (err) {
+      new Notice(`Could not copy ${short}`);
+    }
+  }
   renderToolbar() {
     if (this.toolbar) this.toolbar.remove();
     this.toolbar = null;
@@ -2300,7 +2333,9 @@ var DendriteView = class extends ItemView {
       );
       return;
     }
-    if (e.target.closest(".dendrite-toolbar, textarea, .dendrite-cm, button, .dendrite-quota")) return;
+    if (e.target.closest(".dendrite-toolbar, textarea, .dendrite-cm, button, .dendrite-quota, .dendrite-id")) {
+      return;
+    }
     const grip = e.target.closest(".dendrite-grip");
     if (grip) {
       const id = grip.parentElement.dataset.id;
@@ -2444,7 +2479,7 @@ var DendriteView = class extends ItemView {
     const grip = e.target.closest(".dendrite-grip");
     if (!grip) {
       if (card.dataset.id === this.active) return;
-      if (e.target.closest("a, button, input, textarea, .dendrite-cm, .dendrite-quota, .dendrite-toolbar")) return;
+      if (e.target.closest("a, button, input, textarea, .dendrite-cm, .dendrite-quota, .dendrite-toolbar, .dendrite-id")) return;
     }
     e.preventDefault();
     this.cancelDrag();
@@ -4019,7 +4054,7 @@ var DendriteView = class extends ItemView {
     const m = f && f.matches[f.index];
     if (!m) return;
     await this.startEdit(m.id);
-    if (this.editing && this.editing.id === m.id) {
+    if (this.editing && this.editing.id === m.id && !m.card) {
       this.editing.editor.focusAt(m.start, m.end);
     }
   }
@@ -4052,16 +4087,23 @@ var DendriteView = class extends ItemView {
    * match in its card.
    */
   paintFind() {
+    const f = this.find;
+    for (const [id, card] of this.cardEls) {
+      const tag = card.querySelector(".dendrite-id");
+      if (!tag) continue;
+      const m = f && f.matches.find((x) => x.card && x.id === id);
+      tag.toggleClass("is-match", !!m);
+      tag.toggleClass("is-current", !!m && m === f.matches[f.index]);
+    }
     const win = this.pageWin();
     const reg = win.CSS && win.CSS.highlights;
     if (!reg || typeof win.Highlight !== "function") return;
     reg.delete("dendrite-find");
     reg.delete("dendrite-find-current");
-    const f = this.find;
     if (!f || !f.matches.length) return;
     const { patterns } = core.findPatterns(f.query, f);
     const cur = f.matches[f.index];
-    const nth = cur ? f.matches.filter((m) => m.id === cur.id && m.start < cur.start).length : -1;
+    const nth = cur && !cur.card ? f.matches.filter((m) => m.id === cur.id && !m.card && m.start < cur.start).length : -1;
     const doc = this.pageDoc();
     const all = [];
     let current = null;
