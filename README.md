@@ -129,7 +129,7 @@ Linter's clean-up still reaches cards, through Dendrite: when you leave a card y
 
 ## Note types
 
-Dendrite adds a value to each note's `type` property, keeping any values already there, so file lists and colour rules can tell a manuscript from its cards: `"[[dendrite index]]"` on index notes, a link so manuscripts gather on a type page, and `dendrite card` on cards, plain text so hundreds of cards stay out of the vault's links. Both are settings; empty adds none. Opening a manuscript adds them where missing.
+Dendrite adds a value to each note's `type` property, keeping any values already there, so file lists and colour rules can tell a manuscript from its cards: `"[[dendrite index]]"` on index notes, a link so manuscripts gather on a type page, and `dendrite card` on cards, plain text so hundreds of cards stay out of the vault's links. Both are settings; empty adds none. New notes get them as they are made; for notes made before, run **Add the type property to the index and every card** from the command palette. Opening a manuscript adds nothing, since with sync every device would make the same writes at once.
 
 ## Labels
 
@@ -152,7 +152,7 @@ Every card shows its role as an icon in its top right corner, faint when the rol
 
 ## Card status
 
-A card's status describes its text, and every card that prints holds one, as `dendrite_status`, so each card says what it is without Dendrite; cards that do not print hold none. Opening a manuscript gives `draft` to any printing card without a status.
+A card's status describes its text, and every card that prints holds one, as `dendrite_status`, so each card says what it is without Dendrite; cards that do not print hold none. A printing card without one shows as draft, and is given `draft` when you edit it or at the next change to the tree; opening a manuscript writes nothing.
 
 | Status | Meaning |
 | --- | --- |
@@ -168,6 +168,14 @@ A card's status shows at its top right, beside the role icon, in a band at the t
 Colours come from the [Pretty Properties](https://github.com/anareaty/pretty-properties) plugin, if it gives `dendrite_status` values a colour, so the Properties panel and the board agree.
 
 To set a role or status on a card and everything below it, use **Whole branch** in its menu, or Alt with the same keys: Alt+0 to Alt+4 for a role, Alt+Shift+1 to 3 for a status, which only cards that print their text take. The whole change is one undo.
+
+## Sync across devices
+
+Dendrite writes a note only for something done on its board: a key, a menu, a drag, or the card editor saving. A change that arrives from a sync plugin such as Self-hosted LiveSync, or from another editor, updates the board in memory and writes nothing, so two devices never answer the same change with two rewrites of the index. Obsidian reports a synced change and a local one the same way, so the board does not try to tell them apart; it simply never writes in response to either.
+
+- **Labels.** A card's label in the index follows its first words or heading. While you type, the label is written to the index once typing pauses for three seconds or when you leave the card, not at every autosave. A card changed elsewhere gets its new label on the board at once and in the index at the next write made here.
+- **The index.** Dendrite writes the index by reading it from disk and replacing only the list, keeping its properties as they are on disk. If the list on disk changed since the board read it, Dendrite writes nothing, reads it again and asks you to make the change again.
+- **Versions going back.** Each device keeps the last 20 versions of each card's text, as hashes, with the full text of the newest, in the app's own browser storage, which sync plugins do not copy. Versions are kept per ten minutes of writing, not per save. When a card's text arrives from outside Dendrite and matches one of its earlier versions, the card is marked **earlier version** and a notice names it; clicking the mark restores the newer text, which is one undo step, or keeps this one. The index is watched the same way, whole, with its mark in the bar. Export refuses while anything is marked. A device that edits its stale copy, rather than sending it back unchanged, is not caught.
 
 ## Preview
 

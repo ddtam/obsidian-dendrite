@@ -1395,6 +1395,142 @@ var require_pandoc = __commonJS({
   }
 });
 
+// src/history.js
+var require_history = __commonJS({
+  "src/history.js"(exports2, module2) {
+    "use strict";
+    var KEEP = 20;
+    var WINDOW_MS = 10 * 60 * 1e3;
+    function hash(s) {
+      let h1 = 3735928559;
+      let h2 = 1103547991;
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        h1 = Math.imul(h1 ^ c, 2654435761);
+        h2 = Math.imul(h2 ^ c, 1597334677);
+      }
+      h1 = Math.imul(h1 ^ h1 >>> 16, 2246822507) ^ Math.imul(h2 ^ h2 >>> 13, 3266489909);
+      h2 = Math.imul(h2 ^ h2 >>> 16, 2246822507) ^ Math.imul(h1 ^ h1 >>> 13, 3266489909);
+      return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+    }
+    function memoryStore() {
+      const m = /* @__PURE__ */ new Map();
+      return {
+        async get(k) {
+          return m.has(k) ? structuredClone(m.get(k)) : null;
+        },
+        async set(k, v) {
+          m.set(k, structuredClone(v));
+        }
+      };
+    }
+    function idbStore2(name = "dendrite-history") {
+      const idb = typeof indexedDB !== "undefined" ? indexedDB : null;
+      if (!idb) return memoryStore();
+      let db = null;
+      const open = () => db || (db = new Promise((resolve, reject) => {
+        const req = idb.open(name, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore("cards");
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      }));
+      const run = async (mode, fn) => {
+        const d = await open();
+        return new Promise((resolve, reject) => {
+          const tx = d.transaction("cards", mode);
+          const req = fn(tx.objectStore("cards"));
+          tx.oncomplete = () => resolve(req.result);
+          tx.onerror = () => reject(tx.error);
+        });
+      };
+      return {
+        async get(k) {
+          const v = await run("readonly", (s) => s.get(k));
+          return v === void 0 ? null : v;
+        },
+        async set(k, v) {
+          await run("readwrite", (s) => s.put(v, k));
+        }
+      };
+    }
+    var History2 = class {
+      constructor(store = memoryStore(), now = () => Date.now()) {
+        this.store = store;
+        this.now = now;
+        this.queue = /* @__PURE__ */ new Map();
+      }
+      serial(key, fn) {
+        const prev = this.queue.get(key) || Promise.resolve();
+        const next = prev.then(fn, fn);
+        this.queue.set(key, next.catch(() => {
+        }));
+        return next;
+      }
+      /**
+       * Record a card's text, compared by `compared` (its body, so a status
+       * change alone is not a version). `outside` means Dendrite did not
+       * write it. Returns 'reverted' when an outside text matches an older
+       * version, else null.
+       */
+      observe(key, text, compared, outside) {
+        return this.serial(key, async () => {
+          const h = hash(compared);
+          const rec = await this.store.get(key) || { versions: [], text: null, reverted: null };
+          const v = rec.versions;
+          const last = v[v.length - 1];
+          if (rec.reverted) {
+            if (last && last.h === h) {
+              rec.reverted = null;
+              rec.text = text;
+              await this.store.set(key, rec);
+            }
+            return rec.reverted ? "reverted" : null;
+          }
+          if (last && last.h === h) {
+            if (rec.text !== text) {
+              rec.text = text;
+              await this.store.set(key, rec);
+            }
+            return null;
+          }
+          if (outside && v.slice(0, -1).some((x) => x.h === h)) {
+            rec.reverted = { h, at: this.now() };
+            await this.store.set(key, rec);
+            return "reverted";
+          }
+          const t = this.now();
+          if (last && t - last.t < WINDOW_MS) last.h = h;
+          else v.push({ h, t });
+          if (v.length > KEEP) v.splice(0, v.length - KEEP);
+          rec.text = text;
+          await this.store.set(key, rec);
+          return null;
+        });
+      }
+      /** The newest text recorded for a card gone back, else null. */
+      async newer(key) {
+        const rec = await this.store.get(key);
+        return rec && rec.reverted ? rec.text : null;
+      }
+      /** Accept the card's current text as its newest version. */
+      keep(key, text, compared) {
+        return this.serial(key, async () => {
+          const rec = await this.store.get(key);
+          if (!rec) return;
+          rec.reverted = null;
+          rec.versions.push({ h: hash(compared), t: this.now() });
+          if (rec.versions.length > KEEP) {
+            rec.versions.splice(0, rec.versions.length - KEEP);
+          }
+          rec.text = text;
+          await this.store.set(key, rec);
+        });
+      }
+    };
+    module2.exports = { History: History2, hash, memoryStore, idbStore: idbStore2, KEEP, WINDOW_MS };
+  }
+});
+
 // src/main.js
 var {
   ItemView,
@@ -1418,6 +1554,7 @@ var core = require_core();
 var textedit = require_textedit();
 var { cardEditor } = require_editor();
 var pandoc = require_pandoc();
+var { History, idbStore } = require_history();
 var VIEW = "dendrite-view";
 var ROLE_ITEMS = [
   ["section", "Prints its heading only", "heading", "1"],
@@ -1476,6 +1613,7 @@ var LINTER_ID = "obsidian-linter";
 var CARD_UNSAFE_RULES = ["file-name-heading", "capitalize-headings"];
 var CARD_NAME = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-[a-z0-9]{5}$/;
 var UNDO_DEPTH = 50;
+var LABEL_IDLE_MS = 3e3;
 function prefixOf(app, file) {
   const fm = app.metadataCache.getFileCache(file)?.frontmatter;
   const p = fm && fm.dendrite_prefix;
@@ -1503,6 +1641,11 @@ var DendriteView = class extends ItemView {
     this.redo = [];
     this.selfWrites = /* @__PURE__ */ new Set();
     this.reloadTimer = null;
+    this.indexList = null;
+    this.labelTimer = null;
+    this.ownBodies = /* @__PURE__ */ new Map();
+    this.reverted = /* @__PURE__ */ new Set();
+    this.history = plugin.history || new History();
     this.scope = new Scope(this.app.scope);
     this.registerKeys();
   }
@@ -1614,10 +1757,13 @@ var DendriteView = class extends ItemView {
     const text = await this.app.vault.read(this.file);
     this.loadText(text);
     this.render();
-    await this.sweepStatuses();
-    await this.sweepTypes();
+    this.versionsChecked = this.checkVersions().catch((err) => console.error("Dendrite: version check failed", err));
   }
-  /** Add the index's and every card's type value, where missing. */
+  /**
+   * Add the index's and every card's type value, where missing. Run
+   * from a command, never on opening, since every device would make
+   * the same writes at once.
+   */
   async sweepTypes() {
     const s = this.plugin.settings;
     if (s.indexType && this.file) {
@@ -1632,6 +1778,7 @@ var DendriteView = class extends ItemView {
   loadText(text) {
     const { body } = core.splitFrontmatter(text);
     this.root = core.parseIndex(body).root;
+    this.indexList = core.serialiseTree(this.root);
     this.reindex();
     if (!this.active || !this.byId.has(this.active)) {
       const first = this.root.children[0];
@@ -2811,10 +2958,12 @@ var DendriteView = class extends ItemView {
     if (!ed.dirty) return ed.saving;
     ed.dirty = false;
     const text = ed.editor.value;
-    ed.saving = ed.saving.then(() => this.app.vault.process(
+    ed.saving = ed.saving.then(() => this.writeCard(
       ed.file,
       (data) => core.splitFrontmatter(data).fm + text
-    )).then(() => this.syncLabel(ed.id, text)).catch((err) => {
+    )).then(() => {
+      if (this.noteLabel(ed.id, text)) this.scheduleLabels();
+    }).catch((err) => {
       ed.dirty = true;
       console.error("Dendrite: save failed", err);
       new Notice("Dendrite could not save the card; the text is still in the editor.");
@@ -2823,6 +2972,7 @@ var DendriteView = class extends ItemView {
   }
   async flush() {
     if (this.editing) await this.save(this.editing);
+    await this.writeLabels();
   }
   async endEdit() {
     const ed = this.editing;
@@ -2830,6 +2980,12 @@ var DendriteView = class extends ItemView {
     await this.save(ed);
     this.editing = null;
     ed.editor.destroy();
+    await this.writeLabels();
+    if (ed.changed) await this.clearFinishedSplit(ed.file);
+    const node = this.byId.get(ed.id);
+    if (ed.changed && node && !this.statusOf(ed.id) && core.roleFor(node, (x) => this.roleOf(x)) === "prose") {
+      await this.setStatus(ed.id, "draft");
+    }
     if (ed.changed) await this.plugin.lintCard(ed.file);
     if (ed.changed) {
       const after = core.splitFrontmatter(
@@ -2993,14 +3149,34 @@ var DendriteView = class extends ItemView {
     if (!col || !col.length) return;
     this.select((top ? col[0] : col[col.length - 1]).id);
   }
-  async syncLabel(id, body) {
+  /** Follow a card's label in memory; true if it changed. */
+  noteLabel(id, body) {
     const node = this.byId.get(id);
-    if (!node) return;
+    if (!node) return false;
     const f = this.cardFile(id);
     const fm = f && this.app.metadataCache.getFileCache(f)?.frontmatter;
     const label = core.deriveLabel(body, fm && fm.aliases);
-    if (label !== node.label) {
-      node.label = label;
+    if (label === node.label) return false;
+    node.label = label;
+    return true;
+  }
+  async syncLabel(id, body) {
+    if (this.noteLabel(id, body)) await this.writeIndex();
+  }
+  /** Write labels once typing pauses. */
+  scheduleLabels() {
+    clearTimeout(this.labelTimer);
+    this.labelTimer = setTimeout(
+      () => this.writeLabels(),
+      this.labelIdleMs || LABEL_IDLE_MS
+    );
+  }
+  /** Write the index if a label in memory differs from it. */
+  async writeLabels() {
+    clearTimeout(this.labelTimer);
+    this.labelTimer = null;
+    if (!this.file || this.indexList === null) return;
+    if (core.serialiseTree(this.root) !== this.indexList) {
       await this.writeIndex();
     }
   }
@@ -3024,7 +3200,16 @@ var DendriteView = class extends ItemView {
   }
   async writeIndex() {
     const root = this.root;
+    clearTimeout(this.labelTimer);
+    let stale = false;
     await this.app.vault.process(this.file, (data) => {
+      const disk = core.serialiseTree(
+        core.parseIndex(core.splitFrontmatter(data).body).root
+      );
+      if (this.indexList !== null && disk !== this.indexList) {
+        stale = true;
+        return data;
+      }
       const out = core.writeIndexText(data, root);
       this.selfWrites.add(out);
       if (this.selfWrites.size > 20) {
@@ -3032,6 +3217,23 @@ var DendriteView = class extends ItemView {
       }
       return out;
     });
+    if (stale) {
+      new Notice("Dendrite: the index changed outside this board since it was read, from a sync or another editor. It has been read again; the last change was not written, so make it again.", 1e4);
+      await this.reload();
+      return false;
+    }
+    this.indexList = core.serialiseTree(root);
+    return true;
+  }
+  /** Write a card's note, known as Dendrite's own when it arrives. */
+  async writeCard(f, fn) {
+    let out = null;
+    await this.app.vault.process(f, (data) => {
+      out = fn(data);
+      this.ownBodies.set(f.path, core.splitFrontmatter(out).body);
+      return out;
+    });
+    return out;
   }
   async createCardFile(id, text = "") {
     const folder = this.cardsFolder();
@@ -3163,7 +3365,7 @@ var DendriteView = class extends ItemView {
       core.splitFrontmatter(srcText).body
     );
     const before = core.serialiseTree(this.root);
-    await this.app.vault.process(
+    await this.writeCard(
       dst,
       (data) => core.splitFrontmatter(data).fm + merged
     );
@@ -3372,11 +3574,7 @@ var DendriteView = class extends ItemView {
         }
         continue;
       }
-      let next = null;
-      await vault.process(f, (d) => {
-        next = r.text !== void 0 ? r.text : core.splitFrontmatter(d).fm + r.body;
-        return next;
-      });
+      const next = await this.writeCard(f, (d) => r.text !== void 0 ? r.text : core.splitFrontmatter(d).fm + r.body);
       inv.restores.push({
         path: r.path,
         text: data,
@@ -3420,9 +3618,14 @@ var DendriteView = class extends ItemView {
   async onModify(f) {
     if (!(f instanceof TFile) || !this.file) return;
     if (f === this.file) {
-      const text = await this.app.vault.cachedRead(f);
-      if (this.selfWrites.delete(text)) return;
-      if (this.root && core.writeIndexText(text, this.root) === text) {
+      const text2 = await this.app.vault.cachedRead(f);
+      if (this.selfWrites.delete(text2)) {
+        await this.checkVersion(null, text2, true);
+        return;
+      }
+      await this.checkVersion(null, text2, false);
+      if (this.root && core.writeIndexText(text2, this.root) === text2) {
+        this.indexList = core.serialiseTree(this.root);
         return;
       }
       clearTimeout(this.reloadTimer);
@@ -3431,6 +3634,11 @@ var DendriteView = class extends ItemView {
     }
     const id = f.basename;
     if (!this.byId.has(id)) return;
+    const text = await this.app.vault.cachedRead(f);
+    const body = core.splitFrontmatter(text).body;
+    const own = this.ownBodies.get(f.path) === body;
+    if (own) this.ownBodies.delete(f.path);
+    await this.checkVersion(id, text, own);
     if (this.find) this.scheduleFind(true);
     if (this.editing && this.editing.id === id) return;
     this.invalidate(id);
@@ -3452,12 +3660,119 @@ var DendriteView = class extends ItemView {
     this.updateRoles();
     this.updateStatuses();
     this.scheduleCounts();
-    this.clearFinishedSplit(f);
     if (this.editing && this.editing.id === f.basename) return;
     const body = core.splitFrontmatter(
       await this.app.vault.cachedRead(f)
     ).body;
-    await this.syncLabel(f.basename, body);
+    this.noteLabel(f.basename, body);
+  }
+  // ---- versions going back ---------------------------------------------
+  historyKey(id) {
+    const vault = this.app.appId || this.app.vault.getName && this.app.vault.getName() || "vault";
+    return `${vault}/${id === null ? "index:" + this.file.path : id}`;
+  }
+  /**
+   * Record a note's text in this device's history and notice when a
+   * text from outside matches an earlier version: a sync putting back
+   * an old copy. A card is compared by its body, the index whole.
+   */
+  async checkVersion(id, text, own) {
+    const compared = id === null ? text : core.splitFrontmatter(text).body;
+    const f = id === null ? this.file : this.cardFile(id);
+    const active = this.app.workspace.activeEditor;
+    const here = own || !!(active && f && active.file === f);
+    let r;
+    try {
+      r = await this.history.observe(
+        this.historyKey(id),
+        text,
+        compared,
+        !here
+      );
+    } catch (err) {
+      console.error("Dendrite: version history failed", err);
+      return;
+    }
+    const key = id === null ? "index" : id;
+    if (r === "reverted" === this.reverted.has(key)) return;
+    if (r === "reverted") {
+      this.reverted.add(key);
+      const node = id && this.byId.get(id);
+      const name = id === null ? "The index" : `Card ${core.shortId(id)}` + (node && node.label ? ` (${node.label})` : "");
+      new Notice(`Dendrite: ${name} went back to an earlier version, probably from a sync. Click "earlier version" on ${id === null ? "the bar" : "the card"} to restore the newer text or keep this one.`, 0);
+    } else {
+      this.reverted.delete(key);
+    }
+    this.updateStatuses();
+  }
+  /** Every note's version, on opening: a sync may have run meanwhile. */
+  async checkVersions() {
+    if (!this.file) return;
+    await this.checkVersion(
+      null,
+      await this.app.vault.cachedRead(this.file),
+      false
+    );
+    for (const n of core.allNodes(this.root)) {
+      const f = this.cardFile(n.id);
+      if (!f) continue;
+      await this.checkVersion(
+        n.id,
+        await this.app.vault.cachedRead(f),
+        false
+      );
+    }
+  }
+  revertedMenu(id, e) {
+    const { Menu } = require("obsidian");
+    const m = new Menu();
+    m.addItem((i) => i.setTitle("Restore the newer version").setIcon("history").onClick(() => this.restoreNewer(id)));
+    m.addItem((i) => i.setTitle("Keep this version").setIcon("check").onClick(() => this.keepVersion(id)));
+    m.showAtMouseEvent(e);
+  }
+  /** Put back the newest text this device recorded for the note. */
+  async restoreNewer(id) {
+    const f = id === null ? this.file : this.cardFile(id);
+    const text = f && await this.history.newer(this.historyKey(id));
+    if (text === null || text === void 0) {
+      new Notice("Dendrite: no newer version is recorded here.");
+      return;
+    }
+    const now = await this.app.vault.read(f);
+    if (id === null) {
+      this.selfWrites.add(text);
+      await this.app.vault.process(f, () => text);
+      await this.checkVersion(null, text, true);
+      await this.reload();
+      return;
+    }
+    if (this.editing && this.editing.id === id) await this.endEdit();
+    await this.writeCard(f, () => text);
+    this.pushUndo({
+      active: id,
+      files: [],
+      text: true,
+      restores: [{
+        path: f.path,
+        text: now,
+        ifBody: core.splitFrontmatter(text).body
+      }]
+    });
+    await this.checkVersion(id, text, true);
+    this.invalidate(id);
+    await this.renderCard(id);
+  }
+  async keepVersion(id) {
+    const f = id === null ? this.file : this.cardFile(id);
+    if (!f) return;
+    const text = await this.app.vault.read(f);
+    await this.history.keep(
+      this.historyKey(id),
+      text,
+      id === null ? text : core.splitFrontmatter(text).body
+    );
+    this.reverted.delete(id === null ? "index" : id);
+    this.updateStatuses();
   }
   onRenameCard(f, oldPath) {
     const old = oldPath.split("/").pop().replace(/\.md$/, "");
@@ -3593,14 +3908,22 @@ var DendriteView = class extends ItemView {
       const old = card.querySelector(":scope > .dendrite-status");
       if (old) old.remove();
       card.removeClass("is-flagged");
-      const info = report.cards.get(id);
-      if (!info) continue;
+      const info = report.cards.get(id) || { prints: false, own: null, below: 0 };
       const chip = createDiv({ cls: "dendrite-status" });
       const show = (status, text) => {
         const s = chip.createSpan({ cls: `dendrite-status-chip is-${status}`, text });
         const colour = this.plugin.statusColour(status);
         if (colour) s.style.setProperty("--dendrite-chip", colour);
+        return s;
       };
+      if (this.reverted.has(id)) {
+        const s = show("reverted", "earlier version \u27F2");
+        s.setAttr("aria-label", "This card went back to an earlier version: restore the newer or keep it");
+        s.onclick = (e) => {
+          e.stopPropagation();
+          this.revertedMenu(id, e);
+        };
+      }
       if (info.own === "done") show("done", "done \u2713");
       else if (info.own === "revise") show("revise", "revise \u2691");
       else if (info.own === "unsplit") show("unsplit", "unsplit");
@@ -3621,6 +3944,13 @@ var DendriteView = class extends ItemView {
       parts.push(`${t.draft} draft`, `${t.done} done`);
       this.statusEl.setText(parts.join(" \xB7 "));
       this.statusEl.toggleClass("has-flags", t.revise + t.unsplit > 0);
+      if (this.reverted.has("index")) {
+        const s = this.statusEl.createSpan({
+          cls: "dendrite-status-chip is-reverted",
+          text: "index: earlier version \u27F2"
+        });
+        s.onclick = (e) => this.revertedMenu(null, e);
+      }
     }
     if (this.plugin.previewStatuses) {
       this.plugin.previewStatuses(this.file);
@@ -4312,6 +4642,11 @@ var DendriteView = class extends ItemView {
    */
   async exportTo(node, format = "md") {
     await this.flush();
+    if (this.reverted.size) {
+      const names = [...this.reverted].map((k) => k === "index" ? "the index" : core.shortId(k));
+      new Notice("Dendrite: not exported, since " + names.join(", ") + " went back to an earlier version. Restore the newer version or keep this one first.", 1e4);
+      return null;
+    }
     const scope = node ? [node] : this.root.children;
     const ids = node ? [node, ...core.descendants(node)] : core.allNodes(this.root);
     const bodies = /* @__PURE__ */ new Map();
@@ -5080,6 +5415,7 @@ var DendriteSettings = class extends PluginSettingTab {
 module.exports = class DendritePlugin extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+    this.history = new History(idbStore());
     this.registerView(VIEW, (leaf) => new DendriteView(leaf, this));
     this.registerView(PREVIEW, (leaf) => new DendritePreview(leaf, this));
     this.addCommand({
@@ -5161,6 +5497,7 @@ module.exports = class DendritePlugin extends Plugin {
       false,
       (v) => v.nextFlagged(1, (i) => i.prints && i.own === "draft")
     );
+    viewCommand("add-types", "Add the type property to the index and every card", false, (v) => v.sweepTypes());
     viewCommand(
       "merge-into-above",
       "Merge card into the card above",

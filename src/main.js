@@ -12,6 +12,14 @@
  * TEXT SAFETY. A card's text is written only to its own note, through
  * vault.process, autosaved while typing and saved again on every way out
  * of the editor. Escape saves; nothing in Dendrite discards an edit.
+ *
+ * WRITES AND SYNC. Dendrite writes a note only from something done on
+ * this board: a key, a menu, a drag, or the card editor's saves. Nothing
+ * that arrives from outside, a sync or another editor, and nothing done
+ * on opening, writes anything. A change from outside updates the board
+ * in memory, labels included, and the index catches up at the next write
+ * made here. The index is written by reading it from disk and replacing
+ * only its list, and not at all if its list changed since it was read.
  */
 const {
     ItemView, MarkdownView, Plugin, PluginSettingTab, Setting,
@@ -23,6 +31,7 @@ const core = require('./core.js');
 const textedit = require('./textedit.js');
 const { cardEditor } = require('./editor.js');
 const pandoc = require('./pandoc.js');
+const { History, idbStore } = require('./history.js');
 
 const VIEW = 'dendrite-view';
 
@@ -88,6 +97,9 @@ const CARD_UNSAFE_RULES = ['file-name-heading', 'capitalize-headings'];
 // A card note is `<prefix>-<5 characters>.md` inside a `cards` folder.
 const CARD_NAME = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-[a-z0-9]{5}$/;
 const UNDO_DEPTH = 50;
+// A card's label reaches the index once typing pauses this long, or when
+// the card is left, so the index is not rewritten on every autosave.
+const LABEL_IDLE_MS = 3000;
 
 function prefixOf(app, file) {
     const fm = app.metadataCache.getFileCache(file)?.frontmatter;
@@ -121,6 +133,16 @@ class DendriteView extends ItemView {
         this.redo = [];
         this.selfWrites = new Set();
         this.reloadTimer = null;
+        // The index's list as last read or written here: a write over a
+        // list that has changed since would drop someone else's change.
+        this.indexList = null;
+        this.labelTimer = null;
+        // Card bodies Dendrite is writing, by path, so their modify events
+        // are known as its own; and the cards gone back to an earlier
+        // version, by id, with 'index' for the index.
+        this.ownBodies = new Map();
+        this.reverted = new Set();
+        this.history = plugin.history || new History();
         this.scope = new Scope(this.app.scope);
         this.registerKeys();
     }
@@ -226,14 +248,18 @@ class DendriteView extends ItemView {
         const text = await this.app.vault.read(this.file);
         this.loadText(text);
         this.render();
-        // Backfill: a printing card with no status is given draft, so
-        // every card says what it is; the index and every card get their
-        // type.
-        await this.sweepStatuses();
-        await this.sweepTypes();
+        // Opening writes nothing: a printing card with no status shows as
+        // draft and is given it at the next change made here. Versions
+        // are checked behind the board, one card at a time.
+        this.versionsChecked = this.checkVersions().catch((err) =>
+            console.error('Dendrite: version check failed', err));
     }
 
-    /** Add the index's and every card's type value, where missing. */
+    /**
+     * Add the index's and every card's type value, where missing. Run
+     * from a command, never on opening, since every device would make
+     * the same writes at once.
+     */
     async sweepTypes() {
         const s = this.plugin.settings;
         if (s.indexType && this.file) {
@@ -249,6 +275,7 @@ class DendriteView extends ItemView {
     loadText(text) {
         const { body } = core.splitFrontmatter(text);
         this.root = core.parseIndex(body).root;
+        this.indexList = core.serialiseTree(this.root);
         this.reindex();
         if (!this.active || !this.byId.has(this.active)) {
             const first = this.root.children[0];
@@ -1459,9 +1486,11 @@ class DendriteView extends ItemView {
         if (!ed.dirty) return ed.saving;
         ed.dirty = false;
         const text = ed.editor.value;
-        ed.saving = ed.saving.then(() => this.app.vault.process(ed.file,
+        ed.saving = ed.saving.then(() => this.writeCard(ed.file,
             (data) => core.splitFrontmatter(data).fm + text))
-            .then(() => this.syncLabel(ed.id, text))
+            .then(() => {
+                if (this.noteLabel(ed.id, text)) this.scheduleLabels();
+            })
             .catch((err) => {
                 ed.dirty = true;
                 console.error('Dendrite: save failed', err);
@@ -1473,6 +1502,7 @@ class DendriteView extends ItemView {
 
     async flush() {
         if (this.editing) await this.save(this.editing);
+        await this.writeLabels();
     }
 
     async endEdit() {
@@ -1481,6 +1511,14 @@ class DendriteView extends ItemView {
         await this.save(ed);
         this.editing = null;
         ed.editor.destroy();
+        await this.writeLabels();
+        if (ed.changed) await this.clearFinishedSplit(ed.file);
+        // Text written here is a draft until said otherwise.
+        const node = this.byId.get(ed.id);
+        if (ed.changed && node && !this.statusOf(ed.id) &&
+            core.roleFor(node, (x) => this.roleOf(x)) === 'prose') {
+            await this.setStatus(ed.id, 'draft');
+        }
         if (ed.changed) await this.plugin.lintCard(ed.file);
         // The editor's own history goes with it, so the visit becomes one
         // step in the board's undo, beside tree changes in the order made.
@@ -1649,14 +1687,35 @@ class DendriteView extends ItemView {
         this.select((top ? col[0] : col[col.length - 1]).id);
     }
 
-    async syncLabel(id, body) {
+    /** Follow a card's label in memory; true if it changed. */
+    noteLabel(id, body) {
         const node = this.byId.get(id);
-        if (!node) return;
+        if (!node) return false;
         const f = this.cardFile(id);
         const fm = f && this.app.metadataCache.getFileCache(f)?.frontmatter;
         const label = core.deriveLabel(body, fm && fm.aliases);
-        if (label !== node.label) {
-            node.label = label;
+        if (label === node.label) return false;
+        node.label = label;
+        return true;
+    }
+
+    async syncLabel(id, body) {
+        if (this.noteLabel(id, body)) await this.writeIndex();
+    }
+
+    /** Write labels once typing pauses. */
+    scheduleLabels() {
+        clearTimeout(this.labelTimer);
+        this.labelTimer = setTimeout(() => this.writeLabels(),
+                                     this.labelIdleMs || LABEL_IDLE_MS);
+    }
+
+    /** Write the index if a label in memory differs from it. */
+    async writeLabels() {
+        clearTimeout(this.labelTimer);
+        this.labelTimer = null;
+        if (!this.file || this.indexList === null) return;
+        if (core.serialiseTree(this.root) !== this.indexList) {
             await this.writeIndex();
         }
     }
@@ -1680,7 +1739,17 @@ class DendriteView extends ItemView {
 
     async writeIndex() {
         const root = this.root;
+        clearTimeout(this.labelTimer);
+        let stale = false;
         await this.app.vault.process(this.file, (data) => {
+            // The list on disk is not the one this board last read or
+            // wrote: it came from elsewhere, so it is not overwritten.
+            const disk = core.serialiseTree(
+                core.parseIndex(core.splitFrontmatter(data).body).root);
+            if (this.indexList !== null && disk !== this.indexList) {
+                stale = true;
+                return data;
+            }
             const out = core.writeIndexText(data, root);
             // Remembered so the modify event this write causes is not
             // mistaken for an outside edit; capped in case an event never
@@ -1691,6 +1760,27 @@ class DendriteView extends ItemView {
             }
             return out;
         });
+        if (stale) {
+            new Notice('Dendrite: the index changed outside this board ' +
+                       'since it was read, from a sync or another editor. ' +
+                       'It has been read again; the last change was not ' +
+                       'written, so make it again.', 10000);
+            await this.reload();
+            return false;
+        }
+        this.indexList = core.serialiseTree(root);
+        return true;
+    }
+
+    /** Write a card's note, known as Dendrite's own when it arrives. */
+    async writeCard(f, fn) {
+        let out = null;
+        await this.app.vault.process(f, (data) => {
+            out = fn(data);
+            this.ownBodies.set(f.path, core.splitFrontmatter(out).body);
+            return out;
+        });
+        return out;
     }
 
     async createCardFile(id, text = '') {
@@ -1822,7 +1912,7 @@ class DendriteView extends ItemView {
         const merged = core.mergeText(dstBody,
                                       core.splitFrontmatter(srcText).body);
         const before = core.serialiseTree(this.root);
-        await this.app.vault.process(dst,
+        await this.writeCard(dst,
             (data) => core.splitFrontmatter(data).fm + merged);
         if (kind === 'above') core.mergeIntoAbove(node);
         else {
@@ -2037,12 +2127,9 @@ class DendriteView extends ItemView {
                 }
                 continue;
             }
-            let next = null;
-            await vault.process(f, (d) => {
-                next = r.text !== undefined ? r.text
-                    : core.splitFrontmatter(d).fm + r.body;
-                return next;
-            });
+            const next = await this.writeCard(f, (d) =>
+                (r.text !== undefined ? r.text
+                    : core.splitFrontmatter(d).fm + r.body));
             inv.restores.push({ path: r.path, text: data,
                                 ifBody: bodyOf(next) });
             this.invalidate(f.basename);
@@ -2088,10 +2175,15 @@ class DendriteView extends ItemView {
         if (!(f instanceof TFile) || !this.file) return;
         if (f === this.file) {
             const text = await this.app.vault.cachedRead(f);
-            if (this.selfWrites.delete(text)) return;
+            if (this.selfWrites.delete(text)) {
+                await this.checkVersion(null, text, true);
+                return;
+            }
+            await this.checkVersion(null, text, false);
             // A sync can write the text back unchanged, after Dendrite's
             // own event was consumed: nothing to reload.
             if (this.root && core.writeIndexText(text, this.root) === text) {
+                this.indexList = core.serialiseTree(this.root);
                 return;
             }
             // The index changed outside Dendrite: re-read it, debounced so
@@ -2102,6 +2194,11 @@ class DendriteView extends ItemView {
         }
         const id = f.basename;
         if (!this.byId.has(id)) return;
+        const text = await this.app.vault.cachedRead(f);
+        const body = core.splitFrontmatter(text).body;
+        const own = this.ownBodies.get(f.path) === body;
+        if (own) this.ownBodies.delete(f.path);
+        await this.checkVersion(id, text, own);
         if (this.find) this.scheduleFind(true);
         if (this.editing && this.editing.id === id) return;
         this.invalidate(id);
@@ -2127,14 +2224,117 @@ class DendriteView extends ItemView {
         this.updateRoles();
         this.updateStatuses();
         this.scheduleCounts();
-        this.clearFinishedSplit(f);
         // A label can come from aliases, which only the metadata cache
-        // knows once parsed, so labels are synced here rather than on
-        // modify.
+        // knows once parsed, so labels follow here rather than on modify;
+        // in memory only, since the change may have come from a sync.
         if (this.editing && this.editing.id === f.basename) return;
         const body = core.splitFrontmatter(
             await this.app.vault.cachedRead(f)).body;
-        await this.syncLabel(f.basename, body);
+        this.noteLabel(f.basename, body);
+    }
+
+    // ---- versions going back ---------------------------------------------
+
+    historyKey(id) {
+        const vault = this.app.appId ||
+            (this.app.vault.getName && this.app.vault.getName()) || 'vault';
+        return `${vault}/${id === null ? 'index:' + this.file.path : id}`;
+    }
+
+    /**
+     * Record a note's text in this device's history and notice when a
+     * text from outside matches an earlier version: a sync putting back
+     * an old copy. A card is compared by its body, the index whole.
+     */
+    async checkVersion(id, text, own) {
+        const compared = id === null ? text : core.splitFrontmatter(text).body;
+        // Typed in Obsidian's own editor on this device: not a sync.
+        const f = id === null ? this.file : this.cardFile(id);
+        const active = this.app.workspace.activeEditor;
+        const here = own || !!(active && f && active.file === f);
+        let r;
+        try {
+            r = await this.history.observe(this.historyKey(id), text,
+                                           compared, !here);
+        } catch (err) {
+            console.error('Dendrite: version history failed', err);
+            return;
+        }
+        const key = id === null ? 'index' : id;
+        if ((r === 'reverted') === this.reverted.has(key)) return;
+        if (r === 'reverted') {
+            this.reverted.add(key);
+            const node = id && this.byId.get(id);
+            const name = id === null ? 'The index' :
+                `Card ${core.shortId(id)}` +
+                (node && node.label ? ` (${node.label})` : '');
+            new Notice(`Dendrite: ${name} went back to an earlier version, ` +
+                       'probably from a sync. Click "earlier version" on ' +
+                       `${id === null ? 'the bar' : 'the card'} to restore ` +
+                       'the newer text or keep this one.', 0);
+        } else {
+            this.reverted.delete(key);
+        }
+        this.updateStatuses();
+    }
+
+    /** Every note's version, on opening: a sync may have run meanwhile. */
+    async checkVersions() {
+        if (!this.file) return;
+        await this.checkVersion(null,
+            await this.app.vault.cachedRead(this.file), false);
+        for (const n of core.allNodes(this.root)) {
+            const f = this.cardFile(n.id);
+            if (!f) continue;
+            await this.checkVersion(n.id,
+                await this.app.vault.cachedRead(f), false);
+        }
+    }
+
+    revertedMenu(id, e) {
+        const { Menu } = require('obsidian');
+        const m = new Menu();
+        m.addItem((i) => i.setTitle('Restore the newer version')
+            .setIcon('history').onClick(() => this.restoreNewer(id)));
+        m.addItem((i) => i.setTitle('Keep this version')
+            .setIcon('check').onClick(() => this.keepVersion(id)));
+        m.showAtMouseEvent(e);
+    }
+
+    /** Put back the newest text this device recorded for the note. */
+    async restoreNewer(id) {
+        const f = id === null ? this.file : this.cardFile(id);
+        const text = f && await this.history.newer(this.historyKey(id));
+        if (text === null || text === undefined) {
+            new Notice('Dendrite: no newer version is recorded here.');
+            return;
+        }
+        const now = await this.app.vault.read(f);
+        if (id === null) {
+            this.selfWrites.add(text);
+            await this.app.vault.process(f, () => text);
+            await this.checkVersion(null, text, true);
+            await this.reload();
+            return;
+        }
+        if (this.editing && this.editing.id === id) await this.endEdit();
+        await this.writeCard(f, () => text);
+        this.pushUndo({ active: id, files: [], text: true,
+            restores: [{ path: f.path, text: now,
+                         ifBody: core.splitFrontmatter(text).body }] });
+        await this.checkVersion(id, text, true);
+        this.invalidate(id);
+        await this.renderCard(id);
+    }
+
+    async keepVersion(id) {
+        const f = id === null ? this.file : this.cardFile(id);
+        if (!f) return;
+        const text = await this.app.vault.read(f);
+        await this.history.keep(this.historyKey(id), text,
+            id === null ? text : core.splitFrontmatter(text).body);
+        this.reverted.delete(id === null ? 'index' : id);
+        this.updateStatuses();
     }
 
     onRenameCard(f, oldPath) {
@@ -2287,15 +2487,25 @@ class DendriteView extends ItemView {
             const old = card.querySelector(':scope > .dendrite-status');
             if (old) old.remove();
             card.removeClass('is-flagged');
-            const info = report.cards.get(id);
-            if (!info) continue;
+            const info = report.cards.get(id) ||
+                { prints: false, own: null, below: 0 };
             const chip = createDiv({ cls: 'dendrite-status' });
             const show = (status, text) => {
                 const s = chip.createSpan({ cls: 'dendrite-status-chip ' +
                                                  `is-${status}`, text });
                 const colour = this.plugin.statusColour(status);
                 if (colour) s.style.setProperty('--dendrite-chip', colour);
+                return s;
             };
+            if (this.reverted.has(id)) {
+                const s = show('reverted', 'earlier version ⟲');
+                s.setAttr('aria-label', 'This card went back to an ' +
+                          'earlier version: restore the newer or keep it');
+                s.onclick = (e) => {
+                    e.stopPropagation();
+                    this.revertedMenu(id, e);
+                };
+            }
             if (info.own === 'done') show('done', 'done ✓');
             else if (info.own === 'revise') show('revise', 'revise ⚑');
             else if (info.own === 'unsplit') show('unsplit', 'unsplit');
@@ -2317,6 +2527,12 @@ class DendriteView extends ItemView {
             parts.push(`${t.draft} draft`, `${t.done} done`);
             this.statusEl.setText(parts.join(' · '));
             this.statusEl.toggleClass('has-flags', t.revise + t.unsplit > 0);
+            if (this.reverted.has('index')) {
+                const s = this.statusEl.createSpan({ cls:
+                    'dendrite-status-chip is-reverted',
+                    text: 'index: earlier version ⟲' });
+                s.onclick = (e) => this.revertedMenu(null, e);
+            }
         }
         if (this.plugin.previewStatuses) {
             this.plugin.previewStatuses(this.file);
@@ -3017,6 +3233,14 @@ class DendriteView extends ItemView {
      */
     async exportTo(node, format = 'md') {
         await this.flush();
+        if (this.reverted.size) {
+            const names = [...this.reverted].map((k) =>
+                (k === 'index' ? 'the index' : core.shortId(k)));
+            new Notice('Dendrite: not exported, since ' + names.join(', ') +
+                       ' went back to an earlier version. Restore the ' +
+                       'newer version or keep this one first.', 10000);
+            return null;
+        }
         const scope = node ? [node] : this.root.children;
         const ids = node ? [node, ...core.descendants(node)] :
             core.allNodes(this.root);
@@ -3945,6 +4169,9 @@ class DendriteSettings extends PluginSettingTab {
 module.exports = class DendritePlugin extends Plugin {
     async onload() {
         this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+        // Versions per device, outside the vault and data.json, which
+        // sync plugins copy.
+        this.history = new History(idbStore());
         this.registerView(VIEW, (leaf) => new DendriteView(leaf, this));
         this.registerView(PREVIEW, (leaf) => new DendritePreview(leaf, this));
         this.addCommand({
@@ -4013,6 +4240,8 @@ module.exports = class DendritePlugin extends Plugin {
             'revise or finish splitting', false, (v) => v.nextFlagged(-1));
         viewCommand('next-draft', 'Go to the next draft card', false,
             (v) => v.nextFlagged(1, (i) => i.prints && i.own === 'draft'));
+        viewCommand('add-types', 'Add the type property to the index ' +
+            'and every card', false, (v) => v.sweepTypes());
         viewCommand('merge-into-above', 'Merge card into the card above',
             false, (v) => v.merge('above'));
         viewCommand('merge-into-parent', 'Merge card into its parent',

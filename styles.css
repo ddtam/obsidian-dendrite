@@ -732,6 +732,13 @@
     color: var(--dendrite-chip, var(--text-faint));
 }
 
+/* A note a sync put back to an earlier version: click for the choices. */
+.dendrite-status-chip.is-reverted {
+    color: var(--color-red);
+    background: color-mix(in srgb, var(--color-red) 14%, transparent);
+    cursor: pointer;
+}
+
 .dendrite-tally {
     margin-left: 12px;
     font-size: var(--font-ui-smaller);

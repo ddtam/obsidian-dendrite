@@ -967,18 +967,23 @@ test('every printing card holds its status; structural cards hold none',
           'G-bbbbb': 'Prose.',
           'G-ccccc': '---\ndendrite_role: notes\n---\nNotes.' });
     await tick(20);
-    assert.match(read(cardPath('G-bbbbb')), /dendrite_status: draft/,
-                 'backfilled on opening');
-    assert.doesNotMatch(read(cardPath('G-aaaaa')), /dendrite_status/,
-                        'a section holds no status');
-    assert.doesNotMatch(read(cardPath('G-ccccc')), /dendrite_status/,
-                        'a left-out card holds no status');
-    // A new card is written with draft.
+    assert.equal(read(cardPath('G-bbbbb')), 'Prose.',
+                 'opening writes nothing');
+    assert.equal(view.statusInfo.get('G-bbbbb').own, 'draft',
+                 'shown as draft meanwhile');
+    // A change made here backfills, and a new card is written with
+    // draft.
     view.active = 'G-bbbbb';
     await view.insert('below');
     const fresh = view.active;
     await view.endEdit();
     assert.match(read(cardPath(fresh)), /dendrite_status: draft/);
+    assert.match(read(cardPath('G-bbbbb')), /dendrite_status: draft/,
+                 'backfilled at the first change made here');
+    assert.doesNotMatch(read(cardPath('G-aaaaa')), /dendrite_status/,
+                        'a section holds no status');
+    assert.doesNotMatch(read(cardPath('G-ccccc')), /dendrite_status/,
+                        'a left-out card holds no status');
 });
 
 test('dragging a card drops it above, below or into another, with undo',
@@ -1143,7 +1148,10 @@ test('the index and every card get their type, kept beside existing ones',
         { 'G-aaaaa': '---\ntype:\n  - "[[journal article]]"\n---\nA' });
     view.plugin.settings.indexType = '[[dendrite index]]';
     view.plugin.settings.cardType = 'dendrite card';
+    const before = read(INDEX);
     await view.reload();
+    assert.equal(read(INDEX), before, 'opening adds nothing');
+    await view.sweepTypes();
     assert.match(read(INDEX), /type:\n  - \[\[dendrite index\]\]/);
     assert.match(read(cardPath('G-aaaaa')),
                  /type:\n  - "\[\[journal article\]\]"\n  - dendrite card/,
@@ -1153,7 +1161,7 @@ test('the index and every card get their type, kept beside existing ones',
     const fresh = view.active;
     await view.endEdit();
     assert.match(read(cardPath(fresh)), /type:\n  - dendrite card/);
-    await view.reload();
+    await view.sweepTypes();
     assert.equal((read(INDEX).match(/dendrite index/g) || []).length, 1,
                  'added once, never twice');
 });
@@ -1666,7 +1674,7 @@ test('Alt with a number sets a role or status on a whole branch, as ' +
     assert.deepEqual(branch.map((id) => prop(id, 'status')),
                      [undefined, undefined, 'done', 'done'],
                      'headings take no status');
-    assert.equal(prop('G-eeeee', 'status'), 'draft', 'outside untouched');
+    assert.equal(prop('G-eeeee', 'status'), undefined, 'outside untouched');
     // Alt+4: the whole branch left out, its statuses cleared with it.
     await press('Digit4');
     assert.deepEqual(branch.map((id) => prop(id, 'role')),

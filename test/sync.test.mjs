@@ -1,0 +1,254 @@
+// Two devices syncing one manuscript: two in-memory vaults, each with its
+// own board and its own version history, and a sync that copies a file
+// from one to the other the way LiveSync does, as a modify the receiving
+// vault did not make. Checks that a board writes nothing in response to
+// what a sync brings, that typing does not rewrite the index on every
+// save, and that a card a sync puts back to an earlier version is caught.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const h = require('./harness.cjs');
+const { DendriteView } = require('../src/main.js');
+const { History, memoryStore, WINDOW_MS } = require('../src/history.js');
+
+const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+const INDEX = 'W/Grant/Grant.md';
+const cardPath = (id) => `W/Grant/cards/${id}.md`;
+
+/** A device: a vault holding `files`, its board open on the index. */
+async function device(files, clock) {
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    for (const [p, t] of Object.entries(files)) await app.vault.create(p, t);
+    // Writes this device's own code makes, by path; a sync's are not.
+    const writes = [];
+    let syncing = false;
+    const modify = app.vault.modify.bind(app.vault);
+    app.vault.modify = async (f, data) => {
+        if (!syncing) writes.push(f.path);
+        return modify(f, data);
+    };
+    const create = app.vault.create.bind(app.vault);
+    app.vault.create = async (p, data) => {
+        if (!syncing) writes.push(p);
+        return create(p, data);
+    };
+    const plugin = { settings: { headingTop: 1, cardWidth: 380,
+                                 autosaveMs: 20, vimKeys: true },
+                     openAsMarkdown() {}, async lintCard() {},
+                     statusColour: () => null,
+                     history: new History(memoryStore(), () => clock.t) };
+    const view = new DendriteView({ app, updateHeader() {}, detach() {} },
+                                  plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX });
+    await tick(20);
+    const read = (p) => app.vault.text.get(p);
+    /** Receive a file's text by sync. */
+    const receive = async (p, text) => {
+        syncing = true;
+        try {
+            const f = app.vault.getAbstractFileByPath(p);
+            if (f) await modify(f, text);
+            else await create(p, text);
+        } finally {
+            syncing = false;
+        }
+        await tick(20);
+    };
+    return { app, view, read, writes, receive };
+}
+
+const type = (view, value) => {
+    const ta = view.editing.ta;
+    ta.value = value;
+    ta.dispatchEvent(new h.window.Event('input'));
+};
+
+const FILES = {
+    [INDEX]: '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Aims]]\n',
+    [cardPath('G-aaaaa')]: '---\ndendrite_status: draft\n---\n# Aims\n',
+};
+
+test('typing on one device: the other writes nothing, and the index is ' +
+     'written once typing stops', async () => {
+    const clock = { t: 1 };
+    const a = await device(FILES, clock);
+    const b = await device(FILES, clock);
+    assert.deepEqual(a.writes, [], 'opening writes nothing');
+    assert.deepEqual(b.writes, []);
+    // A new card on A, synced to B.
+    a.view.active = 'G-aaaaa';
+    await a.view.insert('below');
+    const id = a.view.active;
+    await tick(40);
+    for (const p of [cardPath(id), INDEX]) await b.receive(p, a.read(p));
+    a.writes.length = 0;
+    // Typing its first words, each autosave synced to B as it lands.
+    for (const words of ['One', 'One two', 'One two three',
+                         'One two three four']) {
+        type(a.view, words);
+        await tick(60);
+        await b.receive(cardPath(id), a.read(cardPath(id)));
+    }
+    assert.ok(a.writes.includes(cardPath(id)), 'A autosaved the card');
+    assert.ok(!a.writes.includes(INDEX),
+              'A did not rewrite the index while typing');
+    assert.deepEqual(b.writes, [], 'B wrote nothing in response');
+    assert.equal(b.view.byId.get(id).label, 'One two three four',
+                 'B follows the label in memory');
+    // Leaving the card writes the label once.
+    await a.view.endEdit();
+    assert.equal(a.writes.filter((p) => p === INDEX).length, 1);
+    assert.match(a.read(INDEX), new RegExp(`\\[\\[${id}\\|One two three ` +
+                                           'four\\]\\]'));
+    await b.receive(INDEX, a.read(INDEX));
+    for (const p of [cardPath(id)]) await b.receive(p, a.read(p));
+    assert.deepEqual(b.writes, [], 'nor in response to the index');
+    assert.equal(b.read(INDEX), a.read(INDEX));
+});
+
+test('the label reaches the index after a pause in typing', async () => {
+    const clock = { t: 1 };
+    const a = await device(FILES, clock);
+    a.view.labelIdleMs = 150;
+    await a.view.startEdit('G-aaaaa');
+    a.writes.length = 0;
+    type(a.view, '# Specific aims\n');
+    await tick(60);
+    assert.ok(!a.writes.includes(INDEX), 'not at the autosave');
+    await tick(200);
+    assert.deepEqual(a.writes.filter((p) => p === INDEX), [INDEX]);
+    assert.match(a.read(INDEX), /\[\[G-aaaaa\|Specific aims\]\]/);
+    await a.view.endEdit();
+    assert.equal(a.writes.filter((p) => p === INDEX).length, 1,
+                 'and not again on leaving');
+});
+
+test('a card a stale device puts back is caught and can be restored; the ' +
+     'board writes nothing in response', async () => {
+    const clock = { t: 1 };
+    const oldCard = FILES[cardPath('G-aaaaa')] +
+        'What are the anticipated results?\n';
+    const files = { ...FILES, [cardPath('G-aaaaa')]: oldCard };
+    const a = await device(files, clock);
+    const staleIndex = a.read(INDEX);
+    // Later, on A: the index gains properties, from Obsidian's own
+    // properties editor, and the card is rewritten in the board.
+    clock.t += WINDOW_MS + 1;
+    await a.receive(INDEX, staleIndex.replace('---\n-',
+        'dendrite_font: Arial\n---\n-'));
+    await a.view.startEdit('G-aaaaa');
+    type(a.view, '# Aims\nThe model.\n');
+    await a.view.endEdit();
+    await a.view.setRole('G-aaaaa', 'scaffolding');
+    await tick(20);
+    const newCard = a.read(cardPath('G-aaaaa'));
+    const newIndex = a.read(INDEX);
+    assert.match(newCard, /dendrite_role: scaffolding/);
+    assert.match(newIndex, /dendrite_font: Arial/);
+    assert.deepEqual(a.view.reverted, new Set(), 'nothing flagged so far');
+    // Later still, a stale device sends its old card and index.
+    clock.t += WINDOW_MS + 1;
+    a.writes.length = 0;
+    h.notices.length = 0;
+    await a.receive(cardPath('G-aaaaa'), oldCard);
+    await a.receive(INDEX, staleIndex);
+    await tick(400);
+    assert.deepEqual(a.writes, [], 'A wrote nothing in response');
+    assert.deepEqual([...a.view.reverted].sort(), ['G-aaaaa', 'index']);
+    assert.ok(h.notices.some((n) => /Card aaaaa .*went back to an earlier/
+        .test(n)), 'a notice names the card');
+    const chip = a.view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-status-chip.is-reverted');
+    assert.ok(chip, 'the card is marked');
+    // Export refuses while a card has gone back.
+    assert.equal(await a.view.exportTo(null), null);
+    assert.equal(a.read('W/Grant/exports/Grant.md'), undefined);
+    // Restoring brings back the newer text, properties included, as one
+    // undo step.
+    await a.view.restoreNewer('G-aaaaa');
+    await a.view.restoreNewer(null);
+    await tick(20);
+    assert.equal(a.read(cardPath('G-aaaaa')), newCard);
+    assert.equal(a.read(INDEX), newIndex);
+    assert.deepEqual(a.view.reverted, new Set());
+    await a.view.doUndo();
+    assert.equal(a.read(cardPath('G-aaaaa')), oldCard);
+    assert.deepEqual(a.view.reverted, new Set(),
+                     'an undo made here is not a version going back');
+});
+
+test('keeping the earlier version settles it', async () => {
+    const clock = { t: 1 };
+    const a = await device(FILES, clock);
+    const first = a.read(cardPath('G-aaaaa'));
+    clock.t += WINDOW_MS + 1;
+    await a.receive(cardPath('G-aaaaa'), first + 'Second.\n');
+    clock.t += WINDOW_MS + 1;
+    await a.receive(cardPath('G-aaaaa'), first);
+    assert.ok(a.view.reverted.has('G-aaaaa'));
+    await a.view.keepVersion('G-aaaaa');
+    assert.ok(!a.view.reverted.has('G-aaaaa'));
+    assert.ok(await a.view.exportTo(null) !== null, 'export runs again');
+});
+
+test('a change made here over an index changed elsewhere is not written',
+     async () => {
+    const clock = { t: 1 };
+    const a = await device({ ...FILES,
+        [INDEX]: FILES[INDEX] + '- [[G-bbbbb|B]]\n',
+        [cardPath('G-bbbbb')]: 'B' }, clock);
+    // The index changes on disk before its modify event is handled.
+    const other = '---\ndendrite_prefix: G\ndendrite_font: Arial\n---\n' +
+        '- [[G-bbbbb|B]]\n- [[G-aaaaa|Aims]]\n';
+    a.app.vault.text.set(INDEX, other);
+    h.notices.length = 0;
+    a.view.active = 'G-aaaaa';
+    await a.view.structural('down');
+    assert.equal(a.read(INDEX), other, 'left as it was');
+    assert.ok(h.notices.some((n) => /index changed outside/.test(n)));
+    assert.deepEqual(a.view.root.children.map((n) => n.id),
+                     ['G-bbbbb', 'G-aaaaa'], 'and read again');
+});
+
+test('a status and a label set on one device show on the other\'s open ' +
+     'board when the card arrives, with no action or write there',
+     async () => {
+    const clock = { t: 1 };
+    const files = { ...FILES,
+        [INDEX]: FILES[INDEX] + '    - [[G-bbbbb|First words]]\n',
+        [cardPath('G-bbbbb')]: '---\ndendrite_status: draft\n---\n' +
+            'First words here.\n' };
+    const a = await device(files, clock);
+    const b = await device(files, clock);
+    const chip = (d, id) => {
+        const el = d.view.cardEls.get(id)
+            .querySelector('.dendrite-status-chip');
+        return el ? el.textContent : null;
+    };
+    assert.equal(chip(b, 'G-bbbbb'), null, 'draft shows no chip');
+    // A marks the card done; only the card syncs.
+    await a.view.setStatus('G-bbbbb', 'done');
+    await tick(20);
+    assert.match(a.read(cardPath('G-bbbbb')), /dendrite_status: done/);
+    await b.receive(cardPath('G-bbbbb'), a.read(cardPath('G-bbbbb')));
+    assert.equal(chip(b, 'G-bbbbb'), 'done ✓', 'B shows done');
+    assert.equal(b.view.statusInfo.get('G-bbbbb').own, 'done');
+    // A rewrites the card's opening words; again only the card syncs.
+    await a.view.startEdit('G-bbbbb');
+    type(a.view, 'New opening words.\n');
+    await a.view.endEdit();
+    await b.receive(cardPath('G-bbbbb'), a.read(cardPath('G-bbbbb')));
+    assert.equal(b.view.byId.get('G-bbbbb').label, 'New opening words.');
+    const body = b.view.cardEls.get('G-bbbbb')
+        .querySelector('.dendrite-card-body');
+    assert.match(body.textContent, /New opening words\./,
+                 'B shows the new text');
+    assert.equal(chip(b, 'G-bbbbb'), 'done ✓', 'status kept');
+    assert.deepEqual(b.writes, [], 'B wrote nothing');
+    assert.match(b.read(INDEX), /\[\[G-bbbbb\|First words\]\]/,
+                 'B\'s index waits for the synced one');
+});
