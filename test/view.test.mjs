@@ -239,6 +239,18 @@ test('quotas show as a filled target, with details on hover and a quick ' +
     assert.equal(lines[0].firstChild.textContent, '4 / 8 words');
     assert.equal(lines[1].textContent, '2 allocated, 6 free');
     view.hideQuotaTip();
+    // Counts show on hover with a quota or without one.
+    await view.showQuotaTip('G-ccccc', widget('G-ccccc'));
+    const counts = [...document.querySelectorAll(
+        '.dendrite-quota-tip .dendrite-quota-count')].map((x) => x.textContent);
+    assert.equal(counts[0], '1 word · 1 character · ~0.1 pages');
+    assert.match(counts.at(-1), /Click to set a quota/);
+    view.hideQuotaTip();
+    await view.showQuotaTip('G-aaaaa', a);
+    // The section prints its heading only; the rest is its child's.
+    assert.match(document.querySelector('.dendrite-quota-tip').textContent,
+                 /4 \/ 8 words.*4 words · .*~0\.4 pages1 word on this card/);
+    view.hideQuotaTip();
     const top = [...view.totalEl.querySelectorAll('.dendrite-quota-line')];
     assert.equal(top[0].firstChild.textContent, '~0.5 / 1 page',
                  '5 words at 10 per page');

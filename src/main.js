@@ -2737,12 +2737,47 @@ class DendriteView extends ItemView {
             { cls: 'dendrite-quota-tip' });
         const r = this.quotaReports && this.quotaReports.get(id);
         if (r) this.showQuota(tip, r);
-        else tip.setText('No quota. Click to set one.');
         const a = anchor.getBoundingClientRect();
         tip.style.left = a.left + 'px';
         tip.style.top = (a.top - 6) + 'px';
         this.quotaTip = tip;
         this.pageWin().requestAnimationFrame(() => tip.addClass('is-shown'));
+        return this.showCounts(tip, id, !r);
+    }
+
+    /**
+     * What a card prints, with any cards below it, in words, characters
+     * and pages, quota or none; and the card alone where that differs.
+     */
+    async showCounts(tip, id, offer) {
+        const node = this.byId.get(id);
+        if (!node) return;
+        const ms = this.manuscript();
+        const bodies = await this.loadBodies();
+        if (this.quotaTip !== tip) return;
+        const bodyOf = (x) => (this.editing && this.editing.id === x) ?
+            this.editing.editor.value : bodies.get(x);
+        const roleOf = (x) => this.roleOf(x);
+        const branch = core.countText(core.exportMarkdown([node], bodyOf, 1,
+            null, roleOf), ms.countSpaces);
+        const own = core.exportSegments([node], bodyOf, 1, null, roleOf)
+            .find((s) => s.id === id);
+        const alone = core.countText(own ? own.text : '', ms.countSpaces);
+        const num = (n, unit) => `${n.toLocaleString()} ${unit}` +
+            (n === 1 ? '' : 's');
+        const pages = Math.round(branch.words / ms.wordsPerPage * 100) / 100;
+        const line = (text, cls = '') => tip.createDiv(
+            { cls: 'dendrite-quota-line dendrite-quota-count ' + cls, text });
+        line(`${num(branch.words, 'word')} · ` +
+             `${num(branch.chars, 'character')}` +
+             `${ms.countSpaces ? '' : ' without spaces'} · ` +
+             `~${core.fmtNum(pages)} page${pages === 1 ? '' : 's'}`);
+        if (alone.words !== branch.words) {
+            line(`${num(alone.words, 'word')} on this card, the rest below`,
+                 'dendrite-quota-alloc');
+        }
+        line(`Pages at ${ms.wordsPerPage} words per page.` +
+             (offer ? ' Click to set a quota.' : ''), 'dendrite-quota-alloc');
     }
 
     hideQuotaTip() {

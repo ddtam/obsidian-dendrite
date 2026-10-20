@@ -104,7 +104,7 @@ Undo reverses a move or a merge in one step, but never discards text written sin
 
 A quota is in words, characters or pages, fractions allowed (`1/4 page`), and is **required** (set by the call) or a **target** (your own allocation). It is counted from what export would write for that card's branch, so planning text and comments never count.
 
-Each card shows its quota at its bottom left as a target and a bar filled to its use. Hover it for the figures; click it to edit the quota in place. A card without a quota shows a faint target when hovered, to set one.
+Each card shows its quota at its bottom left as a target and a bar filled to its use. Hover it for the figures; click it to edit the quota in place. A card without a quota shows a faint target when hovered, to set one. Hovering the target, with a quota or without, also shows what the card prints with the cards below it, in words, characters and pages at the manuscript's words per page, and the card's own words where they differ.
 
 Quotas waterfall down the tree. A card's **allocations** are the quotas of the nearest cards below it that carry one, and its card shows both what its branch uses against its quota and what is allocated against it, free or over. The bar does the same for the manuscript's total quota. Going over a required quota shows red; over a target, amber.
 
