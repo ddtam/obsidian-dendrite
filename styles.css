@@ -375,7 +375,7 @@
    opposite the status and role icon. */
 .dendrite-num {
     position: absolute;
-    top: 4px;
+    top: 8px;
     left: 14px;
     height: 20px;
     line-height: 20px;
@@ -579,6 +579,14 @@
 
 .dendrite-quota-tip.is-shown {
     opacity: 1;
+}
+
+/* Sized as the tip's own text; themes and Obsidian size tables. */
+.dendrite-quota-tip .dendrite-count-table,
+.dendrite-quota-tip .dendrite-count-table th,
+.dendrite-quota-tip .dendrite-count-table td {
+    font-size: var(--font-ui-smaller);
+    line-height: var(--line-height-tight, 1.3);
 }
 
 .dendrite-count-table {
@@ -818,7 +826,7 @@
    into the handle the card is dragged by; a click changes the role. */
 .dendrite-grip {
     position: absolute;
-    top: 4px;
+    top: 8px;
     right: 4px;
     z-index: 2;
     display: flex;
@@ -861,13 +869,13 @@
 /* The card's top is a band for the role icon and the status, as its
    footer is for the quota and the tools; all its text starts below. */
 .dendrite-card {
-    padding-top: 32px;
+    padding-top: 36px;
 }
 
 /* The status, left of the role icon, at the same height. */
 .dendrite-card > .dendrite-status {
     position: absolute;
-    top: 4px;
+    top: 8px;
     right: 28px;
     height: 20px;
     margin: 0;

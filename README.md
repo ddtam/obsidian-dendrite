@@ -59,7 +59,7 @@ Obsidian has no public API for putting its editor inside another view, so Dendri
 | Ctrl+Shift+Z or Ctrl+Y | Redo what was undone, in normal mode |
 | Ctrl+F | Find in the cards, in either mode |
 | 0 to 4 | What the card prints: 0 automatic, 1 heading only, 2 full text, 3 scaffolding, 4 left out; in normal mode |
-| Shift+1 to 3 | The card's status: 1 draft, 2 done, 3 revise; in normal mode, on a card whose text prints, by the physical key on any layout |
+| Ctrl+1 to 3 | The card's status: 1 draft, 2 done, 3 revise; in normal mode, on a card whose text prints, by the physical key on any layout. While the board has focus these take the place of Obsidian's Ctrl+1 to 3 for going to a tab |
 
 ### Vim-style keys
 
@@ -170,7 +170,7 @@ A card's status shows at its top right, beside the role icon, in a band at the t
 
 Colours come from the [Pretty Properties](https://github.com/anareaty/pretty-properties) plugin, if it gives `dendrite_status` values a colour, so the Properties panel and the board agree.
 
-To set a role or status on a card and everything below it, use **Whole branch** in its menu, or Alt with the same keys: Alt+0 to Alt+4 for a role, Alt+Shift+1 to 3 for a status, which only cards that print their text take. The whole change is one undo.
+To set a role or status on a card and everything below it, use **Whole branch** in its menu, or Alt with the same keys: Alt+0 to Alt+4 for a role, Ctrl+Alt+1 to 3 for a status, which only cards that print their text take. The whole change is one undo.
 
 ## Sync across devices
 

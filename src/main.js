@@ -930,7 +930,7 @@ class DendriteView extends ItemView {
         into.addSeparator();
         for (const [value, title, icon, key] of STATUS_ITEMS) {
             into.addItem((i) => i.setTitle(this.menuLabel(lead + title,
-                `Alt+⇧${key}`)).setIcon(icon)
+                `Ctrl+Alt+${key}`)).setIcon(icon)
                 .onClick(() => this.setBranch(id, 'status', value)));
         }
     }
@@ -1019,7 +1019,7 @@ class DendriteView extends ItemView {
             m.addSeparator();
             for (const [value, title, icon, key] of STATUS_ITEMS) {
                 m.addItem((i) => {
-                    i.setTitle(this.menuLabel(title, `⇧${key}`))
+                    i.setTitle(this.menuLabel(title, `Ctrl+${key}`))
                         .setIcon(icon)
                         .onClick(() => this.setStatus(id, value));
                     if (typeof i.setChecked === 'function') {
@@ -1162,6 +1162,19 @@ class DendriteView extends ItemView {
         // moves focus out of the pane.
         s.register(['Mod'], 'b', () => this.editKey('bold'));
         s.register(['Mod'], 'i', () => this.editKey('italic'));
+        // Ctrl and 1 to 3 set the selected card's status, with Alt on its
+        // whole branch, ahead of Obsidian's own Ctrl+1 to 3, which go to a
+        // tab. onNavKey reads them too, for when this scope is not active.
+        for (const [value, , , key] of STATUS_ITEMS) {
+            const set = (branch) => () => {
+                if (this.editing || !this.active) return true;
+                if (branch) this.setBranch(this.active, 'status', value);
+                else this.setStatusByKey(value);
+                return false;
+            };
+            s.register(['Mod'], key, set(false));
+            s.register(['Mod', 'Alt'], key, set(true));
+        }
         s.register([], 'Tab', () => this.editKey('indent'));
         s.register(['Shift'], 'Tab', () => this.editKey('outdent'));
         s.register([], 'Escape', () => {
@@ -1570,20 +1583,28 @@ class DendriteView extends ItemView {
             if (this.find) this.closeFind();
             return;
         }
-        // Alt with 0 to 4 sets a role on the whole branch, Alt and Shift
-        // with 1 to 3 a status, by the physical key as below.
+        // The number row by its physical key, since what a digit key types
+        // with a modifier depends on the keyboard layout; the key's own
+        // text where no code is given.
         const code = /^(?:Digit|Numpad)(\d)$/.exec(e.code || '');
         const digit = code ? code[1] : (/^\d$/.test(e.key) ? e.key : null);
-        if (e.altKey && !e.ctrlKey && !e.metaKey && digit && this.active) {
-            const status = e.shiftKey &&
-                STATUS_ITEMS.find((r) => r[3] === digit);
-            if (status) {
-                e.preventDefault();
-                this.setBranch(this.active, 'status', status[0]);
-            } else if (!e.shiftKey && ROLE_KEYS.has(digit)) {
-                e.preventDefault();
-                this.setBranch(this.active, 'role', ROLE_KEYS.get(digit));
-            }
+        // Ctrl and 1 to 3 set a printing card's status, with Alt on the
+        // whole branch; also registered in the scope, as there.
+        const mod = e.ctrlKey || e.metaKey;
+        const status = mod && !e.shiftKey && digit &&
+            STATUS_ITEMS.find((r) => r[3] === digit);
+        if (status) {
+            if (!this.active) return;
+            e.preventDefault();
+            if (e.altKey) this.setBranch(this.active, 'status', status[0]);
+            else this.setStatusByKey(status[0]);
+            return;
+        }
+        // Alt with 0 to 4 sets a role on the whole branch.
+        if (e.altKey && !mod && !e.shiftKey && ROLE_KEYS.has(digit) &&
+            this.active) {
+            e.preventDefault();
+            this.setBranch(this.active, 'role', ROLE_KEYS.get(digit));
             return;
         }
         if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1595,17 +1616,6 @@ class DendriteView extends ItemView {
         if (statusKey) {
             e.preventDefault();
             statusKey();
-            return;
-        }
-        // The number row by its physical key, since what Shift and a
-        // digit type depends on the keyboard layout; the key's own text
-        // where no code is given.
-        // Shift and 1 to 3 set a printing card's status.
-        const status = e.shiftKey && digit &&
-            STATUS_ITEMS.find((r) => r[3] === digit);
-        if (status && this.active) {
-            e.preventDefault();
-            this.setStatusByKey(status[0]);
             return;
         }
         // 0 to 4 set what the selected card prints, as its menus show.

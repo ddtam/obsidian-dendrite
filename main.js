@@ -2458,7 +2458,7 @@ var DendriteView = class extends ItemView {
     for (const [value, title, icon, key] of STATUS_ITEMS) {
       into.addItem((i) => i.setTitle(this.menuLabel(
         lead + title,
-        `Alt+\u21E7${key}`
+        `Ctrl+Alt+${key}`
       )).setIcon(icon).onClick(() => this.setBranch(id, "status", value)));
     }
   }
@@ -2554,7 +2554,7 @@ var DendriteView = class extends ItemView {
       m.addSeparator();
       for (const [value, title, icon, key] of STATUS_ITEMS) {
         m.addItem((i) => {
-          i.setTitle(this.menuLabel(title, `\u21E7${key}`)).setIcon(icon).onClick(() => this.setStatus(id, value));
+          i.setTitle(this.menuLabel(title, `Ctrl+${key}`)).setIcon(icon).onClick(() => this.setStatus(id, value));
           if (typeof i.setChecked === "function") {
             i.setChecked(info.own === value);
             tickBeforeKey(i);
@@ -2705,6 +2705,16 @@ var DendriteView = class extends ItemView {
     });
     s.register(["Mod"], "b", () => this.editKey("bold"));
     s.register(["Mod"], "i", () => this.editKey("italic"));
+    for (const [value, , , key] of STATUS_ITEMS) {
+      const set = (branch) => () => {
+        if (this.editing || !this.active) return true;
+        if (branch) this.setBranch(this.active, "status", value);
+        else this.setStatusByKey(value);
+        return false;
+      };
+      s.register(["Mod"], key, set(false));
+      s.register(["Mod", "Alt"], key, set(true));
+    }
     s.register([], "Tab", () => this.editKey("indent"));
     s.register(["Shift"], "Tab", () => this.editKey("outdent"));
     s.register([], "Escape", () => {
@@ -3090,15 +3100,18 @@ var DendriteView = class extends ItemView {
     }
     const code = /^(?:Digit|Numpad)(\d)$/.exec(e.code || "");
     const digit = code ? code[1] : /^\d$/.test(e.key) ? e.key : null;
-    if (e.altKey && !e.ctrlKey && !e.metaKey && digit && this.active) {
-      const status2 = e.shiftKey && STATUS_ITEMS.find((r) => r[3] === digit);
-      if (status2) {
-        e.preventDefault();
-        this.setBranch(this.active, "status", status2[0]);
-      } else if (!e.shiftKey && ROLE_KEYS.has(digit)) {
-        e.preventDefault();
-        this.setBranch(this.active, "role", ROLE_KEYS.get(digit));
-      }
+    const mod = e.ctrlKey || e.metaKey;
+    const status = mod && !e.shiftKey && digit && STATUS_ITEMS.find((r) => r[3] === digit);
+    if (status) {
+      if (!this.active) return;
+      e.preventDefault();
+      if (e.altKey) this.setBranch(this.active, "status", status[0]);
+      else this.setStatusByKey(status[0]);
+      return;
+    }
+    if (e.altKey && !mod && !e.shiftKey && ROLE_KEYS.has(digit) && this.active) {
+      e.preventDefault();
+      this.setBranch(this.active, "role", ROLE_KEYS.get(digit));
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -3112,12 +3125,6 @@ var DendriteView = class extends ItemView {
     if (statusKey) {
       e.preventDefault();
       statusKey();
-      return;
-    }
-    const status = e.shiftKey && digit && STATUS_ITEMS.find((r) => r[3] === digit);
-    if (status && this.active) {
-      e.preventDefault();
-      this.setStatusByKey(status[0]);
       return;
     }
     if (!e.shiftKey && ROLE_KEYS.has(digit) && this.active) {

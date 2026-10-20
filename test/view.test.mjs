@@ -1707,16 +1707,22 @@ test('Alt with a number sets a role or status on a whole branch, as ' +
           'G-ddddd': 'D text', 'G-eeeee': 'E text' });
     view.plugin.settings.vimKeys = false;
     await view.select('G-aaaaa');
-    const press = async (code, shift = false) => {
+    const press = async (code, ctrl = false) => {
         view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
-            { code, key: 'x', altKey: true, shiftKey: shift,
+            { code, key: 'x', altKey: true, ctrlKey: ctrl,
               bubbles: true, cancelable: true }));
         await tick(30);
     };
     const prop = (id, k) => (new RegExp(`dendrite_${k}: (\\w+)`).exec(
         read(cardPath(id))) || [])[1];
     const branch = ['G-aaaaa', 'G-bbbbb', 'G-ccccc', 'G-ddddd'];
-    // Alt+Shift+2: done on every card in the branch that prints text.
+    // Alt+Shift+2 no longer sets a status.
+    view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
+        { code: 'Digit2', key: '@', altKey: true, shiftKey: true,
+          bubbles: true, cancelable: true }));
+    await tick(30);
+    assert.equal(prop('G-ccccc', 'status'), undefined);
+    // Ctrl+Alt+2: done on every card in the branch that prints text.
     await press('Digit2', true);
     assert.deepEqual(branch.map((id) => prop(id, 'status')),
                      [undefined, undefined, 'done', 'done'],
@@ -1744,7 +1750,8 @@ test('Alt with a number sets a role or status on a whole branch, as ' +
     const keys = whole.submenu.items.map((i) =>
         i.titleContent.querySelector('[data-key]').dataset.key);
     assert.deepEqual(keys, ['Alt+0', 'Alt+1', 'Alt+2', 'Alt+3', 'Alt+4',
-                            'Alt+⇧1', 'Alt+⇧2', 'Alt+⇧3']);
+                            'Ctrl+Alt+1', 'Ctrl+Alt+2',
+                            'Ctrl+Alt+3']);
     await whole.submenu.items[3].click();
     await tick(30);
     assert.deepEqual(branch.map((id) => prop(id, 'role')),
@@ -1756,32 +1763,35 @@ test('Alt with a number sets a role or status on a whole branch, as ' +
         i.title === 'Whole branch'));
 });
 
-test('Shift and 1 to 3 set a printing card\'s status, by physical key',
+test('Ctrl and 1 to 3 set a printing card\'s status, by physical key',
      async () => {
     const { view, read } = await open(
         '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
         '    - [[G-bbbbb|B]]\n',
         { 'G-aaaaa': '# A', 'G-bbbbb': 'B' });
     await view.select('G-bbbbb');
-    // A layout's own character for Shift+digit varies; the key's code
+    // A layout's own character for a digit key varies; the key's code
     // does not.
-    const press = async (code, key) => {
+    const press = async (code, key, more = {}) => {
         view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
-            { code, key, shiftKey: true, bubbles: true, cancelable: true }));
+            { code, key, ctrlKey: true, bubbles: true, cancelable: true,
+              ...more }));
         await tick(20);
     };
     const status = (id) => (/dendrite_status: (\w+)/.exec(
         read(cardPath(id))) || [])[1];
-    await press('Digit2', '@');
+    await press('Digit2', '2');
     assert.equal(status('G-bbbbb'), 'done');
     await press('Digit3', '"');
-    assert.equal(status('G-bbbbb'), 'revise', 'a UK layout\'s Shift+3');
-    await press('Digit1', '!');
+    assert.equal(status('G-bbbbb'), 'revise', 'a French layout\'s 3');
+    await press('Digit1', '1');
     assert.equal(status('G-bbbbb'), 'draft');
+    await press('Digit2', '@', { ctrlKey: false, shiftKey: true });
+    assert.equal(status('G-bbbbb'), 'draft', 'Shift no longer sets one');
     assert.equal(/dendrite_role/.test(read(cardPath('G-bbbbb'))), false,
                  'no role was set by the digit');
     await view.select('G-aaaaa');
-    await press('Digit2', '@');
+    await press('Digit2', '2');
     assert.equal(status('G-aaaaa'), undefined,
                  'a structural card takes its status from below');
     view.cardMenu(view.cardEls.get('G-aaaaa'));
@@ -1790,9 +1800,9 @@ test('Shift and 1 to 3 set a printing card\'s status, by physical key',
     const chips = h.obsidian.lastMenu.items.filter((i) =>
         /^Status/.test(i.title)).map((i) => [i.title,
         i.titleContent.querySelector('[data-key]').dataset.key]);
-    assert.deepEqual(chips, [['Status: draft', '⇧1'],
-                             ['Status: done', '⇧2'],
-                             ['Status: revise', '⇧3']]);
+    assert.deepEqual(chips, [['Status: draft', 'Ctrl+1'],
+                             ['Status: done', 'Ctrl+2'],
+                             ['Status: revise', 'Ctrl+3']]);
 });
 
 test('a card\'s text edits join the undo history with tree changes',
