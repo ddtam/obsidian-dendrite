@@ -2357,7 +2357,7 @@ class DendriteView extends ItemView {
             this.app.metadataCache.getFileCache(this.file)?.frontmatter) ||
             {};
         const top = Number(fm.dendrite_heading_top);
-        const wpp = Number(fm.dendrite_words_per_page);
+        const wpp = core.wordsPerPage(fm);
         const cpw = Number(fm.dendrite_chars_per_word);
         return {
             prefix: this.prefix(),
@@ -2365,7 +2365,8 @@ class DendriteView extends ItemView {
             limitRequired: fm.dendrite_limit_required === true,
             charsPerWord: cpw > 0 ? cpw : 6,
             countSpaces: fm.dendrite_count_spaces !== false,
-            wordsPerPage: wpp > 0 ? wpp : 500,
+            wordsPerPage: wpp.value,
+            wordsPerPageMeasured: wpp.measured,
             headingTop: top >= 1 && top <= 6 ? top :
                 this.plugin.settings.headingTop,
             number: fm.dendrite_number_sections === true,
@@ -2654,7 +2655,7 @@ class DendriteView extends ItemView {
     /**
      * Each card with a quota shows what it uses against it and what the
      * quotas below it allocate; the bar does the same for the manuscript
-     * total. Over a required quota is an error, over a target a warning.
+     * total. Over a hard limit is an error, over a soft limit a warning.
      * Card text is read only when some quota is set.
      */
     async updateCounts() {
@@ -2742,14 +2743,14 @@ class DendriteView extends ItemView {
         tip.style.top = (a.top - 6) + 'px';
         this.quotaTip = tip;
         this.pageWin().requestAnimationFrame(() => tip.addClass('is-shown'));
-        return this.showCounts(tip, id, !r);
+        return this.showCounts(tip, id);
     }
 
     /**
-     * What a card prints, with any cards below it, in words, characters
-     * and pages, quota or none; and the card alone where that differs.
+     * What a card prints, then with the cards below it where that
+     * differs, as words, characters and pages, quota or none.
      */
-    async showCounts(tip, id, offer) {
+    async showCounts(tip, id) {
         const node = this.byId.get(id);
         if (!node) return;
         const ms = this.manuscript();
@@ -2758,26 +2759,29 @@ class DendriteView extends ItemView {
         const bodyOf = (x) => (this.editing && this.editing.id === x) ?
             this.editing.editor.value : bodies.get(x);
         const roleOf = (x) => this.roleOf(x);
-        const branch = core.countText(core.exportMarkdown([node], bodyOf, 1,
-            null, roleOf), ms.countSpaces);
         const own = core.exportSegments([node], bodyOf, 1, null, roleOf)
             .find((s) => s.id === id);
-        const alone = core.countText(own ? own.text : '', ms.countSpaces);
-        const num = (n, unit) => `${n.toLocaleString()} ${unit}` +
-            (n === 1 ? '' : 's');
-        const pages = Math.round(branch.words / ms.wordsPerPage * 100) / 100;
-        const line = (text, cls = '') => tip.createDiv(
-            { cls: 'dendrite-quota-line dendrite-quota-count ' + cls, text });
-        line(`${num(branch.words, 'word')} · ` +
-             `${num(branch.chars, 'character')}` +
-             `${ms.countSpaces ? '' : ' without spaces'} · ` +
-             `~${core.fmtNum(pages)} page${pages === 1 ? '' : 's'}`);
-        if (alone.words !== branch.words) {
-            line(`${num(alone.words, 'word')} on this card, the rest below`,
-                 'dendrite-quota-alloc');
+        const rows = [['This card',
+                       core.countText(own ? own.text : '', ms.countSpaces)]];
+        if (node.children.length) {
+            rows.push(['With cards below', core.countText(
+                core.exportMarkdown([node], bodyOf, 1, null, roleOf),
+                ms.countSpaces)]);
         }
-        line(`Pages at ${ms.wordsPerPage} words per page.` +
-             (offer ? ' Click to set a quota.' : ''), 'dendrite-quota-alloc');
+        const table = tip.createEl('table', { cls: 'dendrite-count-table' });
+        const head = table.createEl('tr');
+        for (const h of ['', 'Words', 'Characters', 'Pages']) {
+            head.createEl('th', { text: h });
+        }
+        for (const [label, n] of rows) {
+            const tr = table.createEl('tr');
+            const pages = Math.round(n.words / ms.wordsPerPage * 100) / 100;
+            for (const v of [label, n.words.toLocaleString(),
+                             n.chars.toLocaleString(),
+                             '~' + core.fmtNum(pages)]) {
+                tr.createEl('td', { text: v });
+            }
+        }
     }
 
     hideQuotaTip() {
@@ -2805,7 +2809,7 @@ class DendriteView extends ItemView {
         const label = pop.createEl('label', { cls: 'dendrite-quota-req' });
         const req = label.createEl('input', { type: 'checkbox' });
         req.checked = fm.dendrite_limit_required === true;
-        label.createSpan({ text: 'required by the call' });
+        label.createSpan({ text: 'hard limit' });
         const row = pop.createDiv({ cls: 'dendrite-quota-actions' });
         const save = row.createEl('button', { cls: 'mod-cta',
                                               text: 'Save' });
@@ -2861,7 +2865,8 @@ class DendriteView extends ItemView {
         const used = el.createDiv({ cls: 'dendrite-quota-line' });
         used.setText(`${tilde(r.usedEstimated)}${core.fmtNum(r.used)} / ` +
                      `${core.formatLimit(q)}`);
-        used.createSpan({ cls: 'dendrite-quota-kind', text: kind });
+        used.createSpan({ cls: 'dendrite-quota-kind',
+                          text: q.required ? 'hard limit' : 'soft limit' });
         if (r.used > q.amount) used.addClass(`is-over-${kind}`);
         if (r.allocated === null) return;
         const alloc = el.createDiv({ cls: 'dendrite-quota-line ' +
@@ -3300,7 +3305,7 @@ class DendriteView extends ItemView {
         const name = safeName(this.file.basename +
             (node ? ' - ' + (node.label || node.id) : ''));
         if (format !== 'md') {
-            await this.exportPandoc(text, format, dir, name, ms);
+            await this.exportPandoc(text, format, dir, name, ms, !node);
             return;
         }
         const path = normalizePath(`${dir}/${name}.md`);
@@ -3346,7 +3351,7 @@ class DendriteView extends ItemView {
         return rel;
     }
 
-    async exportPandoc(text, format, dir, name, ms) {
+    async exportPandoc(text, format, dir, name, ms, whole) {
         const s = this.plugin.settings;
         const base = this.app.vault.adapter.getBasePath ?
             this.app.vault.adapter.getBasePath() : '';
@@ -3380,6 +3385,15 @@ class DendriteView extends ItemView {
         const cites = result.keys.length ?
             ` with ${result.keys.length} citation(s)` : '';
         new Notice(`Dendrite: exported to ${rel}${cites}.`);
+        // A whole manuscript's PDF measures its words per page, which
+        // page quotas and estimates use from then on.
+        const rate = whole ? pandoc.measuredRate(
+            core.countText(text, ms.countSpaces).words, result.layout,
+            result.keys.length > 0) : null;
+        if (rate && rate !== ms.wordsPerPageMeasured) {
+            await writeProps(this.app, this.file,
+                             { dendrite_measured_words_per_page: rate });
+        }
         await this.plugin.showExport(rel, output, format);
     }
 
@@ -3808,9 +3822,10 @@ function quotaSetting(container, name, desc, current, required, draft) {
             .addOption('characters', 'characters')
             .addOption('pages', 'pages').setValue(unit)
             .onChange((v) => { unit = v; emit(); }));
-    new Setting(container).setName('Required by the call')
-        .setDesc('On: a limit the call sets, shown red when exceeded. ' +
-                 'Off: your own allocation, shown amber.')
+    new Setting(container).setName('Hard limit')
+        .setDesc('On: a limit that cannot be exceeded, such as one a ' +
+                 'call sets, shown red when exceeded. Off: a soft limit, ' +
+                 'your own allocation, shown amber.')
         .addToggle((tg) => tg.setValue(req)
             .onChange((v) => { req = v; emit(); }));
 }
@@ -3840,12 +3855,17 @@ class ManuscriptModal extends Modal {
             .addToggle((tg) => tg.setValue(ms.countSpaces)
                 .onChange((v) => { draft.dendrite_count_spaces = v; }));
         new Setting(contentEl).setName('Words per page')
-            .setDesc('Only for page estimates while writing. The real ' +
-                     'count depends on the final layout.')
+            .setDesc(ms.wordsPerPageMeasured ?
+                'Measured from the last PDF of the whole manuscript, and ' +
+                'measured again at each one. A number typed here is used ' +
+                'until then.' :
+                'For page estimates and page quotas, until a PDF of the ' +
+                'whole manuscript is exported, which measures it.')
             .addText((t) => t.setValue(String(ms.wordsPerPage))
                 .onChange((v) => {
                     draft.dendrite_words_per_page = Number(v) > 0 ?
                         Number(v) : null;
+                    draft.dendrite_measured_words_per_page = null;
                 }));
         new Setting(contentEl).setName('Characters per word')
             .setDesc('Only for comparing quotas set in characters with ' +
@@ -4410,6 +4430,8 @@ module.exports = class DendritePlugin extends Plugin {
             tmpdir: os.tmpdir,
             join: path.join,
             writeFile: (f, t) => fs.promises.writeFile(f, t),
+            readFile: (f) => fs.promises.readFile(f),
+            inflate: (b) => require('zlib').inflateSync(b),
             remove: (f) => {
                 try { fs.unlinkSync(f); } catch (e) { /* already gone */ }
             },

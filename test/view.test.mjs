@@ -239,17 +239,20 @@ test('quotas show as a filled target, with details on hover and a quick ' +
     assert.equal(lines[0].firstChild.textContent, '4 / 8 words');
     assert.equal(lines[1].textContent, '2 allocated, 6 free');
     view.hideQuotaTip();
-    // Counts show on hover with a quota or without one.
+    // Counts show on hover with a quota or without one, as a table:
+    // the card, then with the cards below it.
+    const table = () => [...document.querySelectorAll(
+        '.dendrite-quota-tip .dendrite-count-table tr')].map((tr) =>
+        [...tr.children].map((c) => c.textContent));
     await view.showQuotaTip('G-ccccc', widget('G-ccccc'));
-    const counts = [...document.querySelectorAll(
-        '.dendrite-quota-tip .dendrite-quota-count')].map((x) => x.textContent);
-    assert.equal(counts[0], '1 word · 1 character · ~0.1 pages');
-    assert.match(counts.at(-1), /Click to set a quota/);
+    assert.deepEqual(table(), [['', 'Words', 'Characters', 'Pages'],
+                               ['This card', '1', '1', '~0.1']]);
     view.hideQuotaTip();
-    await view.showQuotaTip('G-aaaaa', a);
     // The section prints its heading only; the rest is its child's.
-    assert.match(document.querySelector('.dendrite-quota-tip').textContent,
-                 /4 \/ 8 words.*4 words · .*~0\.4 pages1 word on this card/);
+    await view.showQuotaTip('G-aaaaa', a);
+    assert.deepEqual(table().slice(1).map((r) => [r[0], r[1], r[3]]),
+                     [['This card', '1', '~0.1'],
+                      ['With cards below', '4', '~0.4']]);
     view.hideQuotaTip();
     const top = [...view.totalEl.querySelectorAll('.dendrite-quota-line')];
     assert.equal(top[0].firstChild.textContent, '~0.5 / 1 page',
@@ -1099,6 +1102,38 @@ test('PDF export from the board uses the manuscript\'s citation style',
     await view.exportTo(null, 'docx');
     assert.ok(runs[1].includes('--reference-doc=/vault/styles/ref.docx'),
               'Word takes its styles from the reference, in the vault');
+});
+
+test('a PDF of the whole manuscript measures its words per page, which ' +
+     'page estimates then use', async () => {
+    const { deflateSync, inflateSync } = await import('node:zlib');
+    const words = Array.from({ length: 700 }, () => 'word').join(' ');
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\ndendrite_words_per_page: 500\n---\n' +
+        '- [[G-aaaaa|A]]\n', { 'G-aaaaa': words });
+    view.app.vault.adapter = { getBasePath: () => '/vault' };
+    // Four pages, the body ending on the third.
+    const pdf = Buffer.concat([Buffer.from('stream\n'), deflateSync(
+        Buffer.from('<< /Type /Page >>\n'.repeat(4) +
+                    '<< /DendriteBodyEnd (3) >>')),
+        Buffer.from('\nendstream\n')]);
+    let input = '';
+    view.plugin.pandocDeps = () => ({
+        tmpdir: () => '/tmp', join: (...a) => a.join('/'),
+        writeFile: async (f, t) => { input = t; }, remove: () => {},
+        run: async () => {}, readFile: async () => pdf,
+        inflate: inflateSync,
+    });
+    view.plugin.showExport = async () => {};
+    await view.exportTo(view.byId.get('G-aaaaa'), 'pdf');
+    assert.doesNotMatch(read(INDEX), /measured/, 'a branch measures nothing');
+    await view.exportTo(null, 'pdf');
+    assert.match(input, /DendriteBodyEnd/);
+    assert.match(read(INDEX), /dendrite_measured_words_per_page: 280/,
+                 '700 words over 2.5 pages');
+    await tick(10);
+    assert.equal(view.manuscript().wordsPerPage, 280,
+                 'the measured rate wins over the one set by hand');
 });
 
 test('an exported PDF opens beside the preview, or in the tab already ' +

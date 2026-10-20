@@ -105,12 +105,12 @@ export function loadManuscript(indexPath, opts = {}) {
         }
         if (!(headingTop >= 1 && headingTop <= 6)) headingTop = 1;
     }
-    const wpp = Number(fm.dendrite_words_per_page);
+    const wpp = core.wordsPerPage(fm).value;
     const cpw = Number(fm.dendrite_chars_per_word);
     const ms = {
         limit: core.parseLimit(fm.dendrite_limit),
         limitRequired: fm.dendrite_limit_required === true,
-        wordsPerPage: wpp > 0 ? wpp : 500,
+        wordsPerPage: wpp,
         charsPerWord: cpw > 0 ? cpw : 6,
         countSpaces: fm.dendrite_count_spaces !== false,
         headingTop,

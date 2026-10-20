@@ -1028,6 +1028,17 @@ function quotas(root, quotaOf, countOf, opts = {}) {
 }
 
 /**
+ * Words per page from an index's properties: the rate measured from the
+ * last PDF export, else the one set by hand, else 500.
+ */
+function wordsPerPage(fm) {
+    const measured = Number(fm.dendrite_measured_words_per_page);
+    const set = Number(fm.dendrite_words_per_page);
+    return { value: measured > 0 ? measured : (set > 0 ? set : 500),
+             measured: measured > 0 ? measured : null };
+}
+
+/**
  * Words and characters in exported markdown, counting what a reader of
  * the output would see: markup, link targets and list markers are left
  * out, and a citation key counts as one word, since what it becomes
@@ -1155,7 +1166,8 @@ function shortId(id) {
 
 module.exports = {
     findPatterns, findMatches, shortId,
-    parseLimit, formatLimit, countText, measure, sectionNumbers,
+    parseLimit, formatLimit, countText, wordsPerPage, measure,
+    sectionNumbers,
     alignColumns, parseAmount, convert, quotas, fmtNum,
     splitText, mergeText,
     mergeIntoAbove, mergeIntoParent, moveNode,

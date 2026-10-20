@@ -102,22 +102,25 @@ Undo reverses a move or a merge in one step, but never discards text written sin
 
 ### Quotas
 
-A quota is in words, characters or pages, fractions allowed (`1/4 page`), and is **required** (set by the call) or a **target** (your own allocation). It is counted from what export would write for that card's branch, so planning text and comments never count.
+A quota is in words, characters or pages, fractions allowed (`1/4 page`), and is a **hard limit**, one that cannot be exceeded, such as a call's, or a **soft limit**, your own allocation. It is counted from what export would write for that card's branch, so planning text and comments never count.
 
-Each card shows its quota at its bottom left as a target and a bar filled to its use. Hover it for the figures; click it to edit the quota in place. A card without a quota shows a faint target when hovered, to set one. Hovering the target, with a quota or without, also shows what the card prints with the cards below it, in words, characters and pages at the manuscript's words per page, and the card's own words where they differ.
+Each card shows its quota at its bottom left as a target and a bar filled to its use. Hover it for the figures; click it to edit the quota in place. A card without a quota shows a faint target when hovered, to set one. Hovering the target, with a quota or without, also shows a small table of what the card prints, and below that what it prints with the cards below it: words, characters, and pages at the manuscript's words per page.
 
-Quotas waterfall down the tree. A card's **allocations** are the quotas of the nearest cards below it that carry one, and its card shows both what its branch uses against its quota and what is allocated against it, free or over. The bar does the same for the manuscript's total quota. Going over a required quota shows red; over a target, amber.
+Quotas waterfall down the tree. A card's **allocations** are the quotas of the nearest cards below it that carry one, and its card shows both what its branch uses against its quota and what is allocated against it, free or over. The bar does the same for the manuscript's total quota. Going over a hard limit shows red; over a soft limit, amber.
 
-Quotas in different units are compared by converting through **words per page** and **characters per word**, both manuscript settings. Pages and converted figures are estimates and are marked `~`; an exact page count needs the final layout.
+Quotas in different units are compared by converting through **words per page** and **characters per word**, both manuscript settings. Pages and converted figures are estimates and are marked `~`.
+
+**Words per page are measured from your PDF.** Exporting the whole manuscript to PDF counts the pages up to the end of the body, leaving out the reference list after it, and divides the exported words by them, counting the last body page as half full since where the text ends on it is not known. The result is written to the index as `dendrite_measured_words_per_page` and used for page estimates and page quotas from then on, so they follow your font, size, spacing, margins and paper; each PDF export of the whole manuscript measures again. Until then, or for a body shorter than two pages, the words per page set by hand are used. Measuring needs XeLaTeX, the default PDF engine; with another engine the body's end is not found and a manuscript with citations is not measured.
 
 | Property | Where | Holds |
 | --- | --- | --- |
 | `dendrite_prefix` | index | the card ID prefix |
 | `dendrite_limit` | index or card | a quota: `500 words`, `2000 characters`, `0.25 pages` |
-| `dendrite_limit_required` | index or card | `true` if the call sets the quota |
+| `dendrite_limit_required` | index or card | `true` for a hard limit; absent for a soft one |
 | `dendrite_chars_per_word` | index | for comparing character quotas, default 6 |
 | `dendrite_count_spaces` | index | `false` to count characters without spaces |
-| `dendrite_words_per_page` | index | for page estimates, default 500 |
+| `dendrite_words_per_page` | index | for page estimates until a PDF is measured, default 500 |
+| `dendrite_measured_words_per_page` | index | written by a PDF export of the whole manuscript; used over the one above |
 | `dendrite_number_sections` | index | `true` to number sections by position |
 | `dendrite_heading_top` | index | the heading level of a top-level section |
 

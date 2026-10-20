@@ -147,14 +147,49 @@ function pandocArgs(o) {
     return args;
 }
 
+// Where the body ends, for measuring words per page without the reference
+// list after it: a raw LaTeX block at the end of the body that puts the
+// page number into the PDF's document information. XeLaTeX's driver reads
+// it; other engines ignore it, and then no body end is found.
+const BODY_END = '\n\n```{=latex}\n' +
+    '\\special{pdf:docinfo << /DendriteBodyEnd (\\thepage) >>}\n```\n';
+
+/**
+ * The page count of a PDF, and the page its body ends on where the mark
+ * above is present, else null. XeLaTeX compresses objects into streams,
+ * so each stream is inflated with `inflate` (zlib's inflateSync) and
+ * searched as well.
+ */
+function pdfPages(buf, inflate) {
+    const raw = buf.toString('latin1');
+    let all = raw;
+    const re = /stream\r?\n/g;
+    let m;
+    while ((m = re.exec(raw))) {
+        const start = m.index + m[0].length;
+        const end = raw.indexOf('endstream', start);
+        if (end < 0) break;
+        try {
+            all += '\n' + inflate(buf.subarray(start, end)).toString('latin1');
+        } catch (err) {
+            // Not a deflated stream, such as an image or a font.
+        }
+        re.lastIndex = end + 'endstream'.length;
+    }
+    const pages = (all.match(/\/Type\s*\/Page(?![s\w])/g) || []).length;
+    const mark = /\/DendriteBodyEnd\s*\((\d+)\)/.exec(all);
+    return { pages, bodyEnd: mark ? Number(mark[1]) : null };
+}
+
 /**
  * Export markdown to PDF or Word. `o` holds md, format ('pdf' | 'docx'),
  * output, csl, port, fallbackBib, pandoc, engine, resourcePath, resolve,
  * and style, as pandocArgs takes it.
- * Returns { ok } or { error } with a message for the writer.
+ * Returns { ok, keys } or { error } with a message for the writer; for a
+ * PDF, also `layout`: { pages, bodyEnd } as pdfPages reads them, or null.
  */
 async function exportDocument(o, deps) {
-    const text = toPandoc(o.md, o.resolve || (() => null));
+    let text = toPandoc(o.md, o.resolve || (() => null));
     const keys = citekeys(text);
     const dir = deps.tmpdir();
     const input = deps.join(dir, `dendrite-${Date.now()}.md`);
@@ -179,6 +214,7 @@ async function exportDocument(o, deps) {
             await deps.writeFile(bibliography, got.bib);
         }
     }
+    if (o.format === 'pdf') text += BODY_END;
     await deps.writeFile(input, text);
     const args = pandocArgs({ input, output: o.output, format: o.format,
                               engine: o.engine, bibliography, csl: o.csl,
@@ -196,7 +232,30 @@ async function exportDocument(o, deps) {
             deps.remove(bibliography);
         }
     }
-    return { ok: true, keys };
+    let layout = null;
+    if (o.format === 'pdf' && deps.readFile && deps.inflate) {
+        try {
+            layout = pdfPages(await deps.readFile(o.output), deps.inflate);
+        } catch (err) {
+            layout = null;
+        }
+    }
+    return { ok: true, keys, layout };
 }
 
-module.exports = { citekeys, toPandoc, fetchBib, pandocArgs, exportDocument };
+/**
+ * Words per page measured from an exported PDF: the exported words over
+ * the pages up to the body's end, the last counted as half full since
+ * where it ends on that page is not known. Null when the body is too
+ * short to measure or its end was not found and a reference list may
+ * follow it.
+ */
+function measuredRate(words, layout, cited) {
+    if (!layout || !words) return null;
+    const end = layout.bodyEnd || (cited ? null : layout.pages);
+    if (!end || end < 2) return null;
+    return Math.round(words / (end - 0.5));
+}
+
+module.exports = { citekeys, toPandoc, fetchBib, pandocArgs, exportDocument,
+                   pdfPages, measuredRate, BODY_END };

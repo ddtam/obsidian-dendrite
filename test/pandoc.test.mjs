@@ -60,7 +60,8 @@ test('export fetches exactly the cited keys and runs Pandoc with them',
     const r = await p.exportDocument({
         md: 'Text [@smith2020; @lee2019].', format: 'pdf',
         output: '/vault/exports/G.pdf', csl: '/vault/style.csl' }, deps);
-    assert.deepEqual(r, { ok: true, keys: ['smith2020', 'lee2019'] });
+    assert.deepEqual(r, { ok: true, keys: ['smith2020', 'lee2019'],
+                          layout: null });
     const [cmd, args, files] = deps.runs[0];
     assert.equal(cmd, 'pandoc');
     assert.ok(args.includes('--citeproc'));
@@ -196,4 +197,56 @@ test('the manuscript\'s style reaches Pandoc: font, size, margin, paper, ' +
                                 format: 'docx', style });
     assert.ok(docx.includes('--reference-doc=/v/ref.docx'));
     assert.deepEqual(v(docx), [], 'PDF settings stay out of Word');
+});
+
+// A PDF as XeLaTeX writes one: its page objects and document information
+// compressed into a stream, here with a plain object beside it.
+const fakePdf = (pages, bodyEnd) => {
+    const { deflateSync } = require('node:zlib');
+    const objs = Array.from({ length: pages }, () =>
+        '<< /Type /Page /Parent 2 0 R >>').join('\n') +
+        `\n<< /Type /Pages /Count ${pages} >>` +
+        (bodyEnd ? `\n<< /DendriteBodyEnd (${bodyEnd}) >>` : '');
+    return Buffer.concat([
+        Buffer.from('%PDF-1.5\n1 0 obj\n<< /Type /ObjStm >>\nstream\n'),
+        deflateSync(Buffer.from(objs)),
+        Buffer.from('\nendstream\nendobj\n3 0 obj\n<< /Length 4 >>\n' +
+                    'stream\nabcd\nendstream\nendobj\n%%EOF\n')]);
+};
+
+test('a PDF\'s pages and the page its body ends on are read from its ' +
+     'compressed objects', () => {
+    const { inflateSync } = require('node:zlib');
+    assert.deepEqual(p.pdfPages(fakePdf(10, 4), inflateSync),
+                     { pages: 10, bodyEnd: 4 });
+    assert.deepEqual(p.pdfPages(fakePdf(3, null), inflateSync),
+                     { pages: 3, bodyEnd: null });
+});
+
+test('words per page are measured over the body, the last page as half',
+     () => {
+    assert.equal(p.measuredRate(1400, { pages: 10, bodyEnd: 4 }, true),
+                 400, '1400 words over 3.5 pages, references left out');
+    assert.equal(p.measuredRate(1400, { pages: 4, bodyEnd: null }, false),
+                 400, 'no mark and nothing cited: every page is body');
+    assert.equal(p.measuredRate(1400, { pages: 10, bodyEnd: null }, true),
+                 null, 'no mark, and a reference list may follow');
+    assert.equal(p.measuredRate(300, { pages: 1, bodyEnd: 1 }, false),
+                 null, 'one page is too short to measure');
+});
+
+test('a PDF export marks the end of the body; Word gets no mark', async () => {
+    const { inflateSync } = require('node:zlib');
+    for (const format of ['pdf', 'docx']) {
+        const deps = fakeDeps(null);
+        let input = null;
+        deps.run = async (cmd, args) => { input = deps.files[args[0]]; };
+        deps.readFile = async () => fakePdf(6, 5);
+        deps.inflate = inflateSync;
+        const r = await p.exportDocument({ md: 'Text.', format,
+                                           output: '/o.' + format }, deps);
+        assert.equal(input.includes('/DendriteBodyEnd'), format === 'pdf');
+        assert.deepEqual(r.layout, format === 'pdf' ?
+            { pages: 6, bodyEnd: 5 } : null);
+    }
 });

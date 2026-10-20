@@ -371,11 +371,19 @@
     --dendrite-gap: 8px;
 }
 
+/* The section number, at the left of the band across the card's top,
+   opposite the status and role icon. */
 .dendrite-num {
-    font-size: var(--font-ui-smaller);
-    font-weight: var(--font-semibold);
+    position: absolute;
+    top: 4px;
+    left: 14px;
+    height: 20px;
+    line-height: 20px;
+    font-size: var(--font-ui-medium, 15px);
+    font-weight: var(--font-bold, 700);
     color: var(--text-accent);
-    margin-bottom: 2px;
+    font-variant-numeric: tabular-nums;
+    z-index: 2;
 }
 
 .dendrite-count,
@@ -571,6 +579,41 @@
 
 .dendrite-quota-tip.is-shown {
     opacity: 1;
+}
+
+.dendrite-count-table {
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+}
+
+.dendrite-quota-line + .dendrite-count-table {
+    margin-top: 4px;
+}
+
+.dendrite-count-table th,
+.dendrite-count-table td {
+    padding: 0 0 0 10px;
+    text-align: right;
+    font-weight: normal;
+    white-space: nowrap;
+}
+
+.dendrite-count-table th {
+    color: var(--text-faint);
+}
+
+.dendrite-count-table th:first-child,
+.dendrite-count-table td:first-child {
+    padding-left: 0;
+    text-align: left;
+}
+
+.dendrite-count-table td:first-child {
+    color: var(--text-faint);
+}
+
+.dendrite-count-table td {
+    color: var(--text-normal);
 }
 
 .dendrite-quota-pop {
@@ -818,7 +861,7 @@
 /* The card's top is a band for the role icon and the status, as its
    footer is for the quota and the tools; all its text starts below. */
 .dendrite-card {
-    padding-top: 26px;
+    padding-top: 32px;
 }
 
 /* The status, left of the role icon, at the same height. */

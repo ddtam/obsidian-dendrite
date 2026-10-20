@@ -694,9 +694,9 @@ var require_core = __commonJS({
       const unit = limit.unit === "pages" ? one ? "page" : "pages" : limit.unit === "words" ? one ? "word" : "words" : one ? "character" : "characters";
       return `${fmtNum(limit.amount)} ${unit}`;
     }
-    function convert(amount, from, to, wordsPerPage, charsPerWord) {
+    function convert(amount, from, to, wordsPerPage2, charsPerWord) {
       if (from === to) return { value: amount, estimated: false };
-      const wpp = wordsPerPage || 500;
+      const wpp = wordsPerPage2 || 500;
       const cpw = charsPerWord || 6;
       const words = from === "words" ? amount : from === "pages" ? amount * wpp : amount / cpw;
       const value = to === "words" ? words : to === "pages" ? words / wpp : words * cpw;
@@ -746,6 +746,14 @@ var require_core = __commonJS({
       }
       return out;
     }
+    function wordsPerPage(fm) {
+      const measured = Number(fm.dendrite_measured_words_per_page);
+      const set = Number(fm.dendrite_words_per_page);
+      return {
+        value: measured > 0 ? measured : set > 0 ? set : 500,
+        measured: measured > 0 ? measured : null
+      };
+    }
     function countText(markdown, countSpaces) {
       const plain = stripComments(markdown).replace(/!\[\[[^\]]*\]\]/g, " ").replace(/!\[[^\]]*\]\([^)]*\)/g, " ").replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, "$2").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\[(@[^\]]+)\]/g, "cite").replace(/^\s{0,3}#{1,6}\s+/gm, "").replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[.\]\s+)?/gm, "").replace(/^\s*>\s?/gm, "").replace(/[*_`~=]+/g, "");
       const words = (plain.match(/\S+/g) || []).length;
@@ -753,10 +761,10 @@ var require_core = __commonJS({
       const chars = countSpaces ? collapsed.length : collapsed.replace(/ /g, "").length;
       return { words, chars };
     }
-    function measure(count, unit, wordsPerPage) {
+    function measure(count, unit, wordsPerPage2) {
       if (unit === "words") return count.words;
       if (unit === "characters") return count.chars;
-      return count.words / (wordsPerPage || 500);
+      return count.words / (wordsPerPage2 || 500);
     }
     function findPatterns(query, opts = {}) {
       const flags = "g" + (opts.matchCase ? "" : "i");
@@ -849,6 +857,7 @@ var require_core = __commonJS({
       parseLimit,
       formatLimit,
       countText,
+      wordsPerPage,
       measure,
       sectionNumbers,
       alignColumns,
@@ -1346,8 +1355,28 @@ var require_pandoc = __commonJS({
       if (o.resourcePath) args.push("--resource-path", o.resourcePath);
       return args;
     }
+    var BODY_END = "\n\n```{=latex}\n\\special{pdf:docinfo << /DendriteBodyEnd (\\thepage) >>}\n```\n";
+    function pdfPages(buf, inflate) {
+      const raw = buf.toString("latin1");
+      let all = raw;
+      const re = /stream\r?\n/g;
+      let m;
+      while (m = re.exec(raw)) {
+        const start = m.index + m[0].length;
+        const end = raw.indexOf("endstream", start);
+        if (end < 0) break;
+        try {
+          all += "\n" + inflate(buf.subarray(start, end)).toString("latin1");
+        } catch (err) {
+        }
+        re.lastIndex = end + "endstream".length;
+      }
+      const pages = (all.match(/\/Type\s*\/Page(?![s\w])/g) || []).length;
+      const mark = /\/DendriteBodyEnd\s*\((\d+)\)/.exec(all);
+      return { pages, bodyEnd: mark ? Number(mark[1]) : null };
+    }
     async function exportDocument(o, deps) {
-      const text = toPandoc(o.md, o.resolve || (() => null));
+      let text = toPandoc(o.md, o.resolve || (() => null));
       const keys = citekeys(text);
       const dir = deps.tmpdir();
       const input = deps.join(dir, `dendrite-${Date.now()}.md`);
@@ -1367,6 +1396,7 @@ var require_pandoc = __commonJS({
           await deps.writeFile(bibliography, got.bib);
         }
       }
+      if (o.format === "pdf") text += BODY_END;
       await deps.writeFile(input, text);
       const args = pandocArgs({
         input,
@@ -1389,9 +1419,32 @@ var require_pandoc = __commonJS({
           deps.remove(bibliography);
         }
       }
-      return { ok: true, keys };
+      let layout = null;
+      if (o.format === "pdf" && deps.readFile && deps.inflate) {
+        try {
+          layout = pdfPages(await deps.readFile(o.output), deps.inflate);
+        } catch (err) {
+          layout = null;
+        }
+      }
+      return { ok: true, keys, layout };
     }
-    module2.exports = { citekeys, toPandoc, fetchBib, pandocArgs, exportDocument };
+    function measuredRate(words, layout, cited) {
+      if (!layout || !words) return null;
+      const end = layout.bodyEnd || (cited ? null : layout.pages);
+      if (!end || end < 2) return null;
+      return Math.round(words / (end - 0.5));
+    }
+    module2.exports = {
+      citekeys,
+      toPandoc,
+      fetchBib,
+      pandocArgs,
+      exportDocument,
+      pdfPages,
+      measuredRate,
+      BODY_END
+    };
   }
 });
 
@@ -3789,7 +3842,7 @@ var DendriteView = class extends ItemView {
   manuscript() {
     const fm = this.file && this.app.metadataCache.getFileCache(this.file)?.frontmatter || {};
     const top = Number(fm.dendrite_heading_top);
-    const wpp = Number(fm.dendrite_words_per_page);
+    const wpp = core.wordsPerPage(fm);
     const cpw = Number(fm.dendrite_chars_per_word);
     return {
       prefix: this.prefix(),
@@ -3797,7 +3850,8 @@ var DendriteView = class extends ItemView {
       limitRequired: fm.dendrite_limit_required === true,
       charsPerWord: cpw > 0 ? cpw : 6,
       countSpaces: fm.dendrite_count_spaces !== false,
-      wordsPerPage: wpp > 0 ? wpp : 500,
+      wordsPerPage: wpp.value,
+      wordsPerPageMeasured: wpp.measured,
       headingTop: top >= 1 && top <= 6 ? top : this.plugin.settings.headingTop,
       number: fm.dendrite_number_sections === true,
       csl: typeof fm.dendrite_csl === "string" && fm.dendrite_csl.trim() ? fm.dendrite_csl.trim() : null,
@@ -4060,7 +4114,7 @@ var DendriteView = class extends ItemView {
   /**
    * Each card with a quota shows what it uses against it and what the
    * quotas below it allocate; the bar does the same for the manuscript
-   * total. Over a required quota is an error, over a target a warning.
+   * total. Over a hard limit is an error, over a soft limit a warning.
    * Card text is read only when some quota is set.
    */
   async updateCounts() {
@@ -4162,13 +4216,13 @@ var DendriteView = class extends ItemView {
     tip.style.top = a.top - 6 + "px";
     this.quotaTip = tip;
     this.pageWin().requestAnimationFrame(() => tip.addClass("is-shown"));
-    return this.showCounts(tip, id, !r);
+    return this.showCounts(tip, id);
   }
   /**
-   * What a card prints, with any cards below it, in words, characters
-   * and pages, quota or none; and the card alone where that differs.
+   * What a card prints, then with the cards below it where that
+   * differs, as words, characters and pages, quota or none.
    */
-  async showCounts(tip, id, offer) {
+  async showCounts(tip, id) {
     const node = this.byId.get(id);
     if (!node) return;
     const ms = this.manuscript();
@@ -4176,28 +4230,34 @@ var DendriteView = class extends ItemView {
     if (this.quotaTip !== tip) return;
     const bodyOf = (x) => this.editing && this.editing.id === x ? this.editing.editor.value : bodies.get(x);
     const roleOf = (x) => this.roleOf(x);
-    const branch = core.countText(core.exportMarkdown(
-      [node],
-      bodyOf,
-      1,
-      null,
-      roleOf
-    ), ms.countSpaces);
     const own = core.exportSegments([node], bodyOf, 1, null, roleOf).find((s) => s.id === id);
-    const alone = core.countText(own ? own.text : "", ms.countSpaces);
-    const num = (n, unit) => `${n.toLocaleString()} ${unit}` + (n === 1 ? "" : "s");
-    const pages = Math.round(branch.words / ms.wordsPerPage * 100) / 100;
-    const line = (text, cls = "") => tip.createDiv(
-      { cls: "dendrite-quota-line dendrite-quota-count " + cls, text }
-    );
-    line(`${num(branch.words, "word")} \xB7 ${num(branch.chars, "character")}${ms.countSpaces ? "" : " without spaces"} \xB7 ~${core.fmtNum(pages)} page${pages === 1 ? "" : "s"}`);
-    if (alone.words !== branch.words) {
-      line(
-        `${num(alone.words, "word")} on this card, the rest below`,
-        "dendrite-quota-alloc"
-      );
+    const rows = [[
+      "This card",
+      core.countText(own ? own.text : "", ms.countSpaces)
+    ]];
+    if (node.children.length) {
+      rows.push(["With cards below", core.countText(
+        core.exportMarkdown([node], bodyOf, 1, null, roleOf),
+        ms.countSpaces
+      )]);
     }
-    line(`Pages at ${ms.wordsPerPage} words per page.` + (offer ? " Click to set a quota." : ""), "dendrite-quota-alloc");
+    const table = tip.createEl("table", { cls: "dendrite-count-table" });
+    const head = table.createEl("tr");
+    for (const h of ["", "Words", "Characters", "Pages"]) {
+      head.createEl("th", { text: h });
+    }
+    for (const [label, n] of rows) {
+      const tr = table.createEl("tr");
+      const pages = Math.round(n.words / ms.wordsPerPage * 100) / 100;
+      for (const v of [
+        label,
+        n.words.toLocaleString(),
+        n.chars.toLocaleString(),
+        "~" + core.fmtNum(pages)
+      ]) {
+        tr.createEl("td", { text: v });
+      }
+    }
   }
   hideQuotaTip() {
     if (this.quotaTip) this.quotaTip.remove();
@@ -4224,7 +4284,7 @@ var DendriteView = class extends ItemView {
     const label = pop.createEl("label", { cls: "dendrite-quota-req" });
     const req = label.createEl("input", { type: "checkbox" });
     req.checked = fm.dendrite_limit_required === true;
-    label.createSpan({ text: "required by the call" });
+    label.createSpan({ text: "hard limit" });
     const row = pop.createDiv({ cls: "dendrite-quota-actions" });
     const save = row.createEl("button", {
       cls: "mod-cta",
@@ -4279,7 +4339,10 @@ var DendriteView = class extends ItemView {
     const tilde = (est) => est ? "~" : "";
     const used = el.createDiv({ cls: "dendrite-quota-line" });
     used.setText(`${tilde(r.usedEstimated)}${core.fmtNum(r.used)} / ${core.formatLimit(q)}`);
-    used.createSpan({ cls: "dendrite-quota-kind", text: kind });
+    used.createSpan({
+      cls: "dendrite-quota-kind",
+      text: q.required ? "hard limit" : "soft limit"
+    });
     if (r.used > q.amount) used.addClass(`is-over-${kind}`);
     if (r.allocated === null) return;
     const alloc = el.createDiv({ cls: "dendrite-quota-line dendrite-quota-alloc" });
@@ -4709,7 +4772,7 @@ var DendriteView = class extends ItemView {
     }
     const name = safeName(this.file.basename + (node ? " - " + (node.label || node.id) : ""));
     if (format !== "md") {
-      await this.exportPandoc(text, format, dir, name, ms);
+      await this.exportPandoc(text, format, dir, name, ms, !node);
       return;
     }
     const path = normalizePath(`${dir}/${name}.md`);
@@ -4754,7 +4817,7 @@ var DendriteView = class extends ItemView {
     new Notice(`Dendrite: wrote ${rel}. Open it in Word, set the Normal and heading styles, and save.`);
     return rel;
   }
-  async exportPandoc(text, format, dir, name, ms) {
+  async exportPandoc(text, format, dir, name, ms, whole) {
     const s = this.plugin.settings;
     const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
     const nodePath = require("path");
@@ -4793,6 +4856,18 @@ var DendriteView = class extends ItemView {
     }
     const cites = result.keys.length ? ` with ${result.keys.length} citation(s)` : "";
     new Notice(`Dendrite: exported to ${rel}${cites}.`);
+    const rate = whole ? pandoc.measuredRate(
+      core.countText(text, ms.countSpaces).words,
+      result.layout,
+      result.keys.length > 0
+    ) : null;
+    if (rate && rate !== ms.wordsPerPageMeasured) {
+      await writeProps(
+        this.app,
+        this.file,
+        { dendrite_measured_words_per_page: rate }
+      );
+    }
     await this.plugin.showExport(rel, output, format);
   }
 };
@@ -5167,7 +5242,7 @@ function quotaSetting(container, name, desc, current, required, draft) {
     unit = v;
     emit();
   }));
-  new Setting(container).setName("Required by the call").setDesc("On: a limit the call sets, shown red when exceeded. Off: your own allocation, shown amber.").addToggle((tg) => tg.setValue(req).onChange((v) => {
+  new Setting(container).setName("Hard limit").setDesc("On: a limit that cannot be exceeded, such as one a call sets, shown red when exceeded. Off: a soft limit, your own allocation, shown amber.").addToggle((tg) => tg.setValue(req).onChange((v) => {
     req = v;
     emit();
   }));
@@ -5195,8 +5270,9 @@ var ManuscriptModal = class extends Modal {
     new Setting(contentEl).setName("Count spaces in characters").setDesc("Funding portals differ; check the call.").addToggle((tg) => tg.setValue(ms.countSpaces).onChange((v) => {
       draft.dendrite_count_spaces = v;
     }));
-    new Setting(contentEl).setName("Words per page").setDesc("Only for page estimates while writing. The real count depends on the final layout.").addText((t) => t.setValue(String(ms.wordsPerPage)).onChange((v) => {
+    new Setting(contentEl).setName("Words per page").setDesc(ms.wordsPerPageMeasured ? "Measured from the last PDF of the whole manuscript, and measured again at each one. A number typed here is used until then." : "For page estimates and page quotas, until a PDF of the whole manuscript is exported, which measures it.").addText((t) => t.setValue(String(ms.wordsPerPage)).onChange((v) => {
       draft.dendrite_words_per_page = Number(v) > 0 ? Number(v) : null;
+      draft.dendrite_measured_words_per_page = null;
     }));
     new Setting(contentEl).setName("Characters per word").setDesc("Only for comparing quotas set in characters with quotas in words or pages, an estimate.").addText((t) => t.setValue(String(ms.charsPerWord)).onChange((v) => {
       draft.dendrite_chars_per_word = Number(v) > 0 ? Number(v) : null;
@@ -5661,6 +5737,8 @@ module.exports = class DendritePlugin extends Plugin {
       tmpdir: os.tmpdir,
       join: path.join,
       writeFile: (f, t) => fs.promises.writeFile(f, t),
+      readFile: (f) => fs.promises.readFile(f),
+      inflate: (b) => require("zlib").inflateSync(b),
       remove: (f) => {
         try {
           fs.unlinkSync(f);
