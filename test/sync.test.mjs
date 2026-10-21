@@ -252,3 +252,93 @@ test('a status and a label set on one device show on the other\'s open ' +
     assert.match(b.read(INDEX), /\[\[G-bbbbb\|First words\]\]/,
                  'B\'s index waits for the synced one');
 });
+
+test('an index from a sync that leaves out cards whose notes still exist ' +
+     'is caught, though this device never saw it, and can be restored',
+     async () => {
+    const clock = { t: 1 };
+    const full = '---\ndendrite_prefix: G\ndendrite_font: Arial\n---\n' +
+        '- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|B]]\n    - [[G-ccccc|C]]\n' +
+        '- [[G-ddddd|D]]\n';
+    const files = { [INDEX]: full,
+                    [cardPath('G-aaaaa')]: '# Aims\n',
+                    [cardPath('G-bbbbb')]: 'B text\n',
+                    [cardPath('G-ccccc')]: 'C text\n',
+                    [cardPath('G-ddddd')]: 'D text\n' };
+    const a = await device(files, clock);
+    clock.t += WINDOW_MS + 1;
+    h.notices.length = 0;
+    // An old copy, merged: two cards gone, a third out of place, and
+    // the properties lost.
+    const merged = '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Aims]]\n' +
+        '- [[G-ddddd|D]]\n        - [[G-ccccc|C]]\n    - [[G-zzzzz|Z]]\n';
+    await a.receive(INDEX, merged.replace(
+        '        - [[G-ccccc|C]]\n', ''));
+    await tick(400);
+    assert.deepEqual(a.writes, [], 'A wrote nothing in response');
+    assert.ok(a.view.reverted.has('index'), 'the bar is marked');
+    assert.ok(h.notices.some((n) => /no longer lists 2 cards whose notes /
+        .test(n) && /bbbbb \(B\).*ccccc \(C\)/.test(n)),
+              'a notice names the cards');
+    assert.equal(await a.view.exportTo(null), null, 'export refuses');
+    // Listed again, out of place: one card is still left out.
+    await a.receive(INDEX, merged);
+    await tick(400);
+    assert.deepEqual([...a.view.dropped.keys()], ['G-bbbbb']);
+    await a.view.restoreNewer(null);
+    await tick(400);
+    assert.equal(a.read(INDEX), full, 'the index as it was, properties ' +
+                 'and all');
+    assert.ok(!a.view.reverted.has('index'));
+    assert.deepEqual(a.view.root.children.map((n) => n.id),
+                     ['G-aaaaa', 'G-ddddd']);
+});
+
+test('cards deleted on another device, or the index edited here, are ' +
+     'not taken for an old copy', async () => {
+    const clock = { t: 1 };
+    const files = { ...FILES,
+        [INDEX]: FILES[INDEX] + '- [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n',
+        [cardPath('G-bbbbb')]: 'B text\n',
+        [cardPath('G-ccccc')]: 'C text\n' };
+    const a = await device(files, clock);
+    const without = (t, id, label) => t.replace(`- [[${id}|${label}]]\n`,
+                                                '');
+    // The note's deletion arrives first, then the index.
+    await a.app.fileManager.trashFile(
+        a.app.vault.getAbstractFileByPath(cardPath('G-bbbbb')));
+    await a.receive(INDEX, without(a.read(INDEX), 'G-bbbbb', 'B'));
+    await tick(400);
+    assert.ok(!a.view.reverted.has('index'), 'note deleted first');
+    // The index arrives first, then the note's deletion.
+    await a.receive(INDEX, without(a.read(INDEX), 'G-ccccc', 'C'));
+    await tick(400);
+    assert.ok(a.view.reverted.has('index'), 'flagged for now');
+    await a.app.fileManager.trashFile(
+        a.app.vault.getAbstractFileByPath(cardPath('G-ccccc')));
+    assert.ok(!a.view.reverted.has('index'), 'and cleared by the delete');
+    // A line deleted in Obsidian's editor on the index, here.
+    a.app.workspace.activeEditor = { file: a.view.file };
+    await a.receive(INDEX, without(a.read(INDEX), 'G-aaaaa', 'Aims'));
+    await tick(400);
+    assert.ok(!a.view.reverted.has('index'), 'edited here');
+    assert.deepEqual(a.writes, []);
+});
+
+test('keeping the index without the cards settles it', async () => {
+    const clock = { t: 1 };
+    const files = { ...FILES,
+        [INDEX]: FILES[INDEX] + '- [[G-bbbbb|B]]\n',
+        [cardPath('G-bbbbb')]: 'B text\n' };
+    const a = await device(files, clock);
+    await a.receive(INDEX, FILES[INDEX]);
+    await tick(400);
+    assert.ok(a.view.reverted.has('index'));
+    await a.view.keepVersion(null);
+    assert.ok(!a.view.reverted.has('index'));
+    // A later change from outside compares with the kept index.
+    await a.receive(INDEX, FILES[INDEX].replace('Aims', 'Aim'));
+    await tick(400);
+    assert.ok(!a.view.reverted.has('index'));
+    assert.deepEqual(a.writes, []);
+});

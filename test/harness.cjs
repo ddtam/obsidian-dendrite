@@ -228,6 +228,7 @@ function makeApp() {
             async trashFile(f) {
                 files.delete(f.path);
                 text.delete(f.path);
+                ev.trigger('delete', f);
             },
         },
         workspace: {

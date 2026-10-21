@@ -1695,6 +1695,10 @@ var DendriteView = class extends ItemView {
     this.selfWrites = /* @__PURE__ */ new Set();
     this.reloadTimer = null;
     this.indexList = null;
+    this.indexText = null;
+    this.dropBase = null;
+    this.dropped = /* @__PURE__ */ new Map();
+    this.indexReverted = false;
     this.labelTimer = null;
     this.ownBodies = /* @__PURE__ */ new Map();
     this.reverted = /* @__PURE__ */ new Set();
@@ -1748,7 +1752,11 @@ var DendriteView = class extends ItemView {
     }));
     this.registerEvent(this.app.vault.on("delete", (f) => {
       if (f === this.file) this.leaf.detach();
-      else if (f instanceof TFile && this.byId.has(f.basename)) {
+      else if (f instanceof TFile && this.dropped.has(f.basename)) {
+        this.dropped.delete(f.basename);
+        if (!this.dropped.size) this.dropBase = null;
+        this.flagIndex();
+      } else if (f instanceof TFile && this.byId.has(f.basename)) {
         this.invalidate(f.basename);
         this.renderCard(f.basename);
       }
@@ -1832,6 +1840,7 @@ var DendriteView = class extends ItemView {
     const { body } = core.splitFrontmatter(text);
     this.root = core.parseIndex(body).root;
     this.indexList = core.serialiseTree(this.root);
+    if (!this.dropBase) this.indexText = text;
     this.reindex();
     if (!this.active || !this.byId.has(this.active)) {
       const first = this.root.children[0];
@@ -3271,6 +3280,7 @@ var DendriteView = class extends ItemView {
         return data;
       }
       const out = core.writeIndexText(data, root);
+      this.indexText = out;
       this.selfWrites.add(out);
       if (this.selfWrites.size > 20) {
         this.selfWrites.delete(this.selfWrites.values().next().value);
@@ -3680,9 +3690,11 @@ var DendriteView = class extends ItemView {
     if (f === this.file) {
       const text2 = await this.app.vault.cachedRead(f);
       if (this.selfWrites.delete(text2)) {
+        this.indexText = text2;
         await this.checkVersion(null, text2, true);
         return;
       }
+      this.checkDropped(text2);
       await this.checkVersion(null, text2, false);
       if (this.root && core.writeIndexText(text2, this.root) === text2) {
         this.indexList = core.serialiseTree(this.root);
@@ -3754,15 +3766,59 @@ var DendriteView = class extends ItemView {
       return;
     }
     const key = id === null ? "index" : id;
-    if (r === "reverted" === this.reverted.has(key)) return;
-    if (r === "reverted") {
+    if (id === null) this.indexReverted = r === "reverted";
+    const on = r === "reverted" || id === null && this.dropped.size > 0;
+    if (on === this.reverted.has(key)) return;
+    if (!on) {
+      this.reverted.delete(key);
+    } else if (r !== "reverted") {
+      this.reverted.add(key);
+    } else {
       this.reverted.add(key);
       const node = id && this.byId.get(id);
       const name = id === null ? "The index" : `Card ${core.shortId(id)}` + (node && node.label ? ` (${node.label})` : "");
       new Notice(`Dendrite: ${name} went back to an earlier version, probably from a sync. Click "earlier version" on ${id === null ? "the bar" : "the card"} to restore the newer text or keep this one.`, 0);
-    } else {
-      this.reverted.delete(key);
     }
+    this.updateStatuses();
+  }
+  /**
+   * An index from outside that leaves out cards whose notes still
+   * exist. Deleting a card on a board deletes its note, so this is a
+   * sync merging or putting back an old copy, which this device may
+   * never have seen and so cannot match in its history. Held as the
+   * index going back, with the text before it to restore, until the
+   * cards are listed again or their notes deleted.
+   */
+  checkDropped(text) {
+    const active = this.app.workspace.activeEditor;
+    const here = !!(active && active.file === this.file);
+    const base = this.dropBase || this.indexText;
+    const ids = (t) => core.allNodes(core.parseIndex(
+      core.splitFrontmatter(t).body
+    ).root);
+    const listed = new Set(ids(text).map((n) => n.id));
+    const gone = here || !base ? [] : ids(base).filter((n) => !listed.has(n.id) && this.cardFile(n.id));
+    const was = this.dropped.size;
+    this.dropped = new Map(gone.map((n) => [n.id, n.label]));
+    if (gone.length) {
+      this.dropBase = base;
+    } else {
+      this.dropBase = null;
+      this.indexText = text;
+    }
+    if (gone.length && !was) {
+      const names = gone.slice(0, 5).map((n) => core.shortId(n.id) + (n.label ? ` (${n.label})` : "")).join(", ");
+      const more = gone.length > 5 ? `, and ${gone.length - 5} more` : "";
+      new Notice(`Dendrite: the index changed outside Dendrite and no longer lists ${gone.length} card${gone.length === 1 ? "" : "s"} whose notes still exist: ${names}${more}. This is probably a sync of an old copy. Click "earlier version" on the bar to restore the index as it was or keep this one.`, 0);
+    }
+    this.flagIndex();
+  }
+  /** Show the index as gone back while either check says so. */
+  flagIndex() {
+    const on = this.indexReverted || this.dropped.size > 0;
+    if (on === this.reverted.has("index")) return;
+    if (on) this.reverted.add("index");
+    else this.reverted.delete("index");
     this.updateStatuses();
   }
   /** Every note's version, on opening: a sync may have run meanwhile. */
@@ -3793,13 +3849,15 @@ var DendriteView = class extends ItemView {
   /** Put back the newest text this device recorded for the note. */
   async restoreNewer(id) {
     const f = id === null ? this.file : this.cardFile(id);
-    const text = f && await this.history.newer(this.historyKey(id));
+    const text = id === null && this.dropBase ? this.dropBase : f && await this.history.newer(this.historyKey(id));
     if (text === null || text === void 0) {
       new Notice("Dendrite: no newer version is recorded here.");
       return;
     }
     const now = await this.app.vault.read(f);
     if (id === null) {
+      this.dropBase = null;
+      this.dropped.clear();
       this.selfWrites.add(text);
       await this.app.vault.process(f, () => text);
       await this.checkVersion(null, text, true);
@@ -3831,6 +3889,12 @@ var DendriteView = class extends ItemView {
       text,
       id === null ? text : core.splitFrontmatter(text).body
     );
+    if (id === null) {
+      this.dropBase = null;
+      this.dropped.clear();
+      this.indexText = text;
+      this.indexReverted = false;
+    }
     this.reverted.delete(id === null ? "index" : id);
     this.updateStatuses();
   }
@@ -4227,7 +4291,7 @@ var DendriteView = class extends ItemView {
   }
   /**
    * What a card prints, then with the cards below it where that
-   * differs, as words, characters and pages, quota or none.
+   * differs, as characters, words and pages, quota or none.
    */
   async showCounts(tip, id) {
     const node = this.byId.get(id);
@@ -4250,7 +4314,7 @@ var DendriteView = class extends ItemView {
     }
     const table = tip.createEl("table", { cls: "dendrite-count-table" });
     const head = table.createEl("tr");
-    for (const h of ["", "Words", "Characters", "Pages"]) {
+    for (const h of ["", "Chars", "Words", "Pages"]) {
       head.createEl("th", { text: h });
     }
     for (const [label, n] of rows) {
@@ -4258,8 +4322,8 @@ var DendriteView = class extends ItemView {
       const pages = Math.round(n.words / ms.wordsPerPage * 100) / 100;
       for (const v of [
         label,
-        n.words.toLocaleString(),
         n.chars.toLocaleString(),
+        n.words.toLocaleString(),
         "~" + core.fmtNum(pages)
       ]) {
         tr.createEl("td", { text: v });

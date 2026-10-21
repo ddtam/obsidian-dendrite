@@ -245,12 +245,12 @@ test('quotas show as a filled target, with details on hover and a quick ' +
         '.dendrite-quota-tip .dendrite-count-table tr')].map((tr) =>
         [...tr.children].map((c) => c.textContent));
     await view.showQuotaTip('G-ccccc', widget('G-ccccc'));
-    assert.deepEqual(table(), [['', 'Words', 'Characters', 'Pages'],
+    assert.deepEqual(table(), [['', 'Chars', 'Words', 'Pages'],
                                ['This card', '1', '1', '~0.1']]);
     view.hideQuotaTip();
     // The section prints its heading only; the rest is its child's.
     await view.showQuotaTip('G-aaaaa', a);
-    assert.deepEqual(table().slice(1).map((r) => [r[0], r[1], r[3]]),
+    assert.deepEqual(table().slice(1).map((r) => [r[0], r[2], r[3]]),
                      [['This card', '1', '~0.1'],
                       ['With cards below', '4', '~0.4']]);
     view.hideQuotaTip();

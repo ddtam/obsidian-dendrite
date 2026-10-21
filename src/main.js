@@ -136,6 +136,13 @@ class DendriteView extends ItemView {
         // The index's list as last read or written here: a write over a
         // list that has changed since would drop someone else's change.
         this.indexList = null;
+        // The index's text as last seen here, and, while an index from
+        // outside leaves out cards whose notes still exist, the text
+        // before it and those cards by id, with their labels.
+        this.indexText = null;
+        this.dropBase = null;
+        this.dropped = new Map();
+        this.indexReverted = false;
         this.labelTimer = null;
         // Card bodies Dendrite is writing, by path, so their modify events
         // are known as its own; and the cards gone back to an earlier
@@ -193,7 +200,12 @@ class DendriteView extends ItemView {
         }));
         this.registerEvent(this.app.vault.on('delete', (f) => {
             if (f === this.file) this.leaf.detach();
-            else if (f instanceof TFile && this.byId.has(f.basename)) {
+            else if (f instanceof TFile && this.dropped.has(f.basename)) {
+                // A card left out of the index was deleted after all.
+                this.dropped.delete(f.basename);
+                if (!this.dropped.size) this.dropBase = null;
+                this.flagIndex();
+            } else if (f instanceof TFile && this.byId.has(f.basename)) {
                 this.invalidate(f.basename);
                 this.renderCard(f.basename);
             }
@@ -276,6 +288,7 @@ class DendriteView extends ItemView {
         const { body } = core.splitFrontmatter(text);
         this.root = core.parseIndex(body).root;
         this.indexList = core.serialiseTree(this.root);
+        if (!this.dropBase) this.indexText = text;
         this.reindex();
         if (!this.active || !this.byId.has(this.active)) {
             const first = this.root.children[0];
@@ -1761,6 +1774,7 @@ class DendriteView extends ItemView {
                 return data;
             }
             const out = core.writeIndexText(data, root);
+            this.indexText = out;
             // Remembered so the modify event this write causes is not
             // mistaken for an outside edit; capped in case an event never
             // arrives, as when the text did not change.
@@ -2186,9 +2200,11 @@ class DendriteView extends ItemView {
         if (f === this.file) {
             const text = await this.app.vault.cachedRead(f);
             if (this.selfWrites.delete(text)) {
+                this.indexText = text;
                 await this.checkVersion(null, text, true);
                 return;
             }
+            this.checkDropped(text);
             await this.checkVersion(null, text, false);
             // A sync can write the text back unchanged, after Dendrite's
             // own event was consumed: nothing to reload.
@@ -2271,8 +2287,15 @@ class DendriteView extends ItemView {
             return;
         }
         const key = id === null ? 'index' : id;
-        if ((r === 'reverted') === this.reverted.has(key)) return;
-        if (r === 'reverted') {
+        if (id === null) this.indexReverted = r === 'reverted';
+        const on = r === 'reverted' ||
+            (id === null && this.dropped.size > 0);
+        if (on === this.reverted.has(key)) return;
+        if (!on) {
+            this.reverted.delete(key);
+        } else if (r !== 'reverted') {
+            this.reverted.add(key);
+        } else {
             this.reverted.add(key);
             const node = id && this.byId.get(id);
             const name = id === null ? 'The index' :
@@ -2282,9 +2305,57 @@ class DendriteView extends ItemView {
                        'probably from a sync. Click "earlier version" on ' +
                        `${id === null ? 'the bar' : 'the card'} to restore ` +
                        'the newer text or keep this one.', 0);
-        } else {
-            this.reverted.delete(key);
         }
+        this.updateStatuses();
+    }
+
+    /**
+     * An index from outside that leaves out cards whose notes still
+     * exist. Deleting a card on a board deletes its note, so this is a
+     * sync merging or putting back an old copy, which this device may
+     * never have seen and so cannot match in its history. Held as the
+     * index going back, with the text before it to restore, until the
+     * cards are listed again or their notes deleted.
+     */
+    checkDropped(text) {
+        const active = this.app.workspace.activeEditor;
+        const here = !!(active && active.file === this.file);
+        const base = this.dropBase || this.indexText;
+        const ids = (t) => core.allNodes(core.parseIndex(
+            core.splitFrontmatter(t).body).root);
+        const listed = new Set(ids(text).map((n) => n.id));
+        const gone = here || !base ? [] : ids(base).filter((n) =>
+            !listed.has(n.id) && this.cardFile(n.id));
+        const was = this.dropped.size;
+        this.dropped = new Map(gone.map((n) => [n.id, n.label]));
+        if (gone.length) {
+            this.dropBase = base;
+        } else {
+            this.dropBase = null;
+            this.indexText = text;
+        }
+        if (gone.length && !was) {
+            const names = gone.slice(0, 5).map((n) => core.shortId(n.id) +
+                (n.label ? ` (${n.label})` : '')).join(', ');
+            const more = gone.length > 5 ?
+                `, and ${gone.length - 5} more` : '';
+            new Notice(`Dendrite: the index changed outside Dendrite and ` +
+                       `no longer lists ${gone.length} ` +
+                       `card${gone.length === 1 ? '' : 's'} whose notes ` +
+                       `still exist: ${names}${more}. This is probably a ` +
+                       'sync of an old copy. Click "earlier version" on ' +
+                       'the bar to restore the index as it was or keep ' +
+                       'this one.', 0);
+        }
+        this.flagIndex();
+    }
+
+    /** Show the index as gone back while either check says so. */
+    flagIndex() {
+        const on = this.indexReverted || this.dropped.size > 0;
+        if (on === this.reverted.has('index')) return;
+        if (on) this.reverted.add('index');
+        else this.reverted.delete('index');
         this.updateStatuses();
     }
 
@@ -2314,13 +2385,16 @@ class DendriteView extends ItemView {
     /** Put back the newest text this device recorded for the note. */
     async restoreNewer(id) {
         const f = id === null ? this.file : this.cardFile(id);
-        const text = f && await this.history.newer(this.historyKey(id));
+        const text = id === null && this.dropBase ? this.dropBase :
+            f && await this.history.newer(this.historyKey(id));
         if (text === null || text === undefined) {
             new Notice('Dendrite: no newer version is recorded here.');
             return;
         }
         const now = await this.app.vault.read(f);
         if (id === null) {
+            this.dropBase = null;
+            this.dropped.clear();
             this.selfWrites.add(text);
             await this.app.vault.process(f, () => text);
             await this.checkVersion(null, text, true);
@@ -2343,6 +2417,12 @@ class DendriteView extends ItemView {
         const text = await this.app.vault.read(f);
         await this.history.keep(this.historyKey(id), text,
             id === null ? text : core.splitFrontmatter(text).body);
+        if (id === null) {
+            this.dropBase = null;
+            this.dropped.clear();
+            this.indexText = text;
+            this.indexReverted = false;
+        }
         this.reverted.delete(id === null ? 'index' : id);
         this.updateStatuses();
     }
@@ -2758,7 +2838,7 @@ class DendriteView extends ItemView {
 
     /**
      * What a card prints, then with the cards below it where that
-     * differs, as words, characters and pages, quota or none.
+     * differs, as characters, words and pages, quota or none.
      */
     async showCounts(tip, id) {
         const node = this.byId.get(id);
@@ -2780,14 +2860,14 @@ class DendriteView extends ItemView {
         }
         const table = tip.createEl('table', { cls: 'dendrite-count-table' });
         const head = table.createEl('tr');
-        for (const h of ['', 'Words', 'Characters', 'Pages']) {
+        for (const h of ['', 'Chars', 'Words', 'Pages']) {
             head.createEl('th', { text: h });
         }
         for (const [label, n] of rows) {
             const tr = table.createEl('tr');
             const pages = Math.round(n.words / ms.wordsPerPage * 100) / 100;
-            for (const v of [label, n.words.toLocaleString(),
-                             n.chars.toLocaleString(),
+            for (const v of [label, n.chars.toLocaleString(),
+                             n.words.toLocaleString(),
                              '~' + core.fmtNum(pages)]) {
                 tr.createEl('td', { text: v });
             }
