@@ -1,7 +1,7 @@
 {
   "id": "dendrite",
   "name": "Dendrite",
-  "version": "0.13.3",
+  "version": "0.13.4",
   "minAppVersion": "1.6.6",
   "description": "Gingko-style column writing over plain notes: each card is a note, and an index note of links holds the tree.",
   "author": "Derek Tam",
