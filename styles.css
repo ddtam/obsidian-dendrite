@@ -791,7 +791,7 @@
 }
 
 .dendrite-tally .dendrite-status-chip.is-reverted {
-    margin-left: 8px;
+    margin-left: 12px;
 }
 
 /* The dialog for a note changed to an older copy. */
@@ -859,6 +859,17 @@
 .dendrite-version-modes .clickable-icon.is-active {
     background: var(--background-modifier-hover);
     color: var(--text-normal);
+}
+
+/* A popout window's page has no doctype, so it is in quirks mode, where
+   a table does not inherit its font size, line height or white-space;
+   Dendrite's tables take them from their box, as in the main window. */
+.dendrite-version-split,
+.dendrite-count-table {
+    font-size: inherit;
+    line-height: inherit;
+    white-space: inherit;
+    font-weight: inherit;
 }
 
 .dendrite-version-split {
