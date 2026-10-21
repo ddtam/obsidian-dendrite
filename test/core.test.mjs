@@ -699,3 +699,9 @@ test('find: words must all be in a card, quotes keep a phrase, regex ' +
     assert.deepEqual(run('x*', { regex: true }).matches, [],
                      'empty matches are skipped');
 });
+
+test('lineDiff marks lines only in one text, in order', () => {
+    assert.deepEqual(c.lineDiff('a\nb\nc', 'a\nc\nd'),
+                     [[' ', 'a'], ['-', 'b'], [' ', 'c'], ['+', 'd']]);
+    assert.deepEqual(c.lineDiff('x', 'x'), [[' ', 'x']]);
+});

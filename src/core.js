@@ -294,6 +294,41 @@ function allNodes(root) {
     return descendants(root);
 }
 
+/**
+ * Two texts compared line by line, as [op, line] in order: ' ' a line in
+ * both, '-' only in the first, '+' only in the second.
+ */
+function lineDiff(a, b) {
+    const x = a.split('\n');
+    const y = b.split('\n');
+    const n = x.length;
+    const m = y.length;
+    // Lengths of the longest common run of lines from i and j onward.
+    const t = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+            t[i][j] = x[i] === y[j] ? t[i + 1][j + 1] + 1 :
+                Math.max(t[i + 1][j], t[i][j + 1]);
+        }
+    }
+    const out = [];
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+        if (x[i] === y[j]) {
+            out.push([' ', x[i++]]);
+            j++;
+        } else if (t[i + 1][j] >= t[i][j + 1]) {
+            out.push(['-', x[i++]]);
+        } else {
+            out.push(['+', y[j++]]);
+        }
+    }
+    while (i < n) out.push(['-', x[i++]]);
+    while (j < m) out.push(['+', y[j++]]);
+    return out;
+}
+
 /** Nodes grouped by depth, each column in reading order. */
 function columns(root) {
     const cols = [];
@@ -1176,6 +1211,7 @@ module.exports = {
     normaliseMarkdown, renumberFootnotes, footnoteBlock,
     inlineToReferences, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
+    lineDiff,
     deriveLabel, stripComments, validPrefix, newId, makeNode, makeRoot,
     insertSibling, appendChild, moveWithin, indent, outdent, remove,
     descendants, allNodes, columns, exportMarkdown, cleanLabel,

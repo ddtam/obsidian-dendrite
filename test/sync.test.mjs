@@ -159,7 +159,7 @@ test('a card a stale device puts back is caught and can be restored; the ' +
     await tick(400);
     assert.deepEqual(a.writes, [], 'A wrote nothing in response');
     assert.deepEqual([...a.view.reverted].sort(), ['G-aaaaa', 'index']);
-    assert.ok(h.notices.some((n) => /Card aaaaa .*went back to an earlier/
+    assert.ok(h.notices.some((n) => /Card aaaaa .*changed outside Dendrite/
         .test(n)), 'a notice names the card');
     const chip = a.view.cardEls.get('G-aaaaa')
         .querySelector('.dendrite-status-chip.is-reverted');
@@ -167,14 +167,21 @@ test('a card a stale device puts back is caught and can be restored; the ' +
     // Export refuses while a card has gone back.
     assert.equal(await a.view.exportTo(null), null);
     assert.equal(a.read('W/Grant/exports/Grant.md'), undefined);
-    // Restoring brings back the newer text, properties included, as one
-    // undo step.
+    // Restoring brings back the newer text, properties included, each
+    // as one undo step.
     await a.view.restoreNewer('G-aaaaa');
     await a.view.restoreNewer(null);
     await tick(20);
     assert.equal(a.read(cardPath('G-aaaaa')), newCard);
     assert.equal(a.read(INDEX), newIndex);
     assert.deepEqual(a.view.reverted, new Set());
+    await a.view.doUndo();
+    await tick(20);
+    assert.equal(a.read(INDEX), staleIndex, 'the index restore undone');
+    await a.view.doRedo();
+    await tick(20);
+    assert.equal(a.read(INDEX), newIndex, 'and redone');
+    await a.view.doUndo();
     await a.view.doUndo();
     assert.equal(a.read(cardPath('G-aaaaa')), oldCard);
     assert.deepEqual(a.view.reverted, new Set(),
@@ -341,4 +348,65 @@ test('keeping the index without the cards settles it', async () => {
     await tick(400);
     assert.ok(!a.view.reverted.has('index'));
     assert.deepEqual(a.writes, []);
+});
+
+test('the older-copy mark opens a dialog that says what happened, shows ' +
+     'both texts, and writes nothing until a choice', async () => {
+    const clock = { t: 1 };
+    const files = { ...FILES,
+        [INDEX]: FILES[INDEX] + '- [[G-bbbbb|B]]\n',
+        [cardPath('G-bbbbb')]: 'B text\n' };
+    const a = await device(files, clock);
+    const full = a.read(INDEX);
+    await a.receive(INDEX, FILES[INDEX]);
+    await tick(400);
+    const chip = a.view.statusEl.querySelector('.is-reverted');
+    assert.equal(chip.textContent, 'index: older copy ⟲');
+    assert.match(chip.getAttribute('aria-label'), /nothing is written/);
+    chip.onclick();
+    await tick(20);
+    const m = h.obsidian.lastModal;
+    assert.equal(m.titleEl.textContent, 'The index changed to an older copy');
+    const text = m.contentEl.textContent;
+    assert.match(text, /no longer lists 1 card whose notes still exist: /);
+    assert.match(text, /exist: bbbbb \(B\)/);
+    assert.match(text, /Nothing has been written/);
+    const diff = [...m.contentEl.querySelectorAll(
+        '.dendrite-version-diff > div')].map((d) => d.textContent);
+    assert.ok(diff.includes('+ - [[G-bbbbb|B]]'), 'the line coming back');
+    const choices = (modal) => [...modal.contentEl.querySelectorAll(
+        '.dendrite-version-choice button')];
+    const buttons = choices(m).map((b) => b.textContent);
+    assert.deepEqual(buttons, ['Put back the text from before',
+                               'Keep it as it is now', 'Decide later']);
+    assert.deepEqual(a.writes, [], 'opening wrote nothing');
+    // Side by side: the note now on the left, the text from before on
+    // the right, the line coming back beside a blank.
+    const modes = [...m.contentEl.querySelectorAll(
+        '.dendrite-version-modes button')];
+    assert.deepEqual(modes.map((b) => b.textContent),
+                     ['Unified', 'Side by side']);
+    modes[1].onclick();
+    assert.ok(m.modalEl.classList.contains('dendrite-wide'));
+    const cells = [...m.contentEl.querySelectorAll(
+        '.dendrite-version-split tr')].map((tr) =>
+        [...tr.children].map((c) => c.textContent));
+    assert.deepEqual(cells[0], ['The note now', 'The text from before']);
+    assert.ok(cells.some((r) => r[0] === '' && r[1] === '- [[G-bbbbb|B]]'));
+    modes[0].onclick();
+    assert.ok(!m.modalEl.classList.contains('dendrite-wide'));
+    // Decide later: nothing changes.
+    await choices(m)[2].onclick();
+    assert.ok(a.view.reverted.has('index'));
+    // Put back: the index as it was, undoable.
+    chip.onclick();
+    await tick(20);
+    await choices(h.obsidian.lastModal)[0].onclick();
+    await tick(400);
+    assert.equal(a.read(INDEX), full);
+    assert.ok(!a.view.reverted.has('index'));
+    await a.view.doUndo();
+    await tick(400);
+    assert.equal(a.read(INDEX), FILES[INDEX], 'undone');
+    assert.ok(a.view.reverted.has('index'), 'and marked again');
 });

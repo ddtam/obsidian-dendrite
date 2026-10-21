@@ -790,6 +790,92 @@
     cursor: pointer;
 }
 
+.dendrite-tally .dendrite-status-chip.is-reverted {
+    margin-left: 8px;
+}
+
+/* The dialog for a note changed to an older copy. */
+.dendrite-version-diff {
+    max-height: 40vh;
+    overflow: auto;
+    padding: 6px 8px;
+    border-radius: var(--radius-s);
+    background: var(--background-secondary);
+    font-size: var(--font-ui-smaller);
+    white-space: pre-wrap;
+}
+
+.dendrite-version-diff .is-added {
+    color: var(--color-green);
+    background: color-mix(in srgb, var(--color-green) 10%, transparent);
+}
+
+.dendrite-version-diff .is-removed {
+    color: var(--color-red);
+    background: color-mix(in srgb, var(--color-red) 10%, transparent);
+}
+
+.modal.dendrite-wide {
+    width: min(1100px, 94vw);
+}
+
+.dendrite-version-modes {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.dendrite-version-modes button.is-active {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+.dendrite-version-split {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-family: var(--font-monospace);
+}
+
+.dendrite-version-split th {
+    text-align: left;
+    font-weight: normal;
+    color: var(--text-muted);
+    font-family: var(--font-interface);
+}
+
+.dendrite-version-split td {
+    vertical-align: top;
+    padding: 0 6px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.dendrite-version-split td + td,
+.dendrite-version-split th + th {
+    border-left: 1px solid var(--background-modifier-border);
+}
+
+.dendrite-version-split td.is-blank {
+    background: var(--background-modifier-hover);
+}
+
+.dendrite-version-choice {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.dendrite-version-choice button {
+    flex: none;
+}
+
+.dendrite-version-desc {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+}
+
 .dendrite-tally {
     margin-left: 12px;
     font-size: var(--font-ui-smaller);

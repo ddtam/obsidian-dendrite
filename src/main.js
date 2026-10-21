@@ -143,6 +143,8 @@ class DendriteView extends ItemView {
         this.dropBase = null;
         this.dropped = new Map();
         this.indexReverted = false;
+        // When each note was marked as gone back, by id or 'index'.
+        this.revertedAt = new Map();
         this.labelTimer = null;
         // Card bodies Dendrite is writing, by path, so their modify events
         // are known as its own; and the cards gone back to an earlier
@@ -2158,6 +2160,22 @@ class DendriteView extends ItemView {
                                 ifBody: bodyOf(next) });
             this.invalidate(f.basename);
         }
+        // The whole index, put back from before a sync, if it still holds
+        // what the step left in it; marked again if it leaves cards out.
+        if (snap.index) {
+            const data = await vault.read(this.file);
+            if (data === snap.index.ifText) {
+                this.selfWrites.add(snap.index.text);
+                await vault.process(this.file, () => snap.index.text);
+                inv.index = { text: data, ifText: snap.index.text };
+                this.indexText = data;
+                this.checkDropped(snap.index.text);
+                this.loadText(snap.index.text);
+            } else {
+                new Notice('Dendrite: the index changed since, so it was ' +
+                           `not ${what === 'undo' ? 'undone' : 'redone'}.`);
+            }
+        }
         // A text step leaves the tree as it stands.
         if (snap.tree !== undefined) {
             this.root = core.parseIndex(snap.tree + '\n').root;
@@ -2295,16 +2313,19 @@ class DendriteView extends ItemView {
             this.reverted.delete(key);
         } else if (r !== 'reverted') {
             this.reverted.add(key);
+            this.revertedAt.set(key, Date.now());
         } else {
             this.reverted.add(key);
+            this.revertedAt.set(key, Date.now());
             const node = id && this.byId.get(id);
             const name = id === null ? 'The index' :
                 `Card ${core.shortId(id)}` +
                 (node && node.label ? ` (${node.label})` : '');
-            new Notice(`Dendrite: ${name} went back to an earlier version, ` +
-                       'probably from a sync. Click "earlier version" on ' +
-                       `${id === null ? 'the bar' : 'the card'} to restore ` +
-                       'the newer text or keep this one.', 0);
+            new Notice(`Dendrite: ${name} changed outside Dendrite to ` +
+                       'text this device had before, usually an old copy ' +
+                       'from a sync. Nothing was written. Click "older ' +
+                       `copy" on ${id === null ? 'the bar' : 'the card'} ` +
+                       'to compare and choose.', 0);
         }
         this.updateStatuses();
     }
@@ -2335,6 +2356,7 @@ class DendriteView extends ItemView {
             this.indexText = text;
         }
         if (gone.length && !was) {
+            this.revertedAt.set('index', Date.now());
             const names = gone.slice(0, 5).map((n) => core.shortId(n.id) +
                 (n.label ? ` (${n.label})` : '')).join(', ');
             const more = gone.length > 5 ?
@@ -2343,9 +2365,8 @@ class DendriteView extends ItemView {
                        `no longer lists ${gone.length} ` +
                        `card${gone.length === 1 ? '' : 's'} whose notes ` +
                        `still exist: ${names}${more}. This is probably a ` +
-                       'sync of an old copy. Click "earlier version" on ' +
-                       'the bar to restore the index as it was or keep ' +
-                       'this one.', 0);
+                       'sync of an old copy. Nothing was written. Click ' +
+                       '"older copy" on the bar to compare and choose.', 0);
         }
         this.flagIndex();
     }
@@ -2372,21 +2393,25 @@ class DendriteView extends ItemView {
         }
     }
 
-    revertedMenu(id, e) {
-        const { Menu } = require('obsidian');
-        const m = new Menu();
-        m.addItem((i) => i.setTitle('Restore the newer version')
-            .setIcon('history').onClick(() => this.restoreNewer(id)));
-        m.addItem((i) => i.setTitle('Keep this version')
-            .setIcon('check').onClick(() => this.keepVersion(id)));
-        m.showAtMouseEvent(e);
+    /** What happened to a note marked as gone back, and the choices. */
+    reviewVersion(id) {
+        new VersionModal(this, id).open();
     }
 
-    /** Put back the newest text this device recorded for the note. */
+    /**
+     * The text a note marked as gone back held before: the index as this
+     * board last saw it, or the newest version this device recorded.
+     */
+    async newerText(id) {
+        if (id === null && this.dropBase) return this.dropBase;
+        const text = await this.history.newer(this.historyKey(id));
+        return text === undefined ? null : text;
+    }
+
+    /** Put back the text a note held before it was marked. */
     async restoreNewer(id) {
         const f = id === null ? this.file : this.cardFile(id);
-        const text = id === null && this.dropBase ? this.dropBase :
-            f && await this.history.newer(this.historyKey(id));
+        const text = f && await this.newerText(id);
         if (text === null || text === undefined) {
             new Notice('Dendrite: no newer version is recorded here.');
             return;
@@ -2397,6 +2422,8 @@ class DendriteView extends ItemView {
             this.dropped.clear();
             this.selfWrites.add(text);
             await this.app.vault.process(f, () => text);
+            this.pushUndo({ active: this.active, files: [], text: true,
+                            index: { text: now, ifText: text } });
             await this.checkVersion(null, text, true);
             await this.reload();
             return;
@@ -2589,12 +2616,13 @@ class DendriteView extends ItemView {
                 return s;
             };
             if (this.reverted.has(id)) {
-                const s = show('reverted', 'earlier version ⟲');
-                s.setAttr('aria-label', 'This card went back to an ' +
-                          'earlier version: restore the newer or keep it');
+                const s = show('reverted', 'older copy ⟲');
+                s.setAttr('aria-label', 'Changed outside Dendrite to text ' +
+                          'this card had before. Click to compare and ' +
+                          'choose; nothing is written until you do');
                 s.onclick = (e) => {
                     e.stopPropagation();
-                    this.revertedMenu(id, e);
+                    this.reviewVersion(id);
                 };
             }
             if (info.own === 'done') show('done', 'done ✓');
@@ -2621,8 +2649,11 @@ class DendriteView extends ItemView {
             if (this.reverted.has('index')) {
                 const s = this.statusEl.createSpan({ cls:
                     'dendrite-status-chip is-reverted',
-                    text: 'index: earlier version ⟲' });
-                s.onclick = (e) => this.revertedMenu(null, e);
+                    text: 'index: older copy ⟲' });
+                s.setAttr('aria-label', 'The index changed outside ' +
+                          'Dendrite to an older copy. Click to compare and ' +
+                          'choose; nothing is written until you do');
+                s.onclick = () => this.reviewVersion(null);
             }
         }
         if (this.plugin.previewStatuses) {
@@ -3367,8 +3398,8 @@ class DendriteView extends ItemView {
             const names = [...this.reverted].map((k) =>
                 (k === 'index' ? 'the index' : core.shortId(k)));
             new Notice('Dendrite: not exported, since ' + names.join(', ') +
-                       ' went back to an earlier version. Restore the ' +
-                       'newer version or keep this one first.', 10000);
+                       ' changed to an older copy. Click "older copy" ' +
+                       'to compare and choose first.', 10000);
             return null;
         }
         const scope = node ? [node] : this.root.children;
@@ -4050,6 +4081,204 @@ class ManuscriptModal extends Modal {
 
     onClose() { this.contentEl.empty(); }
 }
+
+/**
+ * A note marked as gone back to an older copy: what happened, the text
+ * now and before compared, and the choices, each saying what it writes.
+ * Opening it writes nothing.
+ */
+// Rows of a comparison shown at most, in either layout.
+const MAX_DIFF_ROWS = 300;
+
+class VersionModal extends Modal {
+    constructor(view, id) {
+        super(view.app);
+        this.view = view;
+        this.id = id;
+    }
+
+    async onOpen() {
+        const { contentEl, view, id } = this;
+        const index = id === null;
+        const f = index ? view.file : view.cardFile(id);
+        const node = !index && view.byId.get(id);
+        const name = index ? 'The index' : `Card ${core.shortId(id)}` +
+            (node && node.label ? ` (${node.label})` : '');
+        this.titleEl.setText(`${name} changed to an older copy`);
+        const now = f ? await view.app.vault.read(f) : '';
+        const before = await view.newerText(id);
+        const at = view.revertedAt.get(index ? 'index' : id);
+        const when = at ? ` at ${new Date(at).toLocaleString()}` : '';
+        const p = (text) => contentEl.createEl('p', { text });
+        if (index && view.dropped.size) {
+            const n = view.dropped.size;
+            const names = [...view.dropped].map(([k, label]) =>
+                core.shortId(k) + (label ? ` (${label})` : '')).join(', ');
+            p(`It changed outside Dendrite${when} and no longer lists ` +
+              `${n} card${n === 1 ? '' : 's'} whose notes still exist: ` +
+              `${names}.`);
+        } else {
+            p(`It changed outside Dendrite${when} to text this device ` +
+              'had before.');
+        }
+        p('Usually a device with an old copy synced it, sometimes ' +
+          'merged line by line with the current one. Restoring a backup ' +
+          'yourself looks the same. Nothing has been written, and export ' +
+          'waits until you choose.');
+        if (before === null) {
+            p('No earlier text is recorded on this device, so there is ' +
+              'nothing to compare or put back here.');
+        } else {
+            this.showDiff(now, before);
+        }
+        const choice = (label, desc, cta, fn) => {
+            const row = contentEl.createDiv({ cls: 'dendrite-version-choice' });
+            const b = row.createEl('button', { text: label });
+            if (cta) b.addClass('mod-cta');
+            row.createDiv({ cls: 'dendrite-version-desc', text: desc });
+            b.onclick = async () => {
+                this.close();
+                await fn();
+            };
+            return b;
+        };
+        if (before !== null) {
+            choice('Put back the text from before',
+                   'Writes the lines marked + over the note, and drops ' +
+                   'those marked −. Ctrl+Z on the board undoes it.',
+                   true, () => view.restoreNewer(id));
+        }
+        choice('Keep it as it is now',
+               'Clears this mark. Nothing is written.',
+               false, () => view.keepVersion(id));
+        choice('Decide later',
+               'Closes this. The mark stays, and export waits.',
+               false, async () => {});
+    }
+
+    /**
+     * The lines that differ, with one line of context around each run,
+     * unified or side by side; the choice holds while Obsidian runs.
+     */
+    showDiff(now, before) {
+        const rows = core.lineDiff(now, before);
+        const bar = this.contentEl.createDiv(
+            { cls: 'dendrite-version-modes' });
+        const box = this.contentEl.createDiv();
+        const modes = [['unified', 'Unified'], ['split', 'Side by side']];
+        const draw = () => {
+            const split = VersionModal.mode === 'split';
+            for (const b of bar.children) {
+                b.toggleClass('is-active', b.dataset.mode ===
+                              VersionModal.mode);
+            }
+            if (this.modalEl) this.modalEl.toggleClass('dendrite-wide', split);
+            box.empty();
+            if (!rows.some((r) => r[0] !== ' ')) {
+                box.createEl('p', { text: 'The two texts are the same.' });
+            } else if (split) {
+                this.drawSplit(box, rows);
+            } else {
+                this.drawUnified(box, rows);
+            }
+        };
+        for (const [mode, label] of modes) {
+            const b = bar.createEl('button', { text: label });
+            b.dataset.mode = mode;
+            b.onclick = () => {
+                VersionModal.mode = mode;
+                draw();
+            };
+        }
+        draw();
+    }
+
+    /** Whether each item is a change or next to one, to be shown. */
+    static shown(changed) {
+        return changed.map((c, i) => c || !!changed[i - 1] ||
+                                     !!changed[i + 1]);
+    }
+
+    drawUnified(box, rows) {
+        box.createEl('p', { cls: 'dendrite-version-desc',
+            text: '− only in the note now · + only in the text from ' +
+                  'before' });
+        const pre = box.createEl('pre', { cls: 'dendrite-version-diff' });
+        const keep = VersionModal.shown(rows.map((r) => r[0] !== ' '));
+        let gap = false;
+        let shown = 0;
+        rows.forEach(([op, line], i) => {
+            if (!keep[i]) {
+                gap = true;
+                return;
+            }
+            if (shown >= MAX_DIFF_ROWS) return;
+            if (gap && shown) pre.createDiv({ text: '⋯' });
+            gap = false;
+            shown++;
+            const cls = op === '+' ? 'is-added' : op === '-' ? 'is-removed'
+                : '';
+            pre.createDiv({ cls, text: `${op === '-' ? '−' : op} ${line}` });
+        });
+    }
+
+    /**
+     * Two columns, the note now and the text from before, a run of
+     * changed lines paired row by row and the shorter side left blank.
+     */
+    drawSplit(box, rows) {
+        const pairs = [];
+        for (let i = 0; i < rows.length;) {
+            if (rows[i][0] === ' ') {
+                pairs.push([rows[i][1], rows[i][1], false]);
+                i++;
+                continue;
+            }
+            const gone = [];
+            const back = [];
+            for (; i < rows.length && rows[i][0] !== ' '; i++) {
+                (rows[i][0] === '-' ? gone : back).push(rows[i][1]);
+            }
+            for (let k = 0; k < Math.max(gone.length, back.length); k++) {
+                pairs.push([k < gone.length ? gone[k] : null,
+                            k < back.length ? back[k] : null, true]);
+            }
+        }
+        // Scrolled in a box, since a table takes no height limit.
+        const table = box.createDiv({ cls: 'dendrite-version-diff' })
+            .createEl('table', { cls: 'dendrite-version-split' });
+        const head = table.createEl('tr');
+        head.createEl('th', { text: 'The note now' });
+        head.createEl('th', { text: 'The text from before' });
+        const keep = VersionModal.shown(pairs.map((x) => x[2]));
+        let gap = false;
+        let shown = 0;
+        pairs.forEach(([left, right, changed], i) => {
+            if (!keep[i]) {
+                gap = true;
+                return;
+            }
+            if (shown >= MAX_DIFF_ROWS) return;
+            if (gap && shown) {
+                const tr = table.createEl('tr');
+                tr.createEl('td', { text: '⋯' });
+                tr.createEl('td', { text: '⋯' });
+            }
+            gap = false;
+            shown++;
+            const tr = table.createEl('tr');
+            const cell = (text, cls) => tr.createEl('td', {
+                cls: text === null ? 'is-blank' : (changed ? cls : ''),
+                text: text === null ? '' : text });
+            cell(left, 'is-removed');
+            cell(right, 'is-added');
+        });
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+// Unified until a viewer picks side by side.
+VersionModal.mode = 'unified';
 
 class CardModal extends Modal {
     constructor(view, id) {

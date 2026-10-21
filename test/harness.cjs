@@ -292,7 +292,17 @@ const obsidian = {
             this.containerEl = make('div');
         }
     },
-    Modal: class {},
+    Modal: class {
+        constructor(app) {
+            this.app = app;
+            this.titleEl = make('div');
+            this.contentEl = make('div');
+            this.modalEl = make('div');
+            obsidian.lastModal = this;
+        }
+        open() { return this.onOpen && this.onOpen(); }
+        close() { if (this.onClose) this.onClose(); }
+    },
     Menu: class {
         constructor() { this.titles = []; obsidian.lastMenu = this; }
         addItem(fn) {
