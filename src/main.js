@@ -4131,29 +4131,30 @@ class VersionModal extends Modal {
         } else {
             this.showDiff(now, before);
         }
-        const choice = (label, desc, cta, fn) => {
-            const row = contentEl.createDiv({ cls: 'dendrite-version-choice' });
-            const b = row.createEl('button', { text: label });
-            if (cta) b.addClass('mod-cta');
-            row.createDiv({ cls: 'dendrite-version-desc', text: desc });
+        // One button per side, in the columns' order and colour, neither
+        // offered as the default; deciding later below, uncoloured.
+        const choice = (into, label, desc, cls, fn) => {
+            const cell = into.createDiv({ cls: 'dendrite-version-choice' });
+            const b = cell.createEl('button', { cls, text: label });
+            cell.createDiv({ cls: 'dendrite-version-desc', text: desc });
             b.onclick = async () => {
                 this.close();
                 await fn();
             };
-            return b;
         };
-        if (before !== null) {
-            choice('Put back the text from before',
-                   'Writes the lines marked + over the note, and drops ' +
-                   'those marked −. Ctrl+Z on the board undoes it.',
-                   true, () => view.restoreNewer(id));
-        }
-        choice('Keep it as it is now',
+        const sides = contentEl.createDiv(
+            { cls: 'dendrite-version-choices' });
+        choice(sides, 'Keep the note now',
                'Clears this mark. Nothing is written.',
-               false, () => view.keepVersion(id));
-        choice('Decide later',
+               'is-now', () => view.keepVersion(id));
+        if (before !== null) {
+            choice(sides, 'Put back the text from before',
+                   'Writes it over the note. Ctrl+Z on the board undoes it.',
+                   'is-before', () => view.restoreNewer(id));
+        }
+        choice(contentEl, 'Decide later',
                'Closes this. The mark stays, and export waits.',
-               false, async () => {});
+               '', async () => {});
     }
 
     /**
@@ -4165,7 +4166,8 @@ class VersionModal extends Modal {
         const bar = this.contentEl.createDiv(
             { cls: 'dendrite-version-modes' });
         const box = this.contentEl.createDiv();
-        const modes = [['unified', 'Unified'], ['split', 'Side by side']];
+        const modes = [['unified', 'Unified', 'rows-2'],
+                       ['split', 'Side by side', 'columns-2']];
         const draw = () => {
             const split = VersionModal.mode === 'split';
             for (const b of bar.children) {
@@ -4182,8 +4184,11 @@ class VersionModal extends Modal {
                 this.drawUnified(box, rows);
             }
         };
-        for (const [mode, label] of modes) {
-            const b = bar.createEl('button', { text: label });
+        // Plain icons at the right, so they do not read as a choice.
+        for (const [mode, label, icon] of modes) {
+            const b = bar.createDiv({ cls: 'clickable-icon' });
+            b.setAttr('aria-label', label);
+            setIcon(b, icon);
             b.dataset.mode = mode;
             b.onclick = () => {
                 VersionModal.mode = mode;
@@ -4200,10 +4205,12 @@ class VersionModal extends Modal {
     }
 
     drawUnified(box, rows) {
-        box.createEl('p', { cls: 'dendrite-version-desc',
-            text: '− only in the note now · + only in the text from ' +
-                  'before' });
-        const pre = box.createEl('pre', { cls: 'dendrite-version-diff' });
+        const key = box.createEl('p', { cls: 'dendrite-version-desc' });
+        key.createSpan({ cls: 'is-removed', text: '− the note now' });
+        key.createSpan({ text: ' · ' });
+        key.createSpan({ cls: 'is-added', text: '+ the text from before' });
+        key.createSpan({ text: ', each line only in that one' });
+        const pre = box.createDiv({ cls: 'dendrite-version-diff' });
         const keep = VersionModal.shown(rows.map((r) => r[0] !== ' '));
         let gap = false;
         let shown = 0;
@@ -4218,7 +4225,10 @@ class VersionModal extends Modal {
             shown++;
             const cls = op === '+' ? 'is-added' : op === '-' ? 'is-removed'
                 : '';
-            pre.createDiv({ cls, text: `${op === '-' ? '−' : op} ${line}` });
+            const row = pre.createDiv({ cls });
+            row.createSpan({ cls: 'dendrite-version-op',
+                             text: op === '-' ? '−' : op });
+            row.createSpan({ text: line });
         });
     }
 
@@ -4248,8 +4258,9 @@ class VersionModal extends Modal {
         const table = box.createDiv({ cls: 'dendrite-version-diff' })
             .createEl('table', { cls: 'dendrite-version-split' });
         const head = table.createEl('tr');
-        head.createEl('th', { text: 'The note now' });
-        head.createEl('th', { text: 'The text from before' });
+        head.createEl('th', { cls: 'is-removed', text: 'The note now' });
+        head.createEl('th', { cls: 'is-added',
+                              text: 'The text from before' });
         const keep = VersionModal.shown(pairs.map((x) => x[2]));
         let gap = false;
         let shown = 0;

@@ -373,18 +373,19 @@ test('the older-copy mark opens a dialog that says what happened, shows ' +
     assert.match(text, /Nothing has been written/);
     const diff = [...m.contentEl.querySelectorAll(
         '.dendrite-version-diff > div')].map((d) => d.textContent);
-    assert.ok(diff.includes('+ - [[G-bbbbb|B]]'), 'the line coming back');
+    assert.ok(diff.includes('+- [[G-bbbbb|B]]'), 'the line coming back');
     const choices = (modal) => [...modal.contentEl.querySelectorAll(
         '.dendrite-version-choice button')];
     const buttons = choices(m).map((b) => b.textContent);
-    assert.deepEqual(buttons, ['Put back the text from before',
-                               'Keep it as it is now', 'Decide later']);
+    assert.deepEqual(buttons, ['Keep the note now',
+                               'Put back the text from before',
+                               'Decide later'], 'in the columns\' order');
     assert.deepEqual(a.writes, [], 'opening wrote nothing');
     // Side by side: the note now on the left, the text from before on
     // the right, the line coming back beside a blank.
     const modes = [...m.contentEl.querySelectorAll(
-        '.dendrite-version-modes button')];
-    assert.deepEqual(modes.map((b) => b.textContent),
+        '.dendrite-version-modes .clickable-icon')];
+    assert.deepEqual(modes.map((b) => b.getAttribute('aria-label')),
                      ['Unified', 'Side by side']);
     modes[1].onclick();
     assert.ok(m.modalEl.classList.contains('dendrite-wide'));
@@ -401,7 +402,7 @@ test('the older-copy mark opens a dialog that says what happened, shows ' +
     // Put back: the index as it was, undoable.
     chip.onclick();
     await tick(20);
-    await choices(h.obsidian.lastModal)[0].onclick();
+    await choices(h.obsidian.lastModal)[1].onclick();
     await tick(400);
     assert.equal(a.read(INDEX), full);
     assert.ok(!a.view.reverted.has('index'));
