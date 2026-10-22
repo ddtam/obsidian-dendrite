@@ -386,4 +386,6 @@ test('a table\'s and a figure\'s captions become Pandoc\'s own, so ' +
     assert.match(pre, /\\usepackage\{caption\}/);
     assert.match(pre, /labelformat=empty/);
     assert.match(pre, /\\setlength\{\\LTcapwidth\}\{\\textwidth\}/);
+    // Pandoc loads longtable only for a document with a table.
+    assert.match(pre, /\\ifdefined\\LTcapwidth\\setlength\{\\LTcapwidth\}/);
 });

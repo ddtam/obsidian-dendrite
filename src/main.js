@@ -702,9 +702,12 @@ class DendriteView extends ItemView {
         if (this.resizeFrame) return;
         this.resizeFrame = this.pageWin().requestAnimationFrame(() => {
             this.resizeFrame = null;
-            // On the desktop, centring redraws the flow itself.
-            this.centre(false);
-            if (this.nativeScroll) this.drawFlow();
+            // Cards are drawn as a scrolled column brings them into view,
+            // and change height as they are, so after a scroll by hand a
+            // resize only redraws the flow. On the desktop, centring
+            // redraws the flow itself.
+            if (!this.scrolledByHand) this.centre(false);
+            if (this.nativeScroll || this.scrolledByHand) this.drawFlow();
         });
     }
 

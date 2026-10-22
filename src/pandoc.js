@@ -200,11 +200,13 @@ function preamble(st) {
     }
     // Dendrite numbers tables and figures in their captions' text, so
     // LaTeX adds no label; a table's caption spans the text as a
-    // figure's does.
+    // figure's does. Pandoc loads longtable, which defines the table's
+    // caption width, only for a document with a table.
     out.push('\\usepackage{caption}',
              '\\captionsetup{labelformat=empty,labelsep=none,' +
              'justification=raggedright,singlelinecheck=false}',
-             '\\setlength{\\LTcapwidth}{\\textwidth}');
+             '\\ifdefined\\LTcapwidth' +
+             '\\setlength{\\LTcapwidth}{\\textwidth}\\fi');
     return out.join('\n') + '\n';
 }
 

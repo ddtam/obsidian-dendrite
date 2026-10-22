@@ -134,6 +134,10 @@ test('a card drawn while a column is scrolled by hand does not pull the ' +
                    preventDefault() {} });
     await redraw('G-bbbbb');
     assert.equal(centred, 1, 'not pulled back');
+    // A card changing height as it is drawn moves nothing either.
+    view.resizer.cb([]);
+    await tick(5);
+    assert.equal(centred, 1, 'a resize does not pull it back');
     // Moving to a card centres again, and redraws follow it again.
     view.applyActive(false);
     await redraw('G-bbbbb');

@@ -37,7 +37,7 @@ A **section card** starts with a heading line, `# Research Outline`. The `#` mar
 
 Cards are edited in Obsidian's own editor, so live preview, `[[` link suggestions, citation suggestions from other plugins, and Obsidian's editor commands and hotkeys all work inside a card. Escape leaves the card, after closing any open suggestion list first.
 
-As you type, the line with the cursor moves to the middle of the column, typewriter style. Only typing moves it: clicking or selecting in the card leaves the column where it is. With **Typewriter scrolling** off, typing moves the column only enough to keep the cursor in view. A card taller than the column shows its top when you move to it.
+As you type, the line with the cursor moves to the middle of the column, typewriter style. Only typing moves it: clicking or selecting in the card leaves the column where it is. With **Typewriter scrolling** off, typing moves the column only enough to keep the cursor in view. A card taller than the column shows its top when you move to it. A column you scroll yourself stays where you put it, even as the cards coming into view are drawn, until you move to another card or type.
 
 Obsidian has no public API for putting its editor inside another view, so Dendrite reaches it the way several plugins do, through the editor of an embedded note. If that fails, as an Obsidian update could make it, or if **Use Obsidian's editor in cards** is off, cards use a plain text box instead, which saves the same way. In the text box:
 
