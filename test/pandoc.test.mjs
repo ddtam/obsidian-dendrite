@@ -335,3 +335,36 @@ test('running headers and footers print on every page in the body\'s ' +
     assert.deepEqual(es.footer, { right: '{page}' });
     assert.equal(exportStyle({}).header, null);
 });
+
+test('Pandoc missing from the search path is said plainly', async () => {
+    const deps = fakeDeps(null);
+    deps.run = async () => {
+        throw Object.assign(new Error('spawn pandoc ENOENT'),
+                            { code: 'ENOENT' });
+    };
+    const r = await p.exportDocument({ md: 'Plain.', format: 'docx',
+                                       output: '/o.docx',
+                                       pandoc: 'pandoc' }, deps);
+    assert.match(r.error, /Pandoc was not found \(looked for "pandoc"\)/);
+    assert.match(r.error, /full path/);
+});
+
+test('the search path keeps the platform\'s separator and its own ' +
+     'variable name', () => {
+    const win = p.searchPath({ Path: 'C:\\Windows', HOME: 'x' }, 'win32',
+                             ['C:\\Pandoc']);
+    assert.equal(win.Path, 'C:\\Windows;C:\\Pandoc');
+    assert.ok(!('PATH' in win), 'no second PATH beside Path');
+    const mac = p.searchPath({ PATH: '/usr/bin' }, 'darwin',
+                             ['/opt/homebrew/bin', '/usr/bin']);
+    assert.equal(mac.PATH, '/usr/bin:/opt/homebrew/bin');
+    assert.equal(p.searchPath({}, 'linux', ['/a']).PATH, '/a');
+});
+
+test('conda installs in the home folder are searched', () => {
+    const names = ['anaconda3-linux', 'miniconda3', 'miniforge3',
+                   'mambaforge', 'projects', 'condarc'];
+    assert.deepEqual(p.condaBins(names, '/home/u'),
+                     ['/home/u/anaconda3-linux/bin', '/home/u/miniconda3/bin',
+                      '/home/u/miniforge3/bin', '/home/u/mambaforge/bin']);
+});

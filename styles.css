@@ -763,6 +763,24 @@
     margin: 4px 0;
 }
 
+/* Obsidian colours table cells itself, and in a popout's quirks mode a
+   table does not inherit font style, so left-out tables take both from
+   their box: through the variables a theme's own table rules read, and
+   directly for a theme that sets a colour outright. */
+.dendrite-left-out {
+    --table-text-color: var(--text-faint);
+    --table-header-color: var(--text-faint);
+}
+.dendrite-card.is-left-out .dendrite-card-body {
+    --table-text-color: var(--text-muted);
+    --table-header-color: var(--text-muted);
+}
+.dendrite-preview .dendrite-left-out :is(table, th, td),
+.dendrite-card.is-left-out .dendrite-card-body :is(table, th, td) {
+    color: inherit;
+    font-style: inherit;
+}
+
 /* Card status: a chip in the footer. Only flags (revise, unsplit) are
    coloured by default; done is quiet; draft shows nothing. A colour set
    for the value in Pretty Properties arrives as --dendrite-chip. */

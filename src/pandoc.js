@@ -334,9 +334,7 @@ async function exportDocument(o, deps) {
     try {
         await deps.run(o.pandoc || 'pandoc', args);
     } catch (err) {
-        const msg = String((err && (err.stderr || err.message)) || err)
-            .trim().split('\n').slice(-6).join('\n');
-        return { error: `Pandoc failed: ${msg}` };
+        return { error: pandocError(err, o.pandoc || 'pandoc') };
     } finally {
         deps.remove(input);
         if (header) deps.remove(header);
@@ -369,6 +367,50 @@ function measuredRate(words, layout, cited) {
     return Math.round(words / (end - 0.5));
 }
 
-module.exports = { citekeys, toPandoc, fetchBib, pandocArgs, exportDocument,
-                   pdfPages, measuredRate, footnoteGap, preamble,
-                   BODY_END };
+/**
+ * What went wrong running Pandoc, for a notice: the program not found
+ * said as such, since the system's ENOENT names no remedy; otherwise the
+ * end of what Pandoc printed.
+ */
+function pandocError(err, cmd) {
+    if (err && err.code === 'ENOENT') {
+        return `Pandoc was not found (looked for "${cmd}"). Install it, ` +
+            'or set its full path under Pandoc in Dendrite\'s settings: ' +
+            '"which pandoc" in a terminal prints it, "where pandoc" on ' +
+            'Windows.';
+    }
+    const msg = String((err && (err.stderr || err.message)) || err)
+        .trim().split('\n').slice(-6).join('\n');
+    return `Pandoc failed: ${msg}`;
+}
+
+/**
+ * The environment Pandoc runs with: `env` with `extra` folders added to
+ * its search path, in the variable's own spelling (Path on Windows) and
+ * with the platform's separator.
+ */
+function searchPath(env, platform, extra) {
+    const out = Object.assign({}, env);
+    const key = Object.keys(out).find((k) => k.toUpperCase() === 'PATH') ||
+        'PATH';
+    const sep = platform === 'win32' ? ';' : ':';
+    const parts = String(out[key] || '').split(sep).filter(Boolean);
+    for (const d of extra) if (!parts.includes(d)) parts.push(d);
+    out[key] = parts.join(sep);
+    return out;
+}
+
+/**
+ * The bin folders of conda installs among a home folder's entries
+ * `names`, where Pandoc is often installed and a desktop app does not
+ * look.
+ */
+function condaBins(names, home) {
+    return names.filter((n) =>
+        /^(ana|mini)conda\d*(-|$)|^(miniforge|mambaforge)\d*(-|$)/.test(n))
+        .map((n) => `${home}/${n}/bin`);
+}
+
+module.exports = { citekeys, pandocError, searchPath, condaBins, toPandoc,
+                   fetchBib, pandocArgs, exportDocument, pdfPages,
+                   measuredRate, footnoteGap, preamble, BODY_END };

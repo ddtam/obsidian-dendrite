@@ -3675,8 +3675,9 @@ class DendriteView extends ItemView {
                 ['-o', nodePath.join(base, rel),
                  '--print-default-data-file', 'reference.docx']);
         } catch (err) {
-            new Notice('Dendrite: Pandoc could not write ' +
-                       `reference.docx: ${err.message || err}`);
+            new Notice('Dendrite: could not write reference.docx. ' +
+                pandoc.pandocError(err,
+                    this.plugin.settings.pandocPath || 'pandoc'));
             return null;
         }
         new Notice(`Dendrite: wrote ${rel}. Open it in Word, set the ` +
@@ -5140,14 +5141,28 @@ module.exports = class DendritePlugin extends Plugin {
     }
 
     /**
-     * The search path Pandoc runs with: Obsidian's own plus TeX Live's
-     * usual install folders, since an app started from the desktop does
-     * not read the shell profile that adds them.
+     * The search path Pandoc runs with: Obsidian's own plus the usual
+     * install folders for Pandoc and TeX, since an app started from the
+     * desktop does not read the shell profile that adds them.
      */
     pandocEnv() {
         const fs = require('fs');
         const path = require('path');
+        const os = require('os');
+        const proc = globalThis.process;
         const extra = [];
+        if (proc.platform === 'win32') {
+            const local = proc.env.LOCALAPPDATA;
+            const prog = proc.env.ProgramFiles || 'C:\\Program Files';
+            if (local) {
+                extra.push(path.join(local, 'Pandoc'),
+                           path.join(local, 'Programs', 'MiKTeX', 'miktex',
+                                     'bin', 'x64'));
+            }
+            extra.push(path.join(prog, 'Pandoc'),
+                       path.join(prog, 'MiKTeX', 'miktex', 'bin', 'x64'));
+            return pandoc.searchPath(proc.env, proc.platform, extra);
+        }
         for (const root of ['/usr/local/texlive', '/opt/texlive']) {
             let years = [];
             try {
@@ -5163,10 +5178,12 @@ module.exports = class DendritePlugin extends Plugin {
             }
         }
         extra.push('/Library/TeX/texbin', '/usr/local/bin',
-                   '/opt/homebrew/bin');
-        const vars = Object.assign({}, globalThis.process.env);
-        vars.PATH = [vars.PATH || '', ...extra].filter(Boolean).join(':');
-        return vars;
+                   '/opt/homebrew/bin', '/usr/bin',
+                   path.join(os.homedir(), '.local', 'bin'));
+        let names = [];
+        try { names = fs.readdirSync(os.homedir()).sort(); } catch (e) { }
+        extra.push(...pandoc.condaBins(names, os.homedir()));
+        return pandoc.searchPath(proc.env, proc.platform, extra);
     }
 
     /**
