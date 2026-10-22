@@ -1766,7 +1766,8 @@ test('number keys set a card\'s role, and the menus show each key',
     const keys = h.obsidian.lastMenu.items.map((i) => [i.title,
         i.titleContent && i.titleContent.querySelector('[data-key]')
             .dataset.key]);
-    assert.deepEqual(keys.map((k) => k[1]), ['0', '1', '2', '3', '4']);
+    assert.deepEqual(keys.slice(0, 5).map((k) => k[1]),
+                     ['0', '1', '2', '3', '4']);
     assert.equal(keys[3][0], 'Scaffolding: prints its children only',
                  'the title reads without its key');
 });
@@ -2039,4 +2040,52 @@ test('Escape closes find from its box or from the board', async () => {
         bubbles: true, cancelable: true });
     view.contentEl.dispatchEvent(ev);
     assert.ok(ev.defaultPrevented, 'nor from the board');
+});
+
+test('a card set to table prints numbered, a link to it prints its ' +
+     'number, and the menu copies a reference', async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Aims]]\n' +
+        '    - [[G-bbbbb|p]]\n    - [[G-ttttt|Budget]]\n',
+        { 'G-aaaaa': '# Aims', 'G-bbbbb': 'See [[G-ttttt]].',
+          'G-ttttt': '# Budget\n\n| Y | C |\n| - | - |\n| 1 | 2 |' });
+    view.active = 'G-ttttt';
+    view.applyActive();
+    view.cardMenu(view.cardEls.get('G-ttttt'));
+    const menu = h.obsidian.lastMenu;
+    const t = menu.titles;
+    const text = t.indexOf('Text');
+    assert.ok(text > 0, 'the kinds are offered');
+    assert.deepEqual(t.slice(text, text + 3), ['Text',
+        'Table: numbered, caption above', 'Figure: numbered, caption below']);
+    assert.equal(t[text - 1], '---', 'apart from the roles');
+    await menu.items.find((i) => /^Table:/.test(i.title)).click();
+    await tick(20);
+    assert.match(read(cardPath('G-ttttt')), /dendrite_kind: table/);
+    const grip = view.cardEls.get('G-ttttt')
+        .querySelector(':scope > .dendrite-grip');
+    assert.equal(grip.dataset.role, 'table', 'the corner shows a table');
+    await view.exportTo(null);
+    assert.equal(read('W/Grant/exports/Grant.md'),
+                 '# Aims\n\nSee [[G-ttttt|Table 1]].\n\n' +
+                 '**Table 1.** Budget\n\n' +
+                 '| Y | C |\n| - | - |\n| 1 | 2 |\n');
+    // Copy reference: the full link, to paste where it is cited.
+    const nav = view.pageWin().navigator;
+    const copied = [];
+    Object.defineProperty(nav, 'clipboard', { configurable: true,
+        value: { writeText: async (x) => { copied.push(x); } } });
+    view.cardMenu(view.cardEls.get('G-ttttt'));
+    await h.obsidian.lastMenu.items.find((i) =>
+        i.title === 'Copy reference').click();
+    await tick(10);
+    assert.deepEqual(copied, ['[[G-ttttt]]']);
+    delete nav.clipboard;
+    // Back to text: no number, and the link prints as before.
+    view.cardMenu(view.cardEls.get('G-ttttt'));
+    await h.obsidian.lastMenu.items.find((i) => i.title === 'Text').click();
+    await tick(20);
+    assert.doesNotMatch(read(cardPath('G-ttttt')), /dendrite_kind/);
+    await view.exportTo(null);
+    assert.match(read('W/Grant/exports/Grant.md'), /See \[\[G-ttttt\]\]\./);
 });

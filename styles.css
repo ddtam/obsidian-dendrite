@@ -263,6 +263,21 @@
     overflow-wrap: anywhere;
 }
 
+/* In a table, breaking anywhere lets a column shrink to one letter, so
+   cells break only a word too long for their column; a table wider than
+   its card scrolls inside it. */
+:is(.dendrite-md, .dendrite-cm, .dendrite-preview-doc) :is(th, td) {
+    overflow-wrap: break-word;
+}
+.dendrite-card-body :is(.table-wrapper, .cm-table-widget) {
+    overflow-x: auto;
+}
+.dendrite-md table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+}
+
 /* A footnote marker is raised without opening its line further apart
    than the others. */
 .dendrite-md sup, .dendrite-cm sup, .dendrite-preview-doc sup {

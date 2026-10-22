@@ -54,6 +54,23 @@ function toPandoc(md, resolve) {
 }
 
 /**
+ * Table and figure captions as Pandoc's own, so each is kept with its
+ * table or figure: a `**Table 1.**` paragraph just before a table is
+ * marked `Table:`, and a `**Figure 1.**` paragraph just after an image
+ * on a line of its own becomes the image's caption.
+ */
+function pandocCaptions(md) {
+    return md
+        .replace(/^(\*\*Table \d+\.\*\*.*)\n\n(?=\s*\|)/gm,
+                 'Table: $1\n\n')
+        .replace(new RegExp('^!\\[\\]\\(([^)\\n]*)\\)(\\{[^}\\n]*\\})?' +
+                            '\\n\\n(\\*\\*Figure \\d+\\.\\*\\*.*)$', 'gm'),
+                 (all, src, attrs, cap) =>
+                     `![${cap.replace(/[[\]]/g, '\\$&')}](${src})` +
+                     (attrs || ''));
+}
+
+/**
  * Fetch the keys' items from Better BibTeX as CSL JSON. Returns { bib },
  * the JSON text of one array, or { missing } naming keys the library
  * does not hold, or { down } when Zotero does not answer.
@@ -181,6 +198,13 @@ function preamble(st) {
         out.push('\\usepackage{fancyhdr}', '\\pagestyle{fancy}', ...style,
                  '\\fancypagestyle{plain}{' + style.join('') + '}');
     }
+    // Dendrite numbers tables and figures in their captions' text, so
+    // LaTeX adds no label; a table's caption spans the text as a
+    // figure's does.
+    out.push('\\usepackage{caption}',
+             '\\captionsetup{labelformat=empty,labelsep=none,' +
+             'justification=raggedright,singlelinecheck=false}',
+             '\\setlength{\\LTcapwidth}{\\textwidth}');
     return out.join('\n') + '\n';
 }
 
@@ -295,7 +319,7 @@ function pdfPages(buf, inflate) {
  * PDF, also `layout`: { pages, bodyEnd } as pdfPages reads them, or null.
  */
 async function exportDocument(o, deps) {
-    let text = toPandoc(o.md, o.resolve || (() => null));
+    let text = pandocCaptions(toPandoc(o.md, o.resolve || (() => null)));
     const keys = citekeys(text);
     const dir = deps.tmpdir();
     const input = deps.join(dir, `dendrite-${Date.now()}.md`);
@@ -358,13 +382,15 @@ async function exportDocument(o, deps) {
  * the pages up to the body's end, the last counted as half full since
  * where it ends on that page is not known. Null when the body is too
  * short to measure or its end was not found and a reference list may
- * follow it.
+ * follow it. `floatPages`, the pages estimated for tables and figures,
+ * are not text and are taken off.
  */
-function measuredRate(words, layout, cited) {
+function measuredRate(words, layout, cited, floatPages = 0) {
     if (!layout || !words) return null;
     const end = layout.bodyEnd || (cited ? null : layout.pages);
     if (!end || end < 2) return null;
-    return Math.round(words / (end - 0.5));
+    const text = end - 0.5 - floatPages;
+    return text >= 1 ? Math.round(words / text) : null;
 }
 
 /**
@@ -411,6 +437,7 @@ function condaBins(names, home) {
         .map((n) => `${home}/${n}/bin`);
 }
 
-module.exports = { citekeys, pandocError, searchPath, condaBins, toPandoc,
+module.exports = { citekeys, pandocCaptions, pandocError, searchPath,
+                   condaBins, toPandoc,
                    fetchBib, pandocArgs, exportDocument, pdfPages,
                    measuredRate, footnoteGap, preamble, BODY_END };

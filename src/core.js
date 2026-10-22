@@ -424,13 +424,97 @@ function roleFor(node, roleOf) {
 }
 
 /**
+ * What a card is, apart from whether it prints: its `dendrite_kind`, a
+ * table or a figure, or null for text. A table or figure that prints is
+ * numbered in its own sequence and prints its caption with its number.
+ */
+const KINDS = ['table', 'figure'];
+
+/**
+ * `roleOf` with kinds applied: a table or figure prints its full text,
+ * with cards below or set to heading only, since its heading alone is
+ * not the table; left out or scaffolding, it prints nothing.
+ */
+function withKinds(roleOf, kindOf) {
+    return (id) => {
+        const role = roleOf(id);
+        if (!KINDS.includes(kindOf(id))) return role;
+        return role === 'notes' || role === 'scaffolding' ? role : 'prose';
+    };
+}
+
+/**
+ * Each printing table and figure, in reading order, as `Table 1`,
+ * `Figure 1` and so on, each kind counted apart: id -> label. A card in
+ * a left-out branch, or itself left out or scaffolding, takes none.
+ */
+function floatLabels(nodes, roleOf, kindOf) {
+    const out = new Map();
+    const next = { table: 0, figure: 0 };
+    const walk = (node) => {
+        const role = roleFor(node, roleOf);
+        if (role === 'notes') return;
+        const kind = kindOf ? kindOf(node.id) : null;
+        if (role !== 'scaffolding' && KINDS.includes(kind)) {
+            next[kind] += 1;
+            out.set(node.id, (kind === 'table' ? 'Table ' : 'Figure ') +
+                    next[kind]);
+        }
+        for (const c of node.children) walk(c);
+    };
+    for (const n of nodes) walk(n);
+    return out;
+}
+
+// A markdown table's line, and an image embed on a line of its own.
+const TABLE_LINE = /^\s*\|/;
+const IMAGE_LINE = /^\s*!\[(\[[^\]]*\]|[^\]]*\]\([^)]*\))\]?\s*$/;
+
+/**
+ * A table or figure card's printed text: its table or images, and the
+ * rest of its text as the caption, numbered: above a table, below a
+ * figure. A heading line in the caption is taken as its words.
+ */
+function floatText(body, kind, label) {
+    const lines = body.split('\n');
+    const isBody = (l) => kind === 'table' ? TABLE_LINE.test(l) :
+        IMAGE_LINE.test(l);
+    const content = lines.filter(isBody).join('\n');
+    const caption = lines.filter((l) => !isBody(l))
+        .map((l) => l.trim().replace(/^#{1,6}\s+/, '')).filter(Boolean)
+        .join(' ');
+    const head = `**${label}.**` + (caption ? ' ' + caption : '');
+    const parts = kind === 'table' ? [head, content] : [content, head];
+    return parts.filter(Boolean).join('\n\n');
+}
+
+/**
+ * Links to table and figure cards given their number as the link's
+ * text, `[[id|Table 1]]`; a link with its own text keeps it. A card's
+ * short id alone, `[[14px4]]`, is taken as its full name.
+ */
+function floatRefs(text, floats) {
+    if (!floats.size || !text) return text;
+    const byShort = new Map();
+    for (const id of floats.keys()) byShort.set(shortId(id), id);
+    return text.replace(/\[\[([^\]|#]+)\]\]/g, (all, name) => {
+        const n = name.trim();
+        const id = floats.has(n) ? n : byShort.get(n);
+        return id ? `[[${id}|${floats.get(id)}]]` : all;
+    });
+}
+
+/**
  * The manuscript as one segment per card, in reading order:
  * { id, depth, text, left }, where `text` is the markdown the card prints
  * and `left` the part of its text that does not print (its notes and
  * comments), for a preview that can show both. Headings are levelled by
  * depth below `headingTop` and numbered from `numbers` when given.
  */
-function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf) {
+function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf,
+                        opts = {}) {
+    const kindOf = opts.kindOf || (() => null);
+    const floats = opts.floats || floatLabels(nodes, roleOf, kindOf);
     const top = Math.max(1, Math.min(6, headingTop || 1));
     const segs = [];
     const heading = (id, text, depth) => '#'.repeat(Math.min(6, top + depth)) +
@@ -457,6 +541,13 @@ function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf) {
             return;
         }
         const body = stripComments(raw).trim();
+        if (floats.has(node.id)) {
+            segs.push({ id: node.id, depth, left: comments(raw),
+                        text: floatText(body, kindOf(node.id),
+                                        floats.get(node.id)) });
+            for (const c of node.children) walk(c, depth + 1);
+            return;
+        }
         const lines = body ? body.split('\n') : [];
         const h = lines.length ? HEADING.exec(lines[0].trim()) : null;
         const rest = (h ? lines.slice(1) : lines).join('\n').trim();
@@ -472,6 +563,10 @@ function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf) {
         for (const c of node.children) walk(c, depth + 1);
     };
     for (const n of nodes) walk(n, 0);
+    for (const s of segs) {
+        s.text = floatRefs(s.text, floats);
+        s.left = floatRefs(s.left, floats);
+    }
     return segs;
 }
 
@@ -718,9 +813,10 @@ function normaliseMarkdown(text) {
  * the roles above. Comments are dropped everywhere. `bodyOf(id)` returns a
  * card's body.
  */
-function exportMarkdown(nodes, bodyOf, headingTop, numbers, roleOf) {
+function exportMarkdown(nodes, bodyOf, headingTop, numbers, roleOf,
+                        opts = {}) {
     const { segments, notes } = renumberFootnotes(
-        exportSegments(nodes, bodyOf, headingTop, numbers, roleOf));
+        exportSegments(nodes, bodyOf, headingTop, numbers, roleOf, opts));
     const blocks = segments.map((s) => s.text).filter(Boolean);
     if (notes.length) blocks.push(footnoteBlock(notes));
     return normaliseMarkdown(blocks.join('\n\n'));
@@ -736,14 +832,15 @@ function exportMarkdown(nodes, bodyOf, headingTop, numbers, roleOf) {
  * the next number at its level rather than starting again at 1.
  * Returns id -> `1.`, `1.2` and so on.
  */
-function sectionNumbers(roots, hasHeading, roleOf) {
+function sectionNumbers(roots, hasHeading, roleOf, kindOf) {
     const out = new Map();
+    const isFloat = (id) => !!kindOf && KINDS.includes(kindOf(id));
     // A card left out of the manuscript takes no number, and neither
     // does anything in its branch.
     const spliced = (nodes) => nodes.flatMap((n) => {
         const role = roleFor(n, roleOf);
         if (role === 'notes') return [];
-        if (role === 'scaffolding' || !hasHeading(n.id)) {
+        if (role === 'scaffolding' || !hasHeading(n.id) || isFloat(n.id)) {
             return spliced(n.children);
         }
         return [n];
@@ -1165,6 +1262,7 @@ function wordsPerPage(fm) {
  */
 function countText(markdown, countSpaces) {
     const plain = stripComments(markdown)
+        .replace(/^\s*\|.*$/gm, ' ')
         .replace(/!\[\[[^\]]*\]\]/g, ' ')
         .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
         .replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, '$2')
@@ -1181,11 +1279,58 @@ function countText(markdown, countSpaces) {
     return { words, chars };
 }
 
-/** A count in a limit's unit; pages are words over a words-per-page. */
+/**
+ * A count in a limit's unit; pages are words over a words-per-page, plus
+ * the pages its tables and figures take, if counted.
+ */
 function measure(count, unit, wordsPerPage) {
     if (unit === 'words') return count.words;
     if (unit === 'characters') return count.chars;
-    return count.words / (wordsPerPage || 500);
+    return count.words / (wordsPerPage || 500) + (count.pages || 0);
+}
+
+// Lines of body text on a page, for a table's height: 11 to 12 point,
+// single spaced, on Letter with inch margins. An estimate.
+const LINES_PER_PAGE = 46;
+// A figure's share of a page when its card does not say.
+const FIGURE_PAGE = 1 / 3;
+
+/**
+ * What export would write for `nodes`, counted: { words, chars, pages },
+ * where words and characters leave out tables and images and `pages` is
+ * what they take. A card's `heightOf(id)`, a fraction of a page, is its
+ * table or figure's height; else a table takes its lines plus two, and
+ * an image a third of a page. Estimates, as all page counts here are.
+ */
+function countManuscript(nodes, bodyOf, roleOf, countSpaces, opts = {}) {
+    const segs = exportSegments(nodes, bodyOf, 1, null, roleOf, opts);
+    const { segments, notes } = renumberFootnotes(segs);
+    const blocks = segments.map((x) => x.text).filter(Boolean);
+    if (notes.length) blocks.push(footnoteBlock(notes));
+    const n = countText(normaliseMarkdown(blocks.join('\n\n')),
+                        countSpaces);
+    const heightOf = opts.heightOf || (() => null);
+    let pages = 0;
+    for (const sg of segs) {
+        if (!sg.text) continue;
+        const set = Number(heightOf(sg.id));
+        if (set > 0) {
+            pages += set;
+            continue;
+        }
+        const lines = sg.text.split('\n');
+        let run = 0;
+        for (const l of [...lines, '']) {
+            if (TABLE_LINE.test(l)) {
+                run += 1;
+            } else if (run) {
+                pages += (run + 2) / LINES_PER_PAGE;
+                run = 0;
+            }
+            if (IMAGE_LINE.test(l)) pages += FIGURE_PAGE;
+        }
+    }
+    return { words: n.words, chars: n.chars, pages };
 }
 
 // ---- find ------------------------------------------------------------------
@@ -1290,7 +1435,8 @@ module.exports = {
     alignColumns, tallTop, caretOffset, parseAmount, convert, quotas, fmtNum,
     splitText, mergeText,
     mergeIntoAbove, mergeIntoParent, moveNode,
-    flowPath, threadPath, exportSegments, roleFor, ROLES,
+    flowPath, threadPath, exportSegments, roleFor, ROLES, KINDS,
+    withKinds, floatLabels, countManuscript,
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,
     inlineToReferences, gatherFootnotes,

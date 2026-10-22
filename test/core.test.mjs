@@ -743,3 +743,110 @@ test('charDiff marks the words and spaces only in one line', () => {
                      [[['same', false]], [['same', false]]]);
     assert.deepEqual(c.charDiff('', 'new'), [[], [['new', true]]]);
 });
+
+// ---- tables and figures ----------------------------------------------------
+
+const FLOATS = c.parseIndex([
+    '- [[G-aaaaa|Aims]]',
+    '\t- [[G-bbbbb|Text]]',
+    '\t- [[G-ttttt|Budget]]',
+    '\t\t- [[G-ccccc|Under the table]]',
+    '\t- [[G-fffff|Design]]',
+    '\t- [[G-sssss|Planning table]]',
+    '- [[G-nnnnn|Notes]]',
+    '\t- [[G-xxxxx|Hidden]]',
+    '- [[G-uuuuu|Second]]',
+].join('\n') + '\n').root;
+const FLOAT_KINDS = { 'G-ttttt': 'table', 'G-fffff': 'figure',
+                      'G-xxxxx': 'table', 'G-uuuuu': 'table',
+                      'G-sssss': 'table' };
+const FLOAT_ROLES = { 'G-nnnnn': 'notes', 'G-sssss': 'scaffolding',
+                      'G-uuuuu': 'section' };
+const floatKind = (id) => FLOAT_KINDS[id] || null;
+const floatRole = c.withKinds((id) => FLOAT_ROLES[id] || null, floatKind);
+const FLOAT_BODIES = {
+    'G-aaaaa': '# Aims',
+    'G-bbbbb': 'As [[G-ttttt]] shows, and [[fffff]] draws, with ' +
+        '[[G-uuuuu|the second table]]. %%a comment%%',
+    'G-ttttt': '# Budget by year\n\n| Year | Cost |\n| --- | --- |\n' +
+        '| 1 | 10 |\n| 2 | 20 |\n\nCosts in $k.',
+    'G-ccccc': 'After the table.',
+    'G-fffff': '![[design.png]]\n\nStudy design.',
+    'G-sssss': '| plan |\n| - |\n| x |',
+    'G-xxxxx': '| a |\n| - |\n| 1 |',
+    'G-uuuuu': '| b |\n| - |\n| 2 |',
+};
+const floatBody = (id) => FLOAT_BODIES[id] || '';
+const floatOpts = { kindOf: floatKind };
+
+test('a table or figure prints its full text, with cards below or set ' +
+     'to heading only; left out or scaffolding, it prints nothing', () => {
+    const node = (id) => c.allNodes(FLOATS).find((n) => n.id === id);
+    assert.equal(c.roleFor(node('G-ttttt'), floatRole), 'prose');
+    assert.equal(c.roleFor(node('G-uuuuu'), floatRole), 'prose');
+    assert.equal(c.roleFor(node('G-sssss'), floatRole), 'scaffolding');
+    assert.equal(c.roleFor(node('G-xxxxx'), floatRole), 'prose',
+                 'its own role; the left-out branch decides');
+});
+
+test('tables and figures are numbered in reading order, apart; one that ' +
+     'does not print takes no number', () => {
+    const f = c.floatLabels(FLOATS.children, floatRole, floatKind);
+    assert.deepEqual([...f], [['G-ttttt', 'Table 1'],
+                              ['G-fffff', 'Figure 1'],
+                              ['G-uuuuu', 'Table 2']]);
+});
+
+test('a table prints its caption above, numbered; a figure below', () => {
+    const segs = c.exportSegments(FLOATS.children, floatBody, 1, null,
+                                  floatRole, floatOpts);
+    const text = (id) => segs.find((s) => s.id === id).text;
+    assert.equal(text('G-ttttt'), '**Table 1.** Budget by year Costs ' +
+        'in $k.\n\n| Year | Cost |\n| --- | --- |\n| 1 | 10 |\n| 2 | 20 |');
+    assert.equal(text('G-ccccc'), 'After the table.');
+    assert.equal(text('G-fffff'),
+                 '![[design.png]]\n\n**Figure 1.** Study design.');
+    assert.equal(text('G-uuuuu'), '**Table 2.**\n\n| b |\n| - |\n| 2 |');
+    assert.equal(text('G-sssss'), '');
+});
+
+test('a link to a table or figure card prints its number; an alias ' +
+     'prints as written', () => {
+    const segs = c.exportSegments(FLOATS.children, floatBody, 1, null,
+                                  floatRole, floatOpts);
+    assert.equal(segs.find((s) => s.id === 'G-bbbbb').text,
+                 'As [[G-ttttt|Table 1]] shows, and [[G-fffff|Figure 1]] ' +
+                 'draws, with [[G-uuuuu|the second table]].');
+    // Numbers come from the whole manuscript when a branch is exported.
+    const floats = c.floatLabels(FLOATS.children, floatRole, floatKind);
+    const part = c.exportSegments([FLOATS.children[2]], floatBody, 1, null,
+                                  floatRole, { kindOf: floatKind, floats });
+    assert.match(part[0].text, /^\*\*Table 2\.\*\*/);
+});
+
+test('a table or figure card takes no section number and has a status ' +
+     'as prose does', () => {
+    const nums = c.sectionNumbers(FLOATS.children, (id) =>
+        /^#/.test(floatBody(id)), floatRole, floatKind);
+    assert.ok(!nums.has('G-ttttt'));
+    const r = c.statusReport({ children: FLOATS.children }, () => null,
+                             floatRole);
+    assert.equal(r.cards.get('G-ttttt').own, 'draft');
+    assert.equal(r.cards.get('G-fffff').own, 'draft');
+});
+
+test('table rows count toward pages, not words; a figure is a third of ' +
+     'a page unless its height says otherwise', () => {
+    assert.deepEqual(c.countText('Two words.\n\n| a | b |\n| - | - |\n' +
+                                 '| c | d |'),
+                     { words: 2, chars: 9 });
+    const heights = { 'G-uuuuu': 0.5 };
+    const n = c.countManuscript(FLOATS.children, floatBody, floatRole,
+                                false, { kindOf: floatKind,
+                                         heightOf: (id) => heights[id] });
+    // Table 1: 4 rows plus 2 lines of caption and spacing, at 46 lines a
+    // page; the figure a third; Table 2 half a page, as set.
+    assert.ok(Math.abs(n.pages - (6 / 46 + 1 / 3 + 0.5)) < 1e-9);
+    assert.equal(c.measure(n, 'pages', 500), n.words / 500 + n.pages);
+    assert.equal(c.measure(n, 'words', 500), n.words);
+});

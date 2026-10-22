@@ -270,9 +270,12 @@ test('a PDF puts one body line above the footnote rule, or the ' +
         };
         await p.exportDocument({ md: 'Text.', format, output: '/o.' + format,
             style: { fontSize: 10, lineSpacing: 1.5 } }, deps);
-        assert.equal(header, format === 'pdf' ?
-            '\\setlength{\\skip\\footins}{18pt plus 4pt minus 2pt}\n' :
-            null);
+        if (format === 'pdf') {
+            assert.ok(header.startsWith(
+                '\\setlength{\\skip\\footins}{18pt plus 4pt minus 2pt}\n'));
+        } else {
+            assert.equal(header, null);
+        }
     }
 });
 
@@ -367,4 +370,20 @@ test('conda installs in the home folder are searched', () => {
     assert.deepEqual(p.condaBins(names, '/home/u'),
                      ['/home/u/anaconda3-linux/bin', '/home/u/miniconda3/bin',
                       '/home/u/miniforge3/bin', '/home/u/mambaforge/bin']);
+});
+
+test('a table\'s and a figure\'s captions become Pandoc\'s own, so ' +
+     'LaTeX keeps each with its table or figure', () => {
+    const md = 'See Table 1.\n\n**Table 1.** Budget\n\n| Y | C |\n' +
+        '| - | - |\n| 1 | 2 |\n\n![](<x.png>){width=300px}\n\n' +
+        '**Figure 1.** Design [a] b.\n\n**Table 2.** Not before a table.\n';
+    assert.equal(p.pandocCaptions(md),
+        'See Table 1.\n\nTable: **Table 1.** Budget\n\n| Y | C |\n' +
+        '| - | - |\n| 1 | 2 |\n\n' +
+        '![**Figure 1.** Design \\[a\\] b.](<x.png>){width=300px}\n\n' +
+        '**Table 2.** Not before a table.\n');
+    const pre = p.preamble({});
+    assert.match(pre, /\\usepackage\{caption\}/);
+    assert.match(pre, /labelformat=empty/);
+    assert.match(pre, /\\setlength\{\\LTcapwidth\}\{\\textwidth\}/);
 });

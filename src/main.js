@@ -43,6 +43,13 @@ const ROLE_ITEMS = [
     ['scaffolding', 'Scaffolding: prints its children only', 'layers', '3'],
     ['notes', 'Left out of the manuscript', 'eye-off', '4'],
 ];
+// What kind of card it is, apart from what it prints: a table or figure
+// that prints is numbered and printed with its caption.
+const KIND_ITEMS = [
+    [null, 'Text', 'text'],
+    ['table', 'Table: numbered, caption above', 'table'],
+    ['figure', 'Figure: numbered, caption below', 'image'],
+];
 // What a branch was set to, for the notice that says so.
 const BRANCH_ROLE_NAMES = { '': 'print automatically',
     section: 'heading only', prose: 'full text',
@@ -59,9 +66,9 @@ const STATUS_ITEMS = [
 const PREVIEW = 'dendrite-preview';
 // Where the preview shows footnotes, and the menu's words for each.
 const NOTES_AT = {
-    section: 'Notes under each section',
-    end: 'Notes at the end',
-    card: 'Notes under each card',
+    section: 'Footnotes collected under each section',
+    end: 'Footnotes collected at the end',
+    card: 'Footnotes under each card',
 };
 const DEFAULTS = {
     writingFolder: 'Writing',
@@ -956,6 +963,17 @@ class DendriteView extends ItemView {
         this.drawFlow();
     }
 
+    /** A link to the card, to paste where a table or figure is cited. */
+    async copyRef(id) {
+        const ref = `[[${id}]]`;
+        try {
+            await this.pageWin().navigator.clipboard.writeText(ref);
+            new Notice(`Copied ${ref}`);
+        } catch (err) {
+            new Notice(`Could not copy ${ref}`);
+        }
+    }
+
     async copyId(id) {
         const short = core.shortId(id);
         try {
@@ -1009,6 +1027,17 @@ class DendriteView extends ItemView {
                 }
             });
         }
+        m.addSeparator();
+        const kind = this.kindOf(id);
+        for (const [value, title, icon] of KIND_ITEMS) {
+            m.addItem((i) => {
+                i.setTitle(title).setIcon(icon)
+                    .onClick(() => this.setKind(id, value));
+                if (typeof i.setChecked === 'function') {
+                    i.setChecked(kind === value);
+                }
+            });
+        }
         if (node && node.children.length) this.addBranchItems(m, id);
     }
 
@@ -1046,7 +1075,7 @@ class DendriteView extends ItemView {
     async setBranch(id, what, value) {
         const node = this.byId.get(id);
         if (!node) return;
-        const roleOf = (x) => this.roleOf(x);
+        const roleOf = (x) => this.printRoleOf(x);
         const key = what === 'role' ? 'dendrite_role' : 'dendrite_status';
         const restores = [];
         for (const c of [node, ...core.descendants(node)]) {
@@ -1116,6 +1145,7 @@ class DendriteView extends ItemView {
         m.addSeparator();
         item('Card properties…', 'sliders-horizontal',
              () => new CardModal(this, this.active).open());
+        item('Copy reference', 'link', () => this.copyRef(this.active));
         // Status, then what this card prints.
         const id = this.active;
         const info = this.statusInfo && this.statusInfo.get(id);
@@ -1643,7 +1673,7 @@ class DendriteView extends ItemView {
         // Text written here is a draft until said otherwise.
         const node = this.byId.get(ed.id);
         if (ed.changed && node && !this.statusOf(ed.id) &&
-            core.roleFor(node, (x) => this.roleOf(x)) === 'prose') {
+            core.roleFor(node, (x) => this.printRoleOf(x)) === 'prose') {
             await this.setStatus(ed.id, 'draft');
         }
         if (ed.changed) await this.plugin.lintCard(ed.file);
@@ -1950,7 +1980,7 @@ class DendriteView extends ItemView {
         const srcText = await this.app.vault.read(ed.file);
         // Read fresh, not from the board's last drawing: a status set a
         // moment ago may not have been drawn yet.
-        const srcStatus = core.roleFor(node, (x) => this.roleOf(x)) ===
+        const srcStatus = core.roleFor(node, (x) => this.printRoleOf(x)) ===
             'prose' ? this.statusOf(ed.id) : null;
         // A role set on the card goes with the text, so planning split
         // from a scaffolding card stays planning. Heading only is not
@@ -1980,7 +2010,7 @@ class DendriteView extends ItemView {
         // printing has a status only if text is left behind: unsplit,
         // until the split is finished or the rest is kept as notes.
         if (where === 'child' &&
-            core.roleFor(node, (x) => this.roleOf(x)) !== 'prose') {
+            core.roleFor(node, (x) => this.printRoleOf(x)) !== 'prose') {
             await this.setStatus(ed.id,
                 core.leftover(cut.keep) ? 'unsplit' : null);
         }
@@ -2050,7 +2080,7 @@ class DendriteView extends ItemView {
         });
         await this.syncLabel(target.id, merged);
         // Merged text is only as mature as the less mature of the two.
-        if (core.roleFor(target, (x) => this.roleOf(x)) === 'prose') {
+        if (core.roleFor(target, (x) => this.printRoleOf(x)) === 'prose') {
             await this.setStatus(target.id, mergedStatus);
         }
         await this.sweepStatuses();
@@ -2720,7 +2750,8 @@ class DendriteView extends ItemView {
         if (!this.manuscript().number) return new Map();
         return core.sectionNumbers(this.root.children,
                                    (id) => this.hasHeading(id),
-                                   (id) => this.roleOf(id));
+                                   (id) => this.printRoleOf(id),
+                                   (id) => this.kindOf(id));
     }
 
     /** Show each section card's number, updated in place. */
@@ -2758,6 +2789,36 @@ class DendriteView extends ItemView {
         return core.ROLES.includes(r) ? r : null;
     }
 
+    /** A card's kind, if set: table or figure. */
+    kindOf(id) {
+        const k = this.cardProps(id).dendrite_kind;
+        return core.KINDS.includes(k) ? k : null;
+    }
+
+    /** The role a card prints by, its kind applied. */
+    printRoleOf(id) {
+        return core.withKinds((x) => this.roleOf(x),
+                              (x) => this.kindOf(x))(id);
+    }
+
+    /** What export needs to number tables and figures. */
+    floatOpts(heights = false) {
+        const kindOf = (x) => this.kindOf(x);
+        const opts = { kindOf, floats: core.floatLabels(this.root.children,
+            (x) => this.printRoleOf(x), kindOf) };
+        if (heights) {
+            opts.heightOf = (x) =>
+                core.parseAmount(this.cardProps(x).dendrite_height);
+        }
+        return opts;
+    }
+
+    async setKind(id, kind) {
+        const f = this.cardFile(id);
+        if (f) await writeProps(this.app, f, { dendrite_kind: kind });
+        await this.sweepStatuses();
+    }
+
     async setRole(id, role) {
         const f = this.cardFile(id);
         if (f) await writeProps(this.app, f, { dendrite_role: role });
@@ -2781,7 +2842,7 @@ class DendriteView extends ItemView {
     async setStatusByKey(status) {
         const node = this.byId.get(this.active);
         if (!node) return;
-        if (core.roleFor(node, (x) => this.roleOf(x)) !== 'prose') {
+        if (core.roleFor(node, (x) => this.printRoleOf(x)) !== 'prose') {
             new Notice('Dendrite: a structural card takes its status from ' +
                        'the cards below it.');
             return;
@@ -2805,7 +2866,7 @@ class DendriteView extends ItemView {
     updateStatuses() {
         if (!this.board) return;
         const report = core.statusReport(this.root,
-            (id) => this.statusOf(id), (id) => this.roleOf(id));
+            (id) => this.statusOf(id), (id) => this.printRoleOf(id));
         this.statusInfo = report.cards;
         for (const [id, card] of this.cardEls) {
             const old = card.querySelector(':scope > .dendrite-status');
@@ -2882,7 +2943,7 @@ class DendriteView extends ItemView {
         for (const n of core.allNodes(this.root)) {
             if (!this.cardFile(n.id)) continue;
             const s = this.statusOf(n.id);
-            const prints = core.roleFor(n, (id) => this.roleOf(id)) ===
+            const prints = core.roleFor(n, (id) => this.printRoleOf(id)) ===
                 'prose';
             if (prints && (!s || s === 'unsplit')) {
                 // Printing, with no status or a structural one: draft.
@@ -2929,7 +2990,7 @@ class DendriteView extends ItemView {
             if (up) await this.setStatus(node.id, null);
             return;
         }
-        if (core.roleFor(node, (x) => this.roleOf(x)) !== 'prose') {
+        if (core.roleFor(node, (x) => this.printRoleOf(x)) !== 'prose') {
             new Notice('Dendrite: a structural card takes its status from ' +
                        'the cards below it.');
             return;
@@ -2944,7 +3005,7 @@ class DendriteView extends ItemView {
             if (!node) continue;
             let out = false;
             for (let n = node; n && n.id; n = n.parent) {
-                if (core.roleFor(n, (x) => this.roleOf(x)) === 'notes') {
+                if (core.roleFor(n, (x) => this.printRoleOf(x)) === 'notes') {
                     out = true;
                     break;
                 }
@@ -2955,21 +3016,26 @@ class DendriteView extends ItemView {
             // The corner icon: the role in effect, faint when it follows
             // from the tree rather than being set on the card.
             const set = this.roleOf(id);
-            const role = out ? 'notes' :
-                core.roleFor(node, (x) => this.roleOf(x));
+            let role = out ? 'notes' :
+                core.roleFor(node, (x) => this.printRoleOf(x));
             const auto = out ? set !== 'notes' : !set;
+            // A table or figure that prints shows its kind instead.
+            const kind = this.kindOf(id);
+            if (kind && role === 'prose') role = kind;
             const grip = card.querySelector(':scope > .dendrite-grip');
             if (grip && grip.dataset.role !== role) {
                 grip.dataset.role = role;
                 const icon = grip.querySelector('.dendrite-role-icon');
                 icon.empty();
-                setIcon(icon, ROLE_ITEMS.find((r) => r[0] === role)[2]);
+                setIcon(icon, (ROLE_ITEMS.find((r) => r[0] === role) ||
+                               KIND_ITEMS.find((r) => r[0] === role))[2]);
             }
             if (grip) {
                 grip.toggleClass('is-auto', auto);
-                const what = ROLE_ITEMS.find((r) => r[0] === role)[1];
+                const what = (ROLE_ITEMS.find((r) => r[0] === role) ||
+                              KIND_ITEMS.find((r) => r[0] === role))[1];
                 grip.setAttr('aria-label', what +
-                    (auto ? ' (automatic)' : '') +
+                    (auto && !kind ? ' (automatic)' : '') +
                     '. Click to change; drag to move the card.');
             }
             card.toggleClass('is-scaffolding',
@@ -3005,9 +3071,9 @@ class DendriteView extends ItemView {
         const bodies = await this.loadBodies();
         const bodyOf = (id) => (this.editing && this.editing.id === id) ?
             this.editing.editor.value : bodies.get(id);
-        const countOf = (nodes) => core.countText(
-            core.exportMarkdown(nodes, bodyOf, 1, null,
-                                (id) => this.roleOf(id)), ms.countSpaces);
+        const floats = this.floatOpts(true);
+        const countOf = (nodes) => core.countManuscript(nodes, bodyOf,
+            (id) => this.printRoleOf(id), ms.countSpaces, floats);
         const total = ms.limit ? Object.assign({}, ms.limit,
             { required: ms.limitRequired }) : null;
         const reports = core.quotas(this.root, (id) => this.quotaOf(id),
@@ -3091,14 +3157,15 @@ class DendriteView extends ItemView {
         if (this.quotaTip !== tip) return;
         const bodyOf = (x) => (this.editing && this.editing.id === x) ?
             this.editing.editor.value : bodies.get(x);
-        const roleOf = (x) => this.roleOf(x);
-        const own = core.exportSegments([node], bodyOf, 1, null, roleOf)
-            .find((s) => s.id === id);
+        const roleOf = (x) => this.printRoleOf(x);
+        const floats = this.floatOpts();
+        const own = core.exportSegments([node], bodyOf, 1, null, roleOf,
+                                        floats).find((s) => s.id === id);
         const rows = [['This card',
                        core.countText(own ? own.text : '', ms.countSpaces)]];
         if (node.children.length) {
             rows.push(['With cards below', core.countText(
-                core.exportMarkdown([node], bodyOf, 1, null, roleOf),
+                core.exportMarkdown([node], bodyOf, 1, null, roleOf, floats),
                 ms.countSpaces)]);
         }
         const table = tip.createEl('table', { cls: 'dendrite-count-table' });
@@ -3626,9 +3693,11 @@ class DendriteView extends ItemView {
             }
         }
         const ms = this.manuscript();
+        const floats = this.floatOpts(true);
         const text = core.exportMarkdown(scope, (id) => bodies.get(id),
                                          ms.headingTop, this.numbers(),
-                                         (id) => this.roleOf(id));
+                                         (id) => this.printRoleOf(id),
+                                         floats);
         const dir = normalizePath(
             (this.file.parent.path === '/' ? '' :
                 this.file.parent.path + '/') + 'exports');
@@ -3721,9 +3790,12 @@ class DendriteView extends ItemView {
         new Notice(`Dendrite: exported to ${rel}${cites}.`);
         // A whole manuscript's PDF measures its words per page, which
         // page quotas and estimates use from then on.
-        const rate = whole ? pandoc.measuredRate(
-            core.countText(text, ms.countSpaces).words, result.layout,
-            result.keys.length > 0) : null;
+        const bodies = whole ? await this.loadBodies() : null;
+        const counted = whole ? core.countManuscript(this.root.children,
+            (id) => bodies.get(id), (id) => this.printRoleOf(id),
+            ms.countSpaces, this.floatOpts(true)) : null;
+        const rate = whole ? pandoc.measuredRate(counted.words,
+            result.layout, result.keys.length > 0, counted.pages) : null;
         if (rate && rate !== ms.wordsPerPageMeasured) {
             await writeProps(this.app, this.file,
                              { dendrite_measured_words_per_page: rate });
@@ -3890,10 +3962,14 @@ class DendritePreview extends ItemView {
             return (f && this.app.metadataCache.getFileCache(f)
                 ?.frontmatter) || {};
         };
-        const roleOf = (id) => {
+        const kindOf = (id) => {
+            const k = props(id).dendrite_kind;
+            return core.KINDS.includes(k) ? k : null;
+        };
+        const roleOf = core.withKinds((id) => {
             const r = props(id).dendrite_role;
             return core.ROLES.includes(r) ? r : null;
-        };
+        }, kindOf);
         const hasHeading = (id) => {
             const f = this.cardFile(id);
             const s = f && this.app.metadataCache.getFileCache(f)?.sections;
@@ -3901,14 +3977,16 @@ class DendritePreview extends ItemView {
             return !!first && first.type === 'heading';
         };
         const numbers = fm.dendrite_number_sections === true ?
-            core.sectionNumbers(root.children, hasHeading, roleOf) : null;
+            core.sectionNumbers(root.children, hasHeading, roleOf,
+                                kindOf) : null;
         // Footnotes numbered across the whole document, as export does;
         // shown under each card, each top-level section, or at the end.
         const segs = core.gatherFootnotes(core.renumberFootnotes(
             core.exportSegments(root.children, (id) => {
                 const b = this.bodies.get(id);
                 return b ? b.body : '';
-            }, headingTop, numbers, roleOf)).segments, this.notesAt);
+            }, headingTop, numbers, roleOf, { kindOf })).segments,
+            this.notesAt);
         // Only flagged cards are marked here, with a faint bar, so the
         // preview stays a page to read.
         const statusOf = (id) => {
