@@ -447,3 +447,96 @@ test('the older-copy mark opens a dialog that says what happened, shows ' +
     assert.equal(a.read(INDEX), FILES[INDEX], 'undone');
     assert.ok(a.view.reverted.has('index'), 'and marked again');
 });
+
+test('a card open in its editor takes a synced change it has no unsaved ' +
+     'typing against, writing nothing in response', async () => {
+    const clock = { t: 1 };
+    const a = await device(FILES, clock);
+    await a.view.startEdit('G-aaaaa');
+    type(a.view, '# Aims\nHere.\n');
+    await tick(60);
+    // Later, the other device's edit arrives while the editor is open.
+    clock.t += WINDOW_MS + 1;
+    a.writes.length = 0;
+    const synced = '---\ndendrite_status: draft\n---\n' +
+        '# Aims\nHere, and from home.\n';
+    await a.receive(cardPath('G-aaaaa'), synced);
+    await tick(40);
+    assert.deepEqual(a.writes, [], 'nothing written in response');
+    assert.equal(a.view.editing && a.view.editing.id, 'G-aaaaa',
+                 'still editing');
+    assert.equal(a.view.editing.editor.value,
+                 '# Aims\nHere, and from home.\n', 'the editor took it');
+    assert.ok(!a.view.reverted.has('G-aaaaa'));
+    // Typing on writes on top of the synced text, not the old.
+    type(a.view, '# Aims\nHere, and from home. More.\n');
+    await a.view.endEdit();
+    assert.equal(a.read(cardPath('G-aaaaa')), '---\ndendrite_status: ' +
+                 'draft\n---\n# Aims\nHere, and from home. More.\n');
+});
+
+test('a synced change to a card with unsaved typing is not saved over; ' +
+     'the card is marked with the typing to put back', async () => {
+    const clock = { t: 1 };
+    const a = await device(FILES, clock);
+    a.view.plugin.settings.autosaveMs = 5000;
+    await a.view.startEdit('G-aaaaa');
+    clock.t += WINDOW_MS + 1;
+    type(a.view, '# Aims\nTyped here.\n');
+    a.writes.length = 0;
+    const synced = '---\ndendrite_status: draft\n---\n' +
+        '# Aims\nFrom home.\n';
+    await a.receive(cardPath('G-aaaaa'), synced);
+    await tick(40);
+    assert.deepEqual(a.writes, [], 'the typing was not saved over it');
+    assert.equal(a.read(cardPath('G-aaaaa')), synced);
+    assert.equal(a.view.editing, null, 'the editor closed');
+    assert.ok(a.view.reverted.has('G-aaaaa'), 'the card is marked');
+    assert.ok(h.notices.some((n) => /aaaaa .*while you were typing/
+        .test(n)), 'a notice names the card');
+    const chip = a.view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-status-chip.is-reverted');
+    assert.equal(chip.textContent, 'typing kept ⟲');
+    chip.onclick({ stopPropagation() {} });
+    await tick(20);
+    const m = h.obsidian.lastModal;
+    assert.match(m.titleEl.textContent, /changed while you were typing/);
+    assert.equal(await a.view.newerText('G-aaaaa'),
+                 '---\ndendrite_status: draft\n---\n# Aims\nTyped here.\n');
+    await a.view.restoreNewer('G-aaaaa');
+    await tick(20);
+    assert.equal(a.read(cardPath('G-aaaaa')),
+                 '---\ndendrite_status: draft\n---\n# Aims\nTyped here.\n');
+    assert.ok(!a.view.reverted.has('G-aaaaa'), 'putting back settles it');
+});
+
+test('the dialog says where and when each side was seen, and opens from ' +
+     'memory without waiting on the version store', async () => {
+    const clock = { t: Date.UTC(2026, 9, 21, 20) };
+    const a = await device(FILES, clock);
+    // Last night's text, typed here.
+    clock.t += WINDOW_MS + 1;
+    await a.view.startEdit('G-aaaaa');
+    type(a.view, '# Aims\nThe full card.\n');
+    await a.view.endEdit();
+    // A damaged copy arrives by sync, then the good text again.
+    clock.t += WINDOW_MS + 1;
+    const fm = '---\ndendrite_status: draft\n---\n';
+    await a.receive(cardPath('G-aaaaa'), fm + '# Aims\nThe\n');
+    clock.t += WINDOW_MS + 1;
+    await a.receive(cardPath('G-aaaaa'), fm + '# Aims\nThe full card.\n');
+    assert.ok(a.view.reverted.has('G-aaaaa'));
+    // The store stops answering: the dialog still fills.
+    a.view.plugin.history.store.get = () => new Promise(() => {});
+    a.view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-status-chip.is-reverted')
+        .onclick({ stopPropagation() {} });
+    await tick(20);
+    const text = h.obsidian.lastModal.contentEl.textContent;
+    assert.match(text, /The text from before came from outside Dendrite, /);
+    assert.match(text, /The note now matches text this device had at .*, /);
+    assert.match(text, /written on this device/);
+    const diff = [...h.obsidian.lastModal.contentEl.querySelectorAll(
+        '.dendrite-version-diff > div')].map((d) => d.textContent);
+    assert.ok(diff.includes('+The'), 'the damaged copy is the side before');
+});

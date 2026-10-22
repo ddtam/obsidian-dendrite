@@ -151,6 +151,12 @@ class DendriteView extends ItemView {
         this.indexReverted = false;
         // When each note was marked as gone back, by id or 'index'.
         this.revertedAt = new Map();
+        // Typing not yet saved when a sync changed the card being edited:
+        // by card, the note with that typing, to put back from its mark.
+        this.held = new Map();
+        // By card gone back, or 'index': the text before and where each
+        // side was seen, read once when marked so the dialog need not.
+        this.versionInfo = new Map();
         this.labelTimer = null;
         // Card bodies Dendrite is writing, by path, so their modify events
         // are known as its own; and the cards gone back to an earlier
@@ -1551,6 +1557,7 @@ class DendriteView extends ItemView {
         const ed = { id, file: f, dirty: false, timer: null,
                      saving: Promise.resolve(),
                      before: core.splitFrontmatter(raw).body };
+        ed.saved = ed.before;
         const editor = cardEditor(this.app, this, {
             value: core.splitFrontmatter(raw).body,
             file: f,
@@ -1605,6 +1612,7 @@ class DendriteView extends ItemView {
         if (!ed.dirty) return ed.saving;
         ed.dirty = false;
         const text = ed.editor.value;
+        ed.saved = text;
         ed.saving = ed.saving.then(() => this.writeCard(ed.file,
             (data) => core.splitFrontmatter(data).fm + text))
             .then(() => {
@@ -1641,7 +1649,7 @@ class DendriteView extends ItemView {
         if (ed.changed) await this.plugin.lintCard(ed.file);
         // The editor's own history goes with it, so the visit becomes one
         // step in the card's text history, undone from inside the card.
-        if (ed.changed) {
+        if (ed.changed && !ed.recorded) {
             const after = core.splitFrontmatter(
                 await this.app.vault.read(ed.file)).body;
             this.recordVisit(ed.id, ed.before, after);
@@ -2385,12 +2393,53 @@ class DendriteView extends ItemView {
         if (own) this.ownBodies.delete(f.path);
         await this.checkVersion(id, text, own);
         if (this.find) this.scheduleFind(true);
-        if (this.editing && this.editing.id === id) return;
+        if (this.editing && this.editing.id === id) {
+            if (!own) await this.syncedWhileEditing(this.editing, text);
+            return;
+        }
         this.invalidate(id);
         const card = this.cardEls.get(id);
         if (card) {
             card.addClass('is-pending');
             this.renderCard(id);
+        }
+    }
+
+    /**
+     * A sync changed the note of the card being edited. With no unsaved
+     * typing the editor opens again on the new text, so a later save
+     * cannot write the old text back over it. With unsaved typing nothing
+     * is saved: the editor closes on the note as it came, and the card is
+     * marked with the typing to put back.
+     */
+    async syncedWhileEditing(ed, text) {
+        const { fm, body } = core.splitFrontmatter(text);
+        if (ed.editor.value === body) return;
+        clearTimeout(ed.timer);
+        // This visit ends at what it saved; the sync is not part of it.
+        if (ed.changed) this.recordVisit(ed.id, ed.before, ed.saved);
+        ed.recorded = true;
+        if (ed.dirty) {
+            ed.dirty = false;
+            this.held.set(ed.id, fm + ed.editor.value);
+            await this.endEdit();
+            this.reverted.add(ed.id);
+            this.revertedAt.set(ed.id, Date.now());
+            const node = this.byId.get(ed.id);
+            new Notice(`Dendrite: Card ${core.shortId(ed.id)}` +
+                       (node && node.label ? ` (${node.label})` : '') +
+                       ' changed outside Dendrite while you were typing ' +
+                       'in it, usually from a sync. Your typing was not ' +
+                       'saved over it. Click "typing kept" on the card to ' +
+                       'compare and choose.', 0);
+            this.updateStatuses();
+            return;
+        }
+        const at = Math.min(ed.editor.selection()[0], body.length);
+        await this.endEdit();
+        await this.startEdit(ed.id);
+        if (this.editing && this.editing.id === ed.id) {
+            this.editing.editor.focusAt(at);
         }
     }
 
@@ -2447,8 +2496,18 @@ class DendriteView extends ItemView {
         }
         const key = id === null ? 'index' : id;
         if (id === null) this.indexReverted = r === 'reverted';
-        const on = r === 'reverted' ||
+        const on = r === 'reverted' || this.held.has(id) ||
             (id === null && this.dropped.size > 0);
+        if (r === 'reverted' && !this.versionInfo.has(key)) {
+            try {
+                const d = await this.history.detail(this.historyKey(id));
+                if (d) this.versionInfo.set(key, d);
+            } catch (err) {
+                console.error('Dendrite: version history failed', err);
+            }
+        } else if (r !== 'reverted') {
+            this.versionInfo.delete(key);
+        }
         if (on === this.reverted.has(key)) return;
         if (!on) {
             this.reverted.delete(key);
@@ -2545,6 +2604,9 @@ class DendriteView extends ItemView {
      */
     async newerText(id) {
         if (id === null && this.dropBase) return this.dropBase;
+        if (this.held.has(id)) return this.held.get(id);
+        const info = this.versionInfo.get(id === null ? 'index' : id);
+        if (info) return info.text;
         const text = await this.history.newer(this.historyKey(id));
         return text === undefined ? null : text;
     }
@@ -2570,6 +2632,7 @@ class DendriteView extends ItemView {
             return;
         }
         if (this.editing && this.editing.id === id) await this.endEdit();
+        this.held.delete(id);
         await this.writeCard(f, () => text);
         this.pushUndo({ active: id, files: [], text: true,
             restores: [{ path: f.path, text: now,
@@ -2591,6 +2654,8 @@ class DendriteView extends ItemView {
             this.indexText = text;
             this.indexReverted = false;
         }
+        this.held.delete(id);
+        this.versionInfo.delete(id === null ? 'index' : id);
         this.reverted.delete(id === null ? 'index' : id);
         this.updateStatuses();
     }
@@ -2757,8 +2822,14 @@ class DendriteView extends ItemView {
                 return s;
             };
             if (this.reverted.has(id)) {
-                const s = show('reverted', 'older copy ⟲');
-                s.setAttr('aria-label', 'Changed outside Dendrite to text ' +
+                const held = this.held.has(id);
+                const s = show('reverted', held ? 'typing kept ⟲' :
+                               'older copy ⟲');
+                s.setAttr('aria-label', held ?
+                          'Changed outside Dendrite while you were typing ' +
+                          'in it. Click to compare and choose; your ' +
+                          'typing is not written until you do' :
+                          'Changed outside Dendrite to text ' +
                           'this card had before. Click to compare and ' +
                           'choose; nothing is written until you do');
                 s.onclick = (e) => {
@@ -4301,9 +4372,13 @@ class VersionModal extends Modal {
         const node = !index && view.byId.get(id);
         const name = index ? 'The index' : `Card ${core.shortId(id)}` +
             (node && node.label ? ` (${node.label})` : '');
-        this.titleEl.setText(`${name} changed to an older copy`);
-        const now = f ? await view.app.vault.read(f) : '';
+        const held = !index && view.held.has(id);
+        this.titleEl.setText(held ?
+            `${name} changed while you were typing in it` :
+            `${name} changed to an older copy`);
+        const now = f ? await view.app.vault.cachedRead(f) : '';
         const before = await view.newerText(id);
+        const info = view.versionInfo.get(index ? 'index' : id);
         const at = view.revertedAt.get(index ? 'index' : id);
         const when = at ? ` at ${new Date(at).toLocaleString()}` : '';
         const p = (text) => contentEl.createEl('p', { text });
@@ -4314,11 +4389,29 @@ class VersionModal extends Modal {
             p(`It changed outside Dendrite${when} and no longer lists ` +
               `${n} card${n === 1 ? '' : 's'} whose notes still exist: ` +
               `${names}.`);
+        } else if (held) {
+            p(`It changed outside Dendrite${when}, usually from a sync, ` +
+              'while you had typing in it not yet saved. The text from ' +
+              'before is the card with your typing. Nothing has been ' +
+              'written, and export waits until you choose.');
         } else {
             p(`It changed outside Dendrite${when} to text this device ` +
               'had before.');
         }
-        p('Usually a device with an old copy synced it, sometimes ' +
+        const from = (x) => x.outside ? 'came from outside Dendrite' :
+            'was written on this device';
+        const stamp = (x) => new Date(x.at).toLocaleString();
+        if (!held && info && info.before &&
+            info.before.outside !== undefined) {
+            p(`The text from before ${from(info.before)}, last at ` +
+              `${stamp(info.before)}.` + (info.before.outside ?
+              ' It can itself be the damaged or stale copy.' : ''));
+        }
+        if (!held && info && info.now && info.now.outside !== undefined) {
+            p(`The note now matches text this device had at ` +
+              `${stamp(info.now)}, which ${from(info.now)}.`);
+        }
+        if (!held) p('Usually a device with an old copy synced it, sometimes ' +
           'merged line by line with the current one. Restoring a backup ' +
           'yourself looks the same. Nothing has been written, and export ' +
           'waits until you choose.');

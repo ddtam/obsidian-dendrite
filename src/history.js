@@ -8,7 +8,9 @@
 // A version is recorded at most once per window: saves while typing
 // replace the window's entry, so the list spans days rather than seconds.
 // A text arriving from outside Dendrite whose hash is an older entry, and
-// not the newest, is a version going back.
+// not the newest, is a version going back. Each entry also says when it
+// was last seen and whether it came from outside, so the choice offered
+// can say where each side came from.
 
 const KEEP = 20;
 const WINDOW_MS = 10 * 60 * 1000;
@@ -116,8 +118,11 @@ class History {
                 return 'reverted';
             }
             const t = this.now();
-            if (last && t - last.t < WINDOW_MS) last.h = h;
-            else v.push({ h, t });
+            const o = !!outside;
+            if (last && t - last.t < WINDOW_MS) {
+                Object.assign(last, { h, s: t, o });
+            }
+            else v.push({ h, t, s: t, o });
             if (v.length > KEEP) v.splice(0, v.length - KEEP);
             rec.text = text;
             await this.store.set(key, rec);
@@ -131,13 +136,29 @@ class History {
         return rec && rec.reverted ? rec.text : null;
     }
 
+    /**
+     * For a card gone back: the newest text recorded, with where and when
+     * the newest version and the matched earlier one were seen. Null
+     * when the card has not gone back.
+     */
+    async detail(key) {
+        const rec = await this.store.get(key);
+        if (!rec || !rec.reverted) return null;
+        const v = rec.versions;
+        const seen = (x) => x && { at: x.s || x.t, outside: x.o };
+        const match = [...v].reverse().find((x) => x.h === rec.reverted.h);
+        return { text: rec.text, before: seen(v[v.length - 1]),
+                 now: seen(match) };
+    }
+
     /** Accept the card's current text as its newest version. */
     keep(key, text, compared) {
         return this.serial(key, async () => {
             const rec = await this.store.get(key);
             if (!rec) return;
             rec.reverted = null;
-            rec.versions.push({ h: hash(compared), t: this.now() });
+            const t = this.now();
+            rec.versions.push({ h: hash(compared), t, s: t, o: true });
             if (rec.versions.length > KEEP) {
                 rec.versions.splice(0, rec.versions.length - KEEP);
             }
