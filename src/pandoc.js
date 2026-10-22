@@ -112,15 +112,85 @@ const ARTICLE_SIZES = [10, 11, 12];
  */
 function footnoteGap(st) {
     if (st.footnoteGap) return st.footnoteGap;
-    const pt = (st.fontSize || 10) * 1.2 * (st.lineSpacing || 1);
-    return `${Math.round(pt * 10) / 10}pt`;
+    return `${Math.round(bodyLine(st) * 10) / 10}pt`;
+}
+
+/** One line's text for LaTeX, its special characters escaped. */
+function texEscape(t) {
+    const named = { '\\': '\\textbackslash{}', '^': '\\textasciicircum{}',
+                    '~': '\\textasciitilde{}' };
+    return t.replace(/[\\{}$&#%_^~]/g, (c) => named[c] || '\\' + c);
+}
+
+/**
+ * A header line as LaTeX: escaped, **bold** and *italic* kept, and
+ * {page} and {pages} as the page number and the page count.
+ */
+function headerLine(line) {
+    const t = texEscape(line.replace(/\{page\}/g, '\u0001')
+                            .replace(/\{pages\}/g, '\u0002'));
+    return t.replace(/\*\*(.+?)\*\*/g, '\\textbf{$1}')
+        .replace(/\*(.+?)\*/g, '\\textit{$1}')
+        .replace(/\u0001/g, '\\thepage{}')
+        .replace(/\u0002/g, '\\pageref*{LastPage}');
+}
+
+/** The height of a body line, in points. */
+function bodyLine(st) {
+    return (st.fontSize || 10) * 1.2 * (st.lineSpacing || 1);
+}
+
+const SLOTS = { left: 'L', center: 'C', right: 'R' };
+
+/** A header's or footer's slots, each its lines as LaTeX. */
+function slotsTex(slots, cmd) {
+    return Object.entries(SLOTS).map(([k, pos]) => {
+        const text = slots && slots[k] ?
+            slots[k].split('\n').map(headerLine).join('\\\\') : '';
+        return text ? `\\${cmd}[${pos}]{${text}}` : null;
+    }).filter(Boolean);
+}
+
+/** Whether any slot of a header or footer holds `re`. */
+const anySlot = (st, re) => [st.header, st.footer].some((h) =>
+    h && Object.values(h).some((t) => re.test(t)));
+
+/** The most lines in any one slot, 0 for none. */
+const slotLines = (slots) => Math.max(0, ...Object.values(slots || {})
+    .map((t) => t.split('\n').length));
+
+/**
+ * LaTeX for a PDF's preamble: the space above the footnote rule and,
+ * when the manuscript sets any, a running header and footer on every
+ * page in the body's type, each with a left, centre and right slot.
+ * Without a footer set, the page number stays at the foot's centre,
+ * unless a slot prints {page} or page numbers are off.
+ */
+function preamble(st) {
+    const out = ['\\setlength{\\skip\\footins}{' +
+                 `${footnoteGap(st)} plus 4pt minus 2pt}`];
+    if (st.header || st.footer) {
+        const pages = st.pageNumbers !== false &&
+            !anySlot(st, /\{page\}/);
+        const foot = st.footer ? slotsTex(st.footer, 'fancyfoot') :
+            [`\\fancyfoot[C]{${pages ? '\\thepage' : ''}}`];
+        if (anySlot(st, /\{pages\}/)) out.push('\\usepackage{lastpage}');
+        const style = ['\\fancyhf{}', ...slotsTex(st.header, 'fancyhead'),
+                       ...foot, '\\renewcommand{\\headrulewidth}{0pt}'];
+        // A page LaTeX sets plain, such as a title page, gets it too.
+        out.push('\\usepackage{fancyhdr}', '\\pagestyle{fancy}', ...style,
+                 '\\fancypagestyle{plain}{' + style.join('') + '}');
+    }
+    return out.join('\n') + '\n';
 }
 
 /**
  * Pandoc's arguments for one export. `o.style` holds what the manuscript
  * sets: font, fontSize (points), margin, paper, lineSpacing, pageNumbers,
  * defaults (a Pandoc defaults file), referenceDocx (Word's styles) and
- * referencesTitle (the reference list's heading; false for none).
+ * referencesTitle (the reference list's heading; false for none),
+ * header and footer, each { left, center, right } text or null, and
+ * headerInMargin, true to print them in the margin.
  * `o.header` is a file of LaTeX for the PDF's preamble, added to any a
  * defaults file brings. A defaults file comes first, so the manuscript's
  * own settings win.
@@ -142,7 +212,28 @@ function pandocArgs(o) {
             args.push('-V', `fontsize=${st.fontSize}pt`);
         }
         if (st.lineSpacing) args.push('-V', `linestretch=${st.lineSpacing}`);
-        if (st.pageNumbers === false) args.push('-V', 'pagestyle=empty');
+        // The margin is measured to the header's top and a footer's
+        // bottom, so nothing set is printed in it, with room for their
+        // lines; or, where the format allows, they sit in the margin and
+        // the text keeps its whole area. Page numbers alone sit in the
+        // margin, as LaTeX puts them.
+        const head = slotLines(st.header);
+        const foot = slotLines(st.footer);
+        const inside = !st.headerInMargin;
+        if (head) {
+            if (inside) args.push('-V', 'geometry:includehead');
+            args.push('-V', `geometry:headheight=${Math.ceil(
+                          head * bodyLine(st) + 2)}pt`,
+                      '-V', 'geometry:headsep=12pt');
+        }
+        if (foot) {
+            if (inside) args.push('-V', 'geometry:includefoot');
+            args.push('-V', `geometry:footskip=${Math.ceil(
+                          foot * bodyLine(st) + 12)}pt`);
+        }
+        if (!st.header && !st.footer && st.pageNumbers === false) {
+            args.push('-V', 'pagestyle=empty');
+        }
         if (o.header) args.push(`--include-in-header=${o.header}`);
     }
     if (o.format === 'docx' && st.referenceDocx) {
@@ -233,8 +324,7 @@ async function exportDocument(o, deps) {
     if (o.format === 'pdf') {
         text += BODY_END;
         header = deps.join(dir, `dendrite-${Date.now()}-header.tex`);
-        await deps.writeFile(header, '\\setlength{\\skip\\footins}{' +
-            `${footnoteGap(o.style || {})} plus 4pt minus 2pt}\n`);
+        await deps.writeFile(header, preamble(o.style || {}));
     }
     await deps.writeFile(input, text);
     const args = pandocArgs({ input, output: o.output, format: o.format,
@@ -280,4 +370,5 @@ function measuredRate(words, layout, cited) {
 }
 
 module.exports = { citekeys, toPandoc, fetchBib, pandocArgs, exportDocument,
-                   pdfPages, measuredRate, footnoteGap, BODY_END };
+                   pdfPages, measuredRate, footnoteGap, preamble,
+                   BODY_END };

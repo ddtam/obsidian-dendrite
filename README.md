@@ -211,10 +211,15 @@ Set in the manuscript's settings, under **PDF and Word**, or as properties on th
 | `dendrite_paper` | PDF | `a4` or `letter` | letter |
 | `dendrite_line_spacing` | PDF | `1.15` | single |
 | `dendrite_footnote_gap` | PDF | `14pt`, `0.5cm` (a bare number is points): space between the last line of text and the footnote rule | one line of text: font size × 1.2 × line spacing, so 18pt at 10pt and 1.5 |
+| `dendrite_header_left`, `_center`, `_right` | PDF | `Derek Tam` then `**Project title**` on a second line: a running header on every page, in the text's font and size | none |
+| `dendrite_footer_left`, `_center`, `_right` | PDF | `Page {page} of {pages}` | the page number, centred |
+| `dendrite_header_in_margin` | PDF | `true`: header and footer in the margin | the margin is kept clear |
 | `dendrite_page_numbers` | PDF | `false` to leave them off | numbered consecutively at the foot |
 | `dendrite_pandoc_defaults` | both | `styles/grant.yaml`, a Pandoc defaults file for anything else | none |
 | `dendrite_reference_docx` | Word | `styles/reference.docx`, whose styles Word export copies | Pandoc's |
 | `dendrite_references_title` | both | `Bibliography`, the heading over the reference list; `false` for none | References |
+
+Each header and footer slot takes several lines (a list, or text with line breaks), `**bold**`, `*italic*`, `{page}` and `{pages}`. The margin is measured to the header's top and to a footer's bottom, so the page's text area shrinks to fit them and nothing is printed in the margin. Where the format allows it, `dendrite_header_in_margin: true` (**Header and footer in the margin** in the settings) prints them in the margin instead, so the text keeps its whole area; a small margin may not hold several lines. A footer set replaces the centred page number, and so does `{page}` in any slot. Word export ignores them; set Word's header in the reference document.
 
 The font must be installed on the computer that exports. Word takes its fonts and sizes only from a reference document: **Make reference.docx** in the settings writes Pandoc's own beside the index, to open in Word, restyle and save. The settings win over a defaults file.
 

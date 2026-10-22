@@ -1865,6 +1865,11 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
                       'Undo', 'Redo', 'Preview', 'Export']);
+    // The mode comes after the buttons; the name is the pane's title.
+    const kids = [...view.contentEl.querySelector('.dendrite-bar').children];
+    assert.ok(kids.indexOf(view.modeEl) > kids.indexOf(bar[5]));
+    assert.equal(view.contentEl.querySelector('.dendrite-bar .dendrite-title'),
+                 null);
     // A edited twice, then B: A's edits are undone in A, B's kept.
     for (const t of ['A first.', 'A second.']) {
         await view.startEdit('G-aaaaa');

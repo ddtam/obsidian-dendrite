@@ -463,10 +463,11 @@ class DendriteView extends ItemView {
     }
 
     renderBar(el) {
-        // The manuscript's settings and index note as two icons at the
-        // left, then undo and redo, the manuscript and what it prints.
-        // Nothing sits at the right, where other plugins' overlays, such
-        // as LiveSync's status, are drawn.
+        // Buttons from the left: the manuscript's settings and index note
+        // as two icons, undo and redo, then preview and export. After
+        // them, read-outs: the mode, the totals and the tally. The name
+        // is the pane's own title. Nothing sits at the right, where other
+        // plugins' overlays, such as LiveSync's status, are drawn.
         const bar = el.createDiv({ cls: 'dendrite-bar' });
         const btn = (icon, label, title, fn) => {
             const b = bar.createEl('button', { cls: 'dendrite-bar-btn' });
@@ -485,14 +486,13 @@ class DendriteView extends ItemView {
             'new and deleted cards, roles and statuses (Ctrl+Z). A card\'s ' +
             'text is undone inside the card.', () => this.doUndo());
         btn('redo-2', 'Redo', 'Redo what was undone (Ctrl+Shift+Z or ' +
-            'Ctrl+Y)', () => this.doRedo());
-        this.modeEl = bar.createDiv({ cls: 'dendrite-mode' });
-        this.showMode();
-        bar.createDiv({ cls: 'dendrite-title', text: this.file.basename });
+            'Ctrl+Y)', () => this.doRedo()).addClass('dendrite-bar-gap');
         btn('scroll-text', 'Preview', 'Show what export would print, ' +
             'beside the board', () => this.plugin.openPreview(this.file));
         btn('file-output', 'Export', 'Export the manuscript to markdown, ' +
             'PDF or Word', (e) => this.exportMenu(null, e));
+        this.modeEl = bar.createDiv({ cls: 'dendrite-mode' });
+        this.showMode();
         this.totalEl = bar.createDiv({ cls: 'dendrite-total' });
         this.statusEl = bar.createDiv({ cls: 'dendrite-tally' });
     }
@@ -3974,6 +3974,22 @@ function textProp(v) {
 }
 
 /**
+ * A running header's or footer's slots from dendrite_<which>_left,
+ * _center and _right, each text or a list of lines; null when none is
+ * set.
+ */
+function slots(fm, which) {
+    const out = {};
+    for (const k of ['left', 'center', 'right']) {
+        let v = fm[`dendrite_${which}_${k}`];
+        if (Array.isArray(v)) v = v.map(String).join('\n');
+        v = textProp(v);
+        if (v) out[k] = v;
+    }
+    return Object.keys(out).length ? out : null;
+}
+
+/**
  * How PDF and Word export look, from the index's properties: font, font
  * size in points (`10` or `10pt`), margin (a bare number is in cm),
  * paper (letter or a4), line
@@ -3981,7 +3997,7 @@ function textProp(v) {
  * Word reference document, both paths from the vault root, the
  * reference list's heading (References unless set; false for none), and
  * the space above the footnote rule, a TeX length (a bare number is in
- * points).
+ * points), and a running header and footer, as `slots` reads them.
  */
 function exportStyle(fm) {
     const size = parseFloat(String(fm.dendrite_font_size || ''));
@@ -4004,6 +4020,9 @@ function exportStyle(fm) {
         referencesTitle: fm.dendrite_references_title === false ? false :
             textProp(fm.dendrite_references_title),
         footnoteGap: gap,
+        header: slots(fm, 'header'),
+        footer: slots(fm, 'footer'),
+        headerInMargin: fm.dendrite_header_in_margin === true,
     };
 }
 
@@ -4175,6 +4194,33 @@ class ManuscriptModal extends Modal {
              'of text and the footnote rule, such as 14pt or 0.5cm; a ' +
              'bare number is in points. Empty: one line of text.',
              st.footnoteGap, 'dendrite_footnote_gap', '');
+        // Header and footer: three slots each, for PDF.
+        new Setting(contentEl).setName('Header and footer').setHeading()
+            .setDesc('For PDF, on every page in the text\'s font and size. ' +
+                     'Each slot takes several lines, **bold**, *italic*, ' +
+                     '{page} and {pages}. A footer set replaces the page ' +
+                     'number at the foot; so does {page} anywhere.');
+        for (const which of ['header', 'footer']) {
+            for (const [k, name] of [['left', 'left'], ['center', 'centre'],
+                                     ['right', 'right']]) {
+                const key = `dendrite_${which}_${k}`;
+                const now = st[which] && st[which][k];
+                new Setting(contentEl)
+                    .setName(`${which[0].toUpperCase()}${which.slice(1)}, ` +
+                             name)
+                    .addTextArea((t) => t.setValue(now || '')
+                        .onChange((v) => { draft[key] = v.trim() || null; }));
+            }
+        }
+        new Setting(contentEl).setName('Header and footer in the margin')
+            .setDesc('Print them in the page margin, so the text keeps its ' +
+                     'whole area, where the format allows it. Off, the ' +
+                     'margin is measured to them and nothing is printed ' +
+                     'in it. A small margin may not hold several lines.')
+            .addToggle((tg) => tg.setValue(st.headerInMargin)
+                .onChange((v) => {
+                    draft.dendrite_header_in_margin = v || null;
+                }));
         new Setting(contentEl).setName('Page numbers')
             .setDesc('For PDF, at the foot of each page, numbered ' +
                      'consecutively.')

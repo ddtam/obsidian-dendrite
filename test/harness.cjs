@@ -281,6 +281,7 @@ const obsidian = {
             return s;
         }
         addText(f) { f(this.stub()); return this; }
+        addTextArea(f) { f(this.stub()); return this; }
         addToggle(f) { f(this.stub()); return this; }
         addDropdown(f) { f(this.stub()); return this; }
         addSlider(f) { f(this.stub()); return this; }

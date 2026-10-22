@@ -275,3 +275,63 @@ test('a PDF puts one body line above the footnote rule, or the ' +
             null);
     }
 });
+
+test('running headers and footers print on every page in the body\'s ' +
+     'type, from left, centre and right slots', () => {
+    const st = { header: { left: 'Derek Tam\n**Clonal R&D: 100% tracked**' },
+                 fontSize: 10, lineSpacing: 1.5 };
+    const tex = p.preamble(st);
+    assert.ok(tex.includes('\\usepackage{fancyhdr}'));
+    assert.ok(tex.includes('\\pagestyle{fancy}'));
+    // Escaped for LaTeX; ** is bold; each line its own.
+    assert.ok(tex.includes('\\fancyhead[L]{Derek Tam\\\\' +
+        '\\textbf{Clonal R\\&D: 100\\% tracked}}'), tex);
+    assert.ok(tex.includes('\\renewcommand{\\headrulewidth}{0pt}'));
+    // No footer set: the page number stays at the foot's centre.
+    assert.ok(tex.includes('\\fancyfoot[C]{\\thepage}'));
+    // A slot that prints {page} takes over the page number.
+    const own = p.preamble({ header: { right: 'Page {page} of {pages}' } });
+    assert.ok(own.includes('\\fancyhead[R]{Page \\thepage{} of ' +
+        '\\pageref*{LastPage}}'), own);
+    assert.ok(own.includes('\\usepackage{lastpage}'));
+    assert.ok(!own.includes('\\fancyfoot[C]{\\thepage}'));
+    // A footer set is the footer, whole.
+    const foot = p.preamble({ footer: { left: '*Confidential*' } });
+    assert.ok(foot.includes('\\fancyfoot[L]{\\textit{Confidential}}'));
+    assert.ok(!foot.includes('\\fancyfoot[C]{\\thepage}'));
+    assert.ok(p.preamble({ header: { left: 'X' }, pageNumbers: false })
+        .includes('\\fancyfoot[C]{}'));
+    assert.ok(!p.preamble({}).includes('fancyhdr'), 'nothing set, none');
+    // The margin is measured to the header's top and the footer's
+    // bottom, so nothing is printed in it, with room for their lines.
+    const v = (args) => args.filter((a, i) => args[i - 1] === '-V');
+    const args = v(p.pandocArgs({ input: 'i', output: 'o.pdf',
+                                  format: 'pdf', style: st }));
+    assert.ok(args.includes('geometry:includehead'));
+    assert.ok(args.includes('geometry:headheight=38pt'), args.join(' '));
+    assert.ok(!args.includes('geometry:includefoot'),
+              'page numbers alone sit in the margin, as before');
+    assert.ok(v(p.pandocArgs({ input: 'i', output: 'o.pdf', format: 'pdf',
+        style: { footer: { center: 'a\nb' } } }))
+        .includes('geometry:includefoot'));
+    assert.ok(!v(p.pandocArgs({ input: 'i', output: 'o.pdf', format: 'pdf',
+        style: Object.assign({ pageNumbers: false }, st) }))
+        .includes('pagestyle=empty'), 'the header\'s style decides');
+    // In the margin instead: the text keeps its whole area.
+    const inside = v(p.pandocArgs({ input: 'i', output: 'o.pdf',
+        format: 'pdf', style: Object.assign({ headerInMargin: true,
+            footer: { right: '{page}' } }, st) }));
+    assert.ok(!inside.includes('geometry:includehead'));
+    assert.ok(!inside.includes('geometry:includefoot'));
+    assert.ok(inside.includes('geometry:headheight=38pt'),
+              'still room for its lines');
+    const { exportStyle } = require('../src/main.js');
+    assert.equal(exportStyle({ dendrite_header_in_margin: true })
+        .headerInMargin, true);
+    const es = exportStyle({ dendrite_header_left: ['A', '**B**'],
+                             dendrite_footer_right: '{page}',
+                             dendrite_header_center: ' ' });
+    assert.deepEqual(es.header, { left: 'A\n**B**' }, 'a list of lines');
+    assert.deepEqual(es.footer, { right: '{page}' });
+    assert.equal(exportStyle({}).header, null);
+});

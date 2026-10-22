@@ -1462,8 +1462,52 @@ var require_pandoc = __commonJS({
     var ARTICLE_SIZES = [10, 11, 12];
     function footnoteGap(st) {
       if (st.footnoteGap) return st.footnoteGap;
-      const pt = (st.fontSize || 10) * 1.2 * (st.lineSpacing || 1);
-      return `${Math.round(pt * 10) / 10}pt`;
+      return `${Math.round(bodyLine(st) * 10) / 10}pt`;
+    }
+    function texEscape(t) {
+      const named = {
+        "\\": "\\textbackslash{}",
+        "^": "\\textasciicircum{}",
+        "~": "\\textasciitilde{}"
+      };
+      return t.replace(/[\\{}$&#%_^~]/g, (c) => named[c] || "\\" + c);
+    }
+    function headerLine(line) {
+      const t = texEscape(line.replace(/\{page\}/g, "").replace(/\{pages\}/g, ""));
+      return t.replace(/\*\*(.+?)\*\*/g, "\\textbf{$1}").replace(/\*(.+?)\*/g, "\\textit{$1}").replace(/\u0001/g, "\\thepage{}").replace(/\u0002/g, "\\pageref*{LastPage}");
+    }
+    function bodyLine(st) {
+      return (st.fontSize || 10) * 1.2 * (st.lineSpacing || 1);
+    }
+    var SLOTS = { left: "L", center: "C", right: "R" };
+    function slotsTex(slots2, cmd) {
+      return Object.entries(SLOTS).map(([k, pos]) => {
+        const text = slots2 && slots2[k] ? slots2[k].split("\n").map(headerLine).join("\\\\") : "";
+        return text ? `\\${cmd}[${pos}]{${text}}` : null;
+      }).filter(Boolean);
+    }
+    var anySlot = (st, re) => [st.header, st.footer].some((h) => h && Object.values(h).some((t) => re.test(t)));
+    var slotLines = (slots2) => Math.max(0, ...Object.values(slots2 || {}).map((t) => t.split("\n").length));
+    function preamble(st) {
+      const out = [`\\setlength{\\skip\\footins}{${footnoteGap(st)} plus 4pt minus 2pt}`];
+      if (st.header || st.footer) {
+        const pages = st.pageNumbers !== false && !anySlot(st, /\{page\}/);
+        const foot = st.footer ? slotsTex(st.footer, "fancyfoot") : [`\\fancyfoot[C]{${pages ? "\\thepage" : ""}}`];
+        if (anySlot(st, /\{pages\}/)) out.push("\\usepackage{lastpage}");
+        const style = [
+          "\\fancyhf{}",
+          ...slotsTex(st.header, "fancyhead"),
+          ...foot,
+          "\\renewcommand{\\headrulewidth}{0pt}"
+        ];
+        out.push(
+          "\\usepackage{fancyhdr}",
+          "\\pagestyle{fancy}",
+          ...style,
+          "\\fancypagestyle{plain}{" + style.join("") + "}"
+        );
+      }
+      return out.join("\n") + "\n";
     }
     function pandocArgs(o) {
       const st = o.style || {};
@@ -1491,7 +1535,29 @@ var require_pandoc = __commonJS({
           args.push("-V", `fontsize=${st.fontSize}pt`);
         }
         if (st.lineSpacing) args.push("-V", `linestretch=${st.lineSpacing}`);
-        if (st.pageNumbers === false) args.push("-V", "pagestyle=empty");
+        const head = slotLines(st.header);
+        const foot = slotLines(st.footer);
+        const inside = !st.headerInMargin;
+        if (head) {
+          if (inside) args.push("-V", "geometry:includehead");
+          args.push(
+            "-V",
+            `geometry:headheight=${Math.ceil(
+              head * bodyLine(st) + 2
+            )}pt`,
+            "-V",
+            "geometry:headsep=12pt"
+          );
+        }
+        if (foot) {
+          if (inside) args.push("-V", "geometry:includefoot");
+          args.push("-V", `geometry:footskip=${Math.ceil(
+            foot * bodyLine(st) + 12
+          )}pt`);
+        }
+        if (!st.header && !st.footer && st.pageNumbers === false) {
+          args.push("-V", "pagestyle=empty");
+        }
         if (o.header) args.push(`--include-in-header=${o.header}`);
       }
       if (o.format === "docx" && st.referenceDocx) {
@@ -1552,8 +1618,7 @@ var require_pandoc = __commonJS({
       if (o.format === "pdf") {
         text += BODY_END;
         header = deps.join(dir, `dendrite-${Date.now()}-header.tex`);
-        await deps.writeFile(header, `\\setlength{\\skip\\footins}{${footnoteGap(o.style || {})} plus 4pt minus 2pt}
-`);
+        await deps.writeFile(header, preamble(o.style || {}));
       }
       await deps.writeFile(input, text);
       const args = pandocArgs({
@@ -1604,6 +1669,7 @@ var require_pandoc = __commonJS({
       pdfPages,
       measuredRate,
       footnoteGap,
+      preamble,
       BODY_END
     };
   }
@@ -2169,12 +2235,11 @@ var DendriteView = class extends ItemView {
       () => this.plugin.openAsMarkdown(this.file)
     ).addClass("dendrite-bar-gap");
     btn("undo-2", "Undo", "Undo the last change to the tree: moves, new and deleted cards, roles and statuses (Ctrl+Z). A card's text is undone inside the card.", () => this.doUndo());
-    btn("redo-2", "Redo", "Redo what was undone (Ctrl+Shift+Z or Ctrl+Y)", () => this.doRedo());
-    this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
-    this.showMode();
-    bar.createDiv({ cls: "dendrite-title", text: this.file.basename });
+    btn("redo-2", "Redo", "Redo what was undone (Ctrl+Shift+Z or Ctrl+Y)", () => this.doRedo()).addClass("dendrite-bar-gap");
     btn("scroll-text", "Preview", "Show what export would print, beside the board", () => this.plugin.openPreview(this.file));
     btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e));
+    this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
+    this.showMode();
     this.totalEl = bar.createDiv({ cls: "dendrite-total" });
     this.statusEl = bar.createDiv({ cls: "dendrite-tally" });
   }
@@ -5532,6 +5597,16 @@ var DendritePreview = class extends ItemView {
 function textProp(v) {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 }
+function slots(fm, which) {
+  const out = {};
+  for (const k of ["left", "center", "right"]) {
+    let v = fm[`dendrite_${which}_${k}`];
+    if (Array.isArray(v)) v = v.map(String).join("\n");
+    v = textProp(v);
+    if (v) out[k] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
 function exportStyle(fm) {
   const size = parseFloat(String(fm.dendrite_font_size || ""));
   const spacing = Number(fm.dendrite_line_spacing);
@@ -5550,7 +5625,10 @@ function exportStyle(fm) {
     defaults: textProp(fm.dendrite_pandoc_defaults),
     referenceDocx: textProp(fm.dendrite_reference_docx),
     referencesTitle: fm.dendrite_references_title === false ? false : textProp(fm.dendrite_references_title),
-    footnoteGap: gap
+    footnoteGap: gap,
+    header: slots(fm, "header"),
+    footer: slots(fm, "footer"),
+    headerInMargin: fm.dendrite_header_in_margin === true
   };
 }
 function nodeRequest(url, init) {
@@ -5681,6 +5759,23 @@ var ManuscriptModal = class extends Modal {
       "dendrite_footnote_gap",
       ""
     );
+    new Setting(contentEl).setName("Header and footer").setHeading().setDesc("For PDF, on every page in the text's font and size. Each slot takes several lines, **bold**, *italic*, {page} and {pages}. A footer set replaces the page number at the foot; so does {page} anywhere.");
+    for (const which of ["header", "footer"]) {
+      for (const [k, name] of [
+        ["left", "left"],
+        ["center", "centre"],
+        ["right", "right"]
+      ]) {
+        const key = `dendrite_${which}_${k}`;
+        const now = st[which] && st[which][k];
+        new Setting(contentEl).setName(`${which[0].toUpperCase()}${which.slice(1)}, ` + name).addTextArea((t) => t.setValue(now || "").onChange((v) => {
+          draft[key] = v.trim() || null;
+        }));
+      }
+    }
+    new Setting(contentEl).setName("Header and footer in the margin").setDesc("Print them in the page margin, so the text keeps its whole area, where the format allows it. Off, the margin is measured to them and nothing is printed in it. A small margin may not hold several lines.").addToggle((tg) => tg.setValue(st.headerInMargin).onChange((v) => {
+      draft.dendrite_header_in_margin = v || null;
+    }));
     new Setting(contentEl).setName("Page numbers").setDesc("For PDF, at the foot of each page, numbered consecutively.").addToggle((tg) => tg.setValue(st.pageNumbers).onChange((v) => {
       draft.dendrite_page_numbers = v ? null : false;
     }));

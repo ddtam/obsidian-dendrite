@@ -38,7 +38,7 @@
     color: var(--text-muted);
 }
 
-/* Space between the manuscript's two icons and undo. */
+/* Space between the bar's groups of buttons. */
 .dendrite-bar-gap {
     margin-right: 8px;
 }
@@ -437,6 +437,11 @@
     border-radius: var(--radius-s);
     color: var(--text-muted);
     background: var(--background-modifier-hover);
+}
+
+/* The first read-out after the buttons. */
+.dendrite-bar .dendrite-mode {
+    margin-left: 12px;
 }
 
 .dendrite-mode.is-insert {
