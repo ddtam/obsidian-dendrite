@@ -1635,8 +1635,7 @@ var require_pandoc = __commonJS({
       try {
         await deps.run(o.pandoc || "pandoc", args);
       } catch (err) {
-        const msg = String(err && (err.stderr || err.message) || err).trim().split("\n").slice(-6).join("\n");
-        return { error: `Pandoc failed: ${msg}` };
+        return { error: pandocError(err, o.pandoc || "pandoc") };
       } finally {
         deps.remove(input);
         if (header) deps.remove(header);
@@ -1660,8 +1659,30 @@ var require_pandoc = __commonJS({
       if (!end || end < 2) return null;
       return Math.round(words / (end - 0.5));
     }
+    function pandocError(err, cmd) {
+      if (err && err.code === "ENOENT") {
+        return `Pandoc was not found (looked for "${cmd}"). Install it, or set its full path under Pandoc in Dendrite's settings: "which pandoc" in a terminal prints it, "where pandoc" on Windows.`;
+      }
+      const msg = String(err && (err.stderr || err.message) || err).trim().split("\n").slice(-6).join("\n");
+      return `Pandoc failed: ${msg}`;
+    }
+    function searchPath(env, platform, extra) {
+      const out = Object.assign({}, env);
+      const key = Object.keys(out).find((k) => k.toUpperCase() === "PATH") || "PATH";
+      const sep = platform === "win32" ? ";" : ":";
+      const parts = String(out[key] || "").split(sep).filter(Boolean);
+      for (const d of extra) if (!parts.includes(d)) parts.push(d);
+      out[key] = parts.join(sep);
+      return out;
+    }
+    function condaBins(names, home) {
+      return names.filter((n) => /^(ana|mini)conda\d*(-|$)|^(miniforge|mambaforge)\d*(-|$)/.test(n)).map((n) => `${home}/${n}/bin`);
+    }
     module2.exports = {
       citekeys,
+      pandocError,
+      searchPath,
+      condaBins,
       toPandoc,
       fetchBib,
       pandocArgs,
@@ -5322,7 +5343,10 @@ var DendriteView = class extends ItemView {
         ]
       );
     } catch (err) {
-      new Notice(`Dendrite: Pandoc could not write reference.docx: ${err.message || err}`);
+      new Notice("Dendrite: could not write reference.docx. " + pandoc.pandocError(
+        err,
+        this.plugin.settings.pandocPath || "pandoc"
+      ));
       return null;
     }
     new Notice(`Dendrite: wrote ${rel}. Open it in Word, set the Normal and heading styles, and save.`);
@@ -6598,14 +6622,38 @@ module.exports = class DendritePlugin extends Plugin {
     };
   }
   /**
-   * The search path Pandoc runs with: Obsidian's own plus TeX Live's
-   * usual install folders, since an app started from the desktop does
-   * not read the shell profile that adds them.
+   * The search path Pandoc runs with: Obsidian's own plus the usual
+   * install folders for Pandoc and TeX, since an app started from the
+   * desktop does not read the shell profile that adds them.
    */
   pandocEnv() {
     const fs = require("fs");
     const path = require("path");
+    const os = require("os");
+    const proc = globalThis.process;
     const extra = [];
+    if (proc.platform === "win32") {
+      const local = proc.env.LOCALAPPDATA;
+      const prog = proc.env.ProgramFiles || "C:\\Program Files";
+      if (local) {
+        extra.push(
+          path.join(local, "Pandoc"),
+          path.join(
+            local,
+            "Programs",
+            "MiKTeX",
+            "miktex",
+            "bin",
+            "x64"
+          )
+        );
+      }
+      extra.push(
+        path.join(prog, "Pandoc"),
+        path.join(prog, "MiKTeX", "miktex", "bin", "x64")
+      );
+      return pandoc.searchPath(proc.env, proc.platform, extra);
+    }
     for (const root of ["/usr/local/texlive", "/opt/texlive"]) {
       let years = [];
       try {
@@ -6627,11 +6675,17 @@ module.exports = class DendritePlugin extends Plugin {
     extra.push(
       "/Library/TeX/texbin",
       "/usr/local/bin",
-      "/opt/homebrew/bin"
+      "/opt/homebrew/bin",
+      "/usr/bin",
+      path.join(os.homedir(), ".local", "bin")
     );
-    const vars = Object.assign({}, globalThis.process.env);
-    vars.PATH = [vars.PATH || "", ...extra].filter(Boolean).join(":");
-    return vars;
+    let names = [];
+    try {
+      names = fs.readdirSync(os.homedir()).sort();
+    } catch (e) {
+    }
+    extra.push(...pandoc.condaBins(names, os.homedir()));
+    return pandoc.searchPath(proc.env, proc.platform, extra);
   }
   /**
    * Show an export: a PDF in a pane beside the board, reusing the one
