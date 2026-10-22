@@ -1623,7 +1623,7 @@ var require_pandoc = __commonJS({
       out.push(
         "\\usepackage{caption}",
         "\\captionsetup{labelformat=empty,labelsep=none,justification=raggedright,singlelinecheck=false}",
-        "\\setlength{\\LTcapwidth}{\\textwidth}"
+        "\\ifdefined\\LTcapwidth\\setlength{\\LTcapwidth}{\\textwidth}\\fi"
       );
       return out.join("\n") + "\n";
     }
@@ -2602,8 +2602,8 @@ var DendriteView = class extends ItemView {
     if (this.resizeFrame) return;
     this.resizeFrame = this.pageWin().requestAnimationFrame(() => {
       this.resizeFrame = null;
-      this.centre(false);
-      if (this.nativeScroll) this.drawFlow();
+      if (!this.scrolledByHand) this.centre(false);
+      if (this.nativeScroll || this.scrolledByHand) this.drawFlow();
     });
   }
   scheduleFlow() {
