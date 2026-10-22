@@ -69,10 +69,18 @@ function obsidianEditor(app, parent, opts) {
                 opts.onEscape();
                 return false;
             });
-            // Ctrl+Z in a new, empty card takes the card back; otherwise
-            // it is the text's own undo.
+            // Ctrl+Z is the text's own undo until this visit's typing is
+            // undone; then it steps back through the card's earlier
+            // visits, and in a new, empty card takes the card back.
             if (opts.onUndo) {
                 this.scope.register(['Mod'], 'z', () => !opts.onUndo());
+            }
+            // Redo steps a visit forward again after a step back.
+            if (opts.onRedo) {
+                for (const [mods, key] of [[['Mod', 'Shift'], 'z'],
+                                           [['Mod'], 'y']]) {
+                    this.scope.register(mods, key, () => !opts.onRedo());
+                }
             }
             // Find searches the manuscript, not this one card.
             if (opts.onFind) {

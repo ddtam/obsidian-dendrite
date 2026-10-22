@@ -134,6 +134,9 @@ class DendriteView extends ItemView {
         this.editing = null;
         this.undo = [];
         this.redo = [];
+        // Each card's own text history, visit by visit, apart from the
+        // board's: id -> { undo, redo } of { before, after } bodies.
+        this.texts = new Map();
         this.selfWrites = new Set();
         this.reloadTimer = null;
         // The index's list as last read or written here: a write over a
@@ -460,31 +463,36 @@ class DendriteView extends ItemView {
     }
 
     renderBar(el) {
-        // Everything sits at the left: the right edge of a pane is where
-        // other plugins' overlays, such as LiveSync's status, are drawn.
+        // The manuscript's settings and index note as two icons at the
+        // left, then undo and redo, the manuscript and what it prints.
+        // Nothing sits at the right, where other plugins' overlays, such
+        // as LiveSync's status, are drawn.
         const bar = el.createDiv({ cls: 'dendrite-bar' });
-        this.modeEl = bar.createDiv({ cls: 'dendrite-mode' });
-        this.showMode();
-        bar.createDiv({ cls: 'dendrite-title', text: this.file.basename });
         const btn = (icon, label, title, fn) => {
             const b = bar.createEl('button', { cls: 'dendrite-bar-btn' });
             setIcon(b.createSpan({ cls: 'dendrite-bar-icon' }), icon);
-            b.createSpan({ text: label });
+            if (label) b.createSpan({ text: label });
             b.setAttr('aria-label', title);
             b.onclick = fn;
+            return b;
         };
-        btn('file-output', 'Export', 'Export the manuscript to markdown, ' +
-            'PDF or Word', (e) => this.exportMenu(null, e));
-        btn('undo-2', 'Undo', 'Undo the last change to the tree or a ' +
-            'card\'s text (Ctrl+Z)', () => this.doUndo());
+        btn('settings', '', 'This manuscript\'s settings',
+            () => new ManuscriptModal(this).open());
+        btn('file-text', '', 'Open the index note as markdown',
+            () => this.plugin.openAsMarkdown(this.file))
+            .addClass('dendrite-bar-gap');
+        btn('undo-2', 'Undo', 'Undo the last change to the tree: moves, ' +
+            'new and deleted cards, roles and statuses (Ctrl+Z). A card\'s ' +
+            'text is undone inside the card.', () => this.doUndo());
         btn('redo-2', 'Redo', 'Redo what was undone (Ctrl+Shift+Z or ' +
             'Ctrl+Y)', () => this.doRedo());
-        btn('file-text', 'Index', 'Open the index note as markdown',
-            () => this.plugin.openAsMarkdown(this.file));
-        btn('settings', 'Settings', 'This manuscript\'s settings',
-            () => new ManuscriptModal(this).open());
+        this.modeEl = bar.createDiv({ cls: 'dendrite-mode' });
+        this.showMode();
+        bar.createDiv({ cls: 'dendrite-title', text: this.file.basename });
         btn('scroll-text', 'Preview', 'Show what export would print, ' +
             'beside the board', () => this.plugin.openPreview(this.file));
+        btn('file-output', 'Export', 'Export the manuscript to markdown, ' +
+            'PDF or Word', (e) => this.exportMenu(null, e));
         this.totalEl = bar.createDiv({ cls: 'dendrite-total' });
         this.statusEl = bar.createDiv({ cls: 'dendrite-tally' });
     }
@@ -1317,9 +1325,11 @@ class DendriteView extends ItemView {
             this.doUndo();
             return false;
         });
-        // Redo, in normal mode; in a card the editor keeps its own.
+        // Redo: the board's in normal mode; in a card, the card's own
+        // history after a step back through it, else the editor's.
         for (const [mods, key] of [[['Mod', 'Shift'], 'z'], [['Mod'], 'y']]) {
             s.register(mods, key, () => {
+                if (this.redoInEditor()) return false;
                 if (this.editing) return true;
                 this.doRedo();
                 return false;
@@ -1536,6 +1546,9 @@ class DendriteView extends ItemView {
             onChange: () => {
                 ed.dirty = true;
                 ed.changed = true;
+                // Typed, not a step through the card's history: what could
+                // be redone no longer follows.
+                if (!ed.applying) ed.stepped = false;
                 // Typed into, even if cleared again: Ctrl+Z is the text's.
                 ed.fresh = false;
                 // The column follows the caret as the card is typed in.
@@ -1552,6 +1565,7 @@ class DendriteView extends ItemView {
             onFind: () => { this.openFind(); },
             onRedraw: () => { if (this.find) this.paintFind(); },
             onUndo: () => this.undoInEditor(),
+            onRedo: () => this.redoInEditor(),
         }, this.plugin.settings.obsidianEditor !== false);
         ed.editor = editor;
         // The text box's own commands (bold, Tab, lists) are Dendrite's;
@@ -1615,15 +1629,11 @@ class DendriteView extends ItemView {
         }
         if (ed.changed) await this.plugin.lintCard(ed.file);
         // The editor's own history goes with it, so the visit becomes one
-        // step in the board's undo, beside tree changes in the order made.
+        // step in the card's text history, undone from inside the card.
         if (ed.changed) {
             const after = core.splitFrontmatter(
                 await this.app.vault.read(ed.file)).body;
-            if (after !== ed.before) {
-                this.pushUndo({ active: ed.id, files: [], text: true,
-                    restores: [{ path: ed.file.path, body: ed.before,
-                                 ifBody: after }] });
-            }
+            this.recordVisit(ed.id, ed.before, after);
         }
         this.invalidate(ed.id);
         const card = this.cardEls.get(ed.id);
@@ -1917,11 +1927,7 @@ class DendriteView extends ItemView {
         // own, before the split's, so undoing the split does not also
         // bring back text that now lives in the new card.
         await this.save(ed);
-        if (original !== ed.before) {
-            this.pushUndo({ active: ed.id, files: [], text: true,
-                restores: [{ path: ed.file.path, body: ed.before,
-                             ifBody: original }] });
-        }
+        this.recordVisit(ed.id, ed.before, original);
         const srcText = await this.app.vault.read(ed.file);
         // Read fresh, not from the board's last drawing: a status set a
         // moment ago may not have been drawn yet.
@@ -2070,26 +2076,77 @@ class DendriteView extends ItemView {
         if (this.editing && this.editing.id === id) this.editing.fresh = true;
     }
 
+    /** A visit's change to a card's text, for its own history. */
+    recordVisit(id, before, after) {
+        if (after === before) return;
+        let t = this.texts.get(id);
+        if (!t) this.texts.set(id, t = { undo: [], redo: [] });
+        t.undo.push({ before, after });
+        if (t.undo.length > UNDO_DEPTH) t.undo.shift();
+        t.redo = [];
+    }
+
     /**
-     * Ctrl+Z in a card before anything is typed in this visit, when the
-     * editor's own history is empty: a new card still empty is taken
-     * back, and a card whose last visit is the latest undo step gets its
-     * text from before that visit. False when the editor's undo applies.
+     * Ctrl+Z in a card once this visit's own typing is undone, or before
+     * any: the card steps back a whole earlier visit, its text as it was
+     * before that visit. A new card still empty is taken back instead.
+     * False when the editor's own undo applies.
      */
     undoInEditor() {
         if (this.undoEmptyNew()) return true;
         const ed = this.editing;
-        if (!ed || ed.changed) return false;
-        const top = this.undo[this.undo.length - 1];
-        const r = top && top.text && top.active === ed.id && top.restores[0];
-        if (!r || ed.editor.value.trim() !== r.ifBody.trim()) return false;
-        this.undo.pop();
-        ed.editor.replace(r.body, r.body.length);
+        if (!ed || ed.editor.value.trim() !== ed.before.trim()) return false;
+        const t = this.texts.get(ed.id);
+        const top = t && t.undo[t.undo.length - 1];
+        if (!top) return false;
+        // Split, merged or changed outside Dendrite since: the history
+        // before that is not this text's. The board's undo reverses a
+        // split or merge, and the history then applies again.
+        if (top.after.trim() !== ed.before.trim()) {
+            new Notice('Dendrite: this card\'s text changed since its ' +
+                       'last visit, by a split, merge or sync, so its ' +
+                       'earlier text is not undone here.');
+            return true;
+        }
+        t.undo.pop();
+        t.redo.push(top);
+        this.applyStep(ed, top.before);
+        return true;
+    }
+
+    /**
+     * Ctrl+Shift+Z or Ctrl+Y in a card right after stepping back through
+     * its history: the visit comes back. False when the editor's own
+     * redo applies.
+     */
+    redoInEditor() {
+        const ed = this.editing;
+        if (!ed || !ed.stepped) return false;
+        const t = this.texts.get(ed.id);
+        const top = t && t.redo[t.redo.length - 1];
+        if (!top || top.before.trim() !== ed.editor.value.trim()) {
+            return false;
+        }
+        t.redo.pop();
+        t.undo.push(top);
+        this.applyStep(ed, top.after);
+        return true;
+    }
+
+    /** Put a step's text in the editor; this visit starts from it. */
+    applyStep(ed, text) {
+        ed.applying = true;
+        try {
+            ed.editor.replace(text, text.length);
+        } finally {
+            ed.applying = false;
+        }
+        ed.before = text;
         ed.dirty = true;
         ed.changed = true;
         ed.fresh = false;
+        ed.stepped = true;
         this.save(ed);
-        return true;
     }
 
     /**
@@ -2174,7 +2231,8 @@ class DendriteView extends ItemView {
     async stepHistory(from, to, what) {
         const snap = from.pop();
         if (!snap) {
-            new Notice(`Dendrite: nothing to ${what}.`);
+            new Notice(`Dendrite: nothing to ${what} on the board. A ` +
+                       'card\'s text is undone and redone inside the card.');
             return;
         }
         const vault = this.app.vault;
@@ -2199,7 +2257,13 @@ class DendriteView extends ItemView {
             const f = vault.getAbstractFileByPath(path);
             if (!(f instanceof TFile)) continue;
             const data = await vault.read(f);
-            if (bodyOf(data).trim() === expect.trim()) {
+            // Text typed into it on this board is in its own history,
+            // and comes back with a redo, so it goes too.
+            const t = this.texts.get(f.basename);
+            const typed = t && t.undo.length &&
+                t.undo[t.undo.length - 1].after.trim();
+            const body = bodyOf(data).trim();
+            if (body === expect.trim() || (typed && body === typed)) {
                 this.invalidate(f.basename);
                 await this.app.fileManager.trashFile(f);
                 inv.files.push({ path, data });
@@ -3914,14 +3978,19 @@ function textProp(v) {
  * size in points (`10` or `10pt`), margin (a bare number is in cm),
  * paper (letter or a4), line
  * spacing, page numbers (on unless false), a Pandoc defaults file and a
- * Word reference document, both paths from the vault root, and the
- * reference list's heading (References unless set; false for none).
+ * Word reference document, both paths from the vault root, the
+ * reference list's heading (References unless set; false for none), and
+ * the space above the footnote rule, a TeX length (a bare number is in
+ * points).
  */
 function exportStyle(fm) {
     const size = parseFloat(String(fm.dendrite_font_size || ''));
     const spacing = Number(fm.dendrite_line_spacing);
     let margin = textProp(String(fm.dendrite_margin || ''));
     if (margin && /^\d+(\.\d+)?$/.test(margin)) margin += 'cm';
+    let gap = String(fm.dendrite_footnote_gap ?? '').trim();
+    if (/^\d+(\.\d+)?$/.test(gap)) gap += 'pt';
+    if (!/^\d+(\.\d+)?(pt|bp|mm|cm|in|em|ex)$/.test(gap)) gap = null;
     return {
         font: textProp(fm.dendrite_font),
         fontSize: size > 0 ? size : null,
@@ -3934,6 +4003,7 @@ function exportStyle(fm) {
         referenceDocx: textProp(fm.dendrite_reference_docx),
         referencesTitle: fm.dendrite_references_title === false ? false :
             textProp(fm.dendrite_references_title),
+        footnoteGap: gap,
     };
 }
 
@@ -4101,6 +4171,10 @@ class ManuscriptModal extends Modal {
         text('Line spacing', 'For PDF: 1 is single, 1.5 one and a half. ' +
              'Empty: single.', st.lineSpacing, 'dendrite_line_spacing',
              '1');
+        text('Space above footnotes', 'For PDF, between the last line ' +
+             'of text and the footnote rule, such as 14pt or 0.5cm; a ' +
+             'bare number is in points. Empty: one line of text.',
+             st.footnoteGap, 'dendrite_footnote_gap', '');
         new Setting(contentEl).setName('Page numbers')
             .setDesc('For PDF, at the foot of each page, numbered ' +
                      'consecutively.')
@@ -5187,3 +5261,4 @@ module.exports.core = core;
 module.exports.DendriteView = DendriteView;
 module.exports.DendritePreview = DendritePreview;
 module.exports.DendriteSettings = DendriteSettings;
+module.exports.exportStyle = exportStyle;

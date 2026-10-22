@@ -1147,6 +1147,14 @@ var require_editor = __commonJS({
           if (opts.onUndo) {
             this.scope.register(["Mod"], "z", () => !opts.onUndo());
           }
+          if (opts.onRedo) {
+            for (const [mods, key] of [
+              [["Mod", "Shift"], "z"],
+              [["Mod"], "y"]
+            ]) {
+              this.scope.register(mods, key, () => !opts.onRedo());
+            }
+          }
           if (opts.onFind) {
             this.scope.register(["Mod"], "f", () => {
               opts.onFind();
@@ -1452,6 +1460,11 @@ var require_pandoc = __commonJS({
       return missing.length ? { missing } : { bib: JSON.stringify(all) };
     }
     var ARTICLE_SIZES = [10, 11, 12];
+    function footnoteGap(st) {
+      if (st.footnoteGap) return st.footnoteGap;
+      const pt = (st.fontSize || 10) * 1.2 * (st.lineSpacing || 1);
+      return `${Math.round(pt * 10) / 10}pt`;
+    }
     function pandocArgs(o) {
       const st = o.style || {};
       const args = [
@@ -1479,6 +1492,7 @@ var require_pandoc = __commonJS({
         }
         if (st.lineSpacing) args.push("-V", `linestretch=${st.lineSpacing}`);
         if (st.pageNumbers === false) args.push("-V", "pagestyle=empty");
+        if (o.header) args.push(`--include-in-header=${o.header}`);
       }
       if (o.format === "docx" && st.referenceDocx) {
         args.push(`--reference-doc=${st.referenceDocx}`);
@@ -1534,7 +1548,13 @@ var require_pandoc = __commonJS({
           await deps.writeFile(bibliography, got.bib);
         }
       }
-      if (o.format === "pdf") text += BODY_END;
+      let header = null;
+      if (o.format === "pdf") {
+        text += BODY_END;
+        header = deps.join(dir, `dendrite-${Date.now()}-header.tex`);
+        await deps.writeFile(header, `\\setlength{\\skip\\footins}{${footnoteGap(o.style || {})} plus 4pt minus 2pt}
+`);
+      }
       await deps.writeFile(input, text);
       const args = pandocArgs({
         input,
@@ -1544,6 +1564,7 @@ var require_pandoc = __commonJS({
         bibliography,
         csl: o.csl,
         resourcePath: o.resourcePath,
+        header,
         style: o.style
       });
       try {
@@ -1553,6 +1574,7 @@ var require_pandoc = __commonJS({
         return { error: `Pandoc failed: ${msg}` };
       } finally {
         deps.remove(input);
+        if (header) deps.remove(header);
         if (bibliography && bibliography !== o.fallbackBib) {
           deps.remove(bibliography);
         }
@@ -1581,6 +1603,7 @@ var require_pandoc = __commonJS({
       exportDocument,
       pdfPages,
       measuredRate,
+      footnoteGap,
       BODY_END
     };
   }
@@ -1832,6 +1855,7 @@ var DendriteView = class extends ItemView {
     this.editing = null;
     this.undo = [];
     this.redo = [];
+    this.texts = /* @__PURE__ */ new Map();
     this.selfWrites = /* @__PURE__ */ new Set();
     this.reloadTimer = null;
     this.indexList = null;
@@ -2124,32 +2148,33 @@ var DendriteView = class extends ItemView {
   }
   renderBar(el) {
     const bar = el.createDiv({ cls: "dendrite-bar" });
-    this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
-    this.showMode();
-    bar.createDiv({ cls: "dendrite-title", text: this.file.basename });
     const btn = (icon, label, title, fn) => {
       const b = bar.createEl("button", { cls: "dendrite-bar-btn" });
       setIcon(b.createSpan({ cls: "dendrite-bar-icon" }), icon);
-      b.createSpan({ text: label });
+      if (label) b.createSpan({ text: label });
       b.setAttr("aria-label", title);
       b.onclick = fn;
+      return b;
     };
-    btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e));
-    btn("undo-2", "Undo", "Undo the last change to the tree or a card's text (Ctrl+Z)", () => this.doUndo());
-    btn("redo-2", "Redo", "Redo what was undone (Ctrl+Shift+Z or Ctrl+Y)", () => this.doRedo());
-    btn(
-      "file-text",
-      "Index",
-      "Open the index note as markdown",
-      () => this.plugin.openAsMarkdown(this.file)
-    );
     btn(
       "settings",
-      "Settings",
+      "",
       "This manuscript's settings",
       () => new ManuscriptModal(this).open()
     );
+    btn(
+      "file-text",
+      "",
+      "Open the index note as markdown",
+      () => this.plugin.openAsMarkdown(this.file)
+    ).addClass("dendrite-bar-gap");
+    btn("undo-2", "Undo", "Undo the last change to the tree: moves, new and deleted cards, roles and statuses (Ctrl+Z). A card's text is undone inside the card.", () => this.doUndo());
+    btn("redo-2", "Redo", "Redo what was undone (Ctrl+Shift+Z or Ctrl+Y)", () => this.doRedo());
+    this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
+    this.showMode();
+    bar.createDiv({ cls: "dendrite-title", text: this.file.basename });
     btn("scroll-text", "Preview", "Show what export would print, beside the board", () => this.plugin.openPreview(this.file));
+    btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e));
     this.totalEl = bar.createDiv({ cls: "dendrite-total" });
     this.statusEl = bar.createDiv({ cls: "dendrite-tally" });
   }
@@ -3000,6 +3025,7 @@ var DendriteView = class extends ItemView {
     });
     for (const [mods, key] of [[["Mod", "Shift"], "z"], [["Mod"], "y"]]) {
       s.register(mods, key, () => {
+        if (this.redoInEditor()) return false;
         if (this.editing) return true;
         this.doRedo();
         return false;
@@ -3195,6 +3221,7 @@ var DendriteView = class extends ItemView {
       onChange: () => {
         ed.dirty = true;
         ed.changed = true;
+        if (!ed.applying) ed.stepped = false;
         ed.fresh = false;
         this.followCaret();
         this.scheduleCounts();
@@ -3216,7 +3243,8 @@ var DendriteView = class extends ItemView {
       onRedraw: () => {
         if (this.find) this.paintFind();
       },
-      onUndo: () => this.undoInEditor()
+      onUndo: () => this.undoInEditor(),
+      onRedo: () => this.redoInEditor()
     }, this.plugin.settings.obsidianEditor !== false);
     ed.editor = editor;
     ed.ta = editor.ta || null;
@@ -3274,18 +3302,7 @@ var DendriteView = class extends ItemView {
       const after = core.splitFrontmatter(
         await this.app.vault.read(ed.file)
       ).body;
-      if (after !== ed.before) {
-        this.pushUndo({
-          active: ed.id,
-          files: [],
-          text: true,
-          restores: [{
-            path: ed.file.path,
-            body: ed.before,
-            ifBody: after
-          }]
-        });
-      }
+      this.recordVisit(ed.id, ed.before, after);
     }
     this.invalidate(ed.id);
     const card = this.cardEls.get(ed.id);
@@ -3555,18 +3572,7 @@ var DendriteView = class extends ItemView {
     if (!node) return;
     const before = core.serialiseTree(this.root);
     await this.save(ed);
-    if (original !== ed.before) {
-      this.pushUndo({
-        active: ed.id,
-        files: [],
-        text: true,
-        restores: [{
-          path: ed.file.path,
-          body: ed.before,
-          ifBody: original
-        }]
-      });
-    }
+    this.recordVisit(ed.id, ed.before, original);
     const srcText = await this.app.vault.read(ed.file);
     const srcStatus = core.roleFor(node, (x) => this.roleOf(x)) === "prose" ? this.statusOf(ed.id) : null;
     const set = this.roleOf(ed.id);
@@ -3712,26 +3718,69 @@ var DendriteView = class extends ItemView {
     await this.startEdit(id);
     if (this.editing && this.editing.id === id) this.editing.fresh = true;
   }
+  /** A visit's change to a card's text, for its own history. */
+  recordVisit(id, before, after) {
+    if (after === before) return;
+    let t = this.texts.get(id);
+    if (!t) this.texts.set(id, t = { undo: [], redo: [] });
+    t.undo.push({ before, after });
+    if (t.undo.length > UNDO_DEPTH) t.undo.shift();
+    t.redo = [];
+  }
   /**
-   * Ctrl+Z in a card before anything is typed in this visit, when the
-   * editor's own history is empty: a new card still empty is taken
-   * back, and a card whose last visit is the latest undo step gets its
-   * text from before that visit. False when the editor's undo applies.
+   * Ctrl+Z in a card once this visit's own typing is undone, or before
+   * any: the card steps back a whole earlier visit, its text as it was
+   * before that visit. A new card still empty is taken back instead.
+   * False when the editor's own undo applies.
    */
   undoInEditor() {
     if (this.undoEmptyNew()) return true;
     const ed = this.editing;
-    if (!ed || ed.changed) return false;
-    const top = this.undo[this.undo.length - 1];
-    const r = top && top.text && top.active === ed.id && top.restores[0];
-    if (!r || ed.editor.value.trim() !== r.ifBody.trim()) return false;
-    this.undo.pop();
-    ed.editor.replace(r.body, r.body.length);
+    if (!ed || ed.editor.value.trim() !== ed.before.trim()) return false;
+    const t = this.texts.get(ed.id);
+    const top = t && t.undo[t.undo.length - 1];
+    if (!top) return false;
+    if (top.after.trim() !== ed.before.trim()) {
+      new Notice("Dendrite: this card's text changed since its last visit, by a split, merge or sync, so its earlier text is not undone here.");
+      return true;
+    }
+    t.undo.pop();
+    t.redo.push(top);
+    this.applyStep(ed, top.before);
+    return true;
+  }
+  /**
+   * Ctrl+Shift+Z or Ctrl+Y in a card right after stepping back through
+   * its history: the visit comes back. False when the editor's own
+   * redo applies.
+   */
+  redoInEditor() {
+    const ed = this.editing;
+    if (!ed || !ed.stepped) return false;
+    const t = this.texts.get(ed.id);
+    const top = t && t.redo[t.redo.length - 1];
+    if (!top || top.before.trim() !== ed.editor.value.trim()) {
+      return false;
+    }
+    t.redo.pop();
+    t.undo.push(top);
+    this.applyStep(ed, top.after);
+    return true;
+  }
+  /** Put a step's text in the editor; this visit starts from it. */
+  applyStep(ed, text) {
+    ed.applying = true;
+    try {
+      ed.editor.replace(text, text.length);
+    } finally {
+      ed.applying = false;
+    }
+    ed.before = text;
     ed.dirty = true;
     ed.changed = true;
     ed.fresh = false;
+    ed.stepped = true;
     this.save(ed);
-    return true;
   }
   /**
    * Ctrl+Z in a card just made and still empty: undo making it, since
@@ -3812,7 +3861,7 @@ var DendriteView = class extends ItemView {
   async stepHistory(from, to, what) {
     const snap = from.pop();
     if (!snap) {
-      new Notice(`Dendrite: nothing to ${what}.`);
+      new Notice(`Dendrite: nothing to ${what} on the board. A card's text is undone and redone inside the card.`);
       return;
     }
     const vault = this.app.vault;
@@ -3839,7 +3888,10 @@ var DendriteView = class extends ItemView {
       const f = vault.getAbstractFileByPath(path);
       if (!(f instanceof TFile)) continue;
       const data = await vault.read(f);
-      if (bodyOf(data).trim() === expect.trim()) {
+      const t = this.texts.get(f.basename);
+      const typed = t && t.undo.length && t.undo[t.undo.length - 1].after.trim();
+      const body = bodyOf(data).trim();
+      if (body === expect.trim() || typed && body === typed) {
         this.invalidate(f.basename);
         await this.app.fileManager.trashFile(f);
         inv.files.push({ path, data });
@@ -5485,6 +5537,9 @@ function exportStyle(fm) {
   const spacing = Number(fm.dendrite_line_spacing);
   let margin = textProp(String(fm.dendrite_margin || ""));
   if (margin && /^\d+(\.\d+)?$/.test(margin)) margin += "cm";
+  let gap = String(fm.dendrite_footnote_gap ?? "").trim();
+  if (/^\d+(\.\d+)?$/.test(gap)) gap += "pt";
+  if (!/^\d+(\.\d+)?(pt|bp|mm|cm|in|em|ex)$/.test(gap)) gap = null;
   return {
     font: textProp(fm.dendrite_font),
     fontSize: size > 0 ? size : null,
@@ -5494,7 +5549,8 @@ function exportStyle(fm) {
     pageNumbers: fm.dendrite_page_numbers !== false,
     defaults: textProp(fm.dendrite_pandoc_defaults),
     referenceDocx: textProp(fm.dendrite_reference_docx),
-    referencesTitle: fm.dendrite_references_title === false ? false : textProp(fm.dendrite_references_title)
+    referencesTitle: fm.dendrite_references_title === false ? false : textProp(fm.dendrite_references_title),
+    footnoteGap: gap
   };
 }
 function nodeRequest(url, init) {
@@ -5617,6 +5673,13 @@ var ManuscriptModal = class extends Modal {
       st.lineSpacing,
       "dendrite_line_spacing",
       "1"
+    );
+    text(
+      "Space above footnotes",
+      "For PDF, between the last line of text and the footnote rule, such as 14pt or 0.5cm; a bare number is in points. Empty: one line of text.",
+      st.footnoteGap,
+      "dendrite_footnote_gap",
+      ""
     );
     new Setting(contentEl).setName("Page numbers").setDesc("For PDF, at the foot of each page, numbered consecutively.").addToggle((tg) => tg.setValue(st.pageNumbers).onChange((v) => {
       draft.dendrite_page_numbers = v ? null : false;
@@ -6599,3 +6662,4 @@ module.exports.core = core;
 module.exports.DendriteView = DendriteView;
 module.exports.DendritePreview = DendritePreview;
 module.exports.DendriteSettings = DendriteSettings;
+module.exports.exportStyle = exportStyle;

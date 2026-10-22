@@ -250,3 +250,28 @@ test('a PDF export marks the end of the body; Word gets no mark', async () => {
             { pages: 6, bodyEnd: 5 } : null);
     }
 });
+
+test('a PDF puts one body line above the footnote rule, or the ' +
+     'manuscript\'s own gap', async () => {
+    assert.equal(p.footnoteGap({}), '12pt', '10pt type, single spaced');
+    assert.equal(p.footnoteGap({ fontSize: 10, lineSpacing: 1.5 }), '18pt');
+    assert.equal(p.footnoteGap({ footnoteGap: '14pt' }), '14pt');
+    const { exportStyle } = require('../src/main.js');
+    const gap = (v) => exportStyle({ dendrite_footnote_gap: v }).footnoteGap;
+    assert.equal(gap(14), '14pt', 'a bare number is in points');
+    assert.equal(gap('0.5cm'), '0.5cm');
+    assert.equal(gap('wide'), null, 'not a length: the default');
+    for (const format of ['pdf', 'docx']) {
+        const deps = fakeDeps(null);
+        let header = null;
+        deps.run = async (cmd, args) => {
+            const a = args.find((x) => x.startsWith('--include-in-header='));
+            header = a ? deps.files[a.split('=')[1]] : null;
+        };
+        await p.exportDocument({ md: 'Text.', format, output: '/o.' + format,
+            style: { fontSize: 10, lineSpacing: 1.5 } }, deps);
+        assert.equal(header, format === 'pdf' ?
+            '\\setlength{\\skip\\footins}{18pt plus 4pt minus 2pt}\n' :
+            null);
+    }
+});

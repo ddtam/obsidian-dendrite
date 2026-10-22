@@ -105,11 +105,25 @@ async function fetchBib(keys, port, deps) {
 const ARTICLE_SIZES = [10, 11, 12];
 
 /**
+ * The space above a PDF's footnote rule, as a TeX length: the
+ * manuscript's own, else one body line, the font size times LaTeX's
+ * 1.2 leading times the line spacing. LaTeX's default is 9pt at 10pt
+ * type whatever the spacing, half a line at one and a half.
+ */
+function footnoteGap(st) {
+    if (st.footnoteGap) return st.footnoteGap;
+    const pt = (st.fontSize || 10) * 1.2 * (st.lineSpacing || 1);
+    return `${Math.round(pt * 10) / 10}pt`;
+}
+
+/**
  * Pandoc's arguments for one export. `o.style` holds what the manuscript
  * sets: font, fontSize (points), margin, paper, lineSpacing, pageNumbers,
  * defaults (a Pandoc defaults file), referenceDocx (Word's styles) and
  * referencesTitle (the reference list's heading; false for none).
- * A defaults file comes first, so the manuscript's own settings win.
+ * `o.header` is a file of LaTeX for the PDF's preamble, added to any a
+ * defaults file brings. A defaults file comes first, so the manuscript's
+ * own settings win.
  */
 function pandocArgs(o) {
     const st = o.style || {};
@@ -129,6 +143,7 @@ function pandocArgs(o) {
         }
         if (st.lineSpacing) args.push('-V', `linestretch=${st.lineSpacing}`);
         if (st.pageNumbers === false) args.push('-V', 'pagestyle=empty');
+        if (o.header) args.push(`--include-in-header=${o.header}`);
     }
     if (o.format === 'docx' && st.referenceDocx) {
         args.push(`--reference-doc=${st.referenceDocx}`);
@@ -214,11 +229,17 @@ async function exportDocument(o, deps) {
             await deps.writeFile(bibliography, got.bib);
         }
     }
-    if (o.format === 'pdf') text += BODY_END;
+    let header = null;
+    if (o.format === 'pdf') {
+        text += BODY_END;
+        header = deps.join(dir, `dendrite-${Date.now()}-header.tex`);
+        await deps.writeFile(header, '\\setlength{\\skip\\footins}{' +
+            `${footnoteGap(o.style || {})} plus 4pt minus 2pt}\n`);
+    }
     await deps.writeFile(input, text);
     const args = pandocArgs({ input, output: o.output, format: o.format,
                               engine: o.engine, bibliography, csl: o.csl,
-                              resourcePath: o.resourcePath,
+                              resourcePath: o.resourcePath, header,
                               style: o.style });
     try {
         await deps.run(o.pandoc || 'pandoc', args);
@@ -228,6 +249,7 @@ async function exportDocument(o, deps) {
         return { error: `Pandoc failed: ${msg}` };
     } finally {
         deps.remove(input);
+        if (header) deps.remove(header);
         if (bibliography && bibliography !== o.fallbackBib) {
             deps.remove(bibliography);
         }
@@ -258,4 +280,4 @@ function measuredRate(words, layout, cited) {
 }
 
 module.exports = { citekeys, toPandoc, fetchBib, pandocArgs, exportDocument,
-                   pdfPages, measuredRate, BODY_END };
+                   pdfPages, measuredRate, footnoteGap, BODY_END };

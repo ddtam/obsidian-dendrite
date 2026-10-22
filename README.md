@@ -57,8 +57,8 @@ Obsidian has no public API for putting its editor inside another view, so Dendri
 | Alt+↑ / Alt+↓ | Move the card among its siblings |
 | Alt+→ / Alt+← | Indent under the card above / outdent |
 | Ctrl+Backspace | Delete the card and its children |
-| Ctrl+Z | Undo the last change, to the tree or to a card's text; in a card before you type, undo making it if it is new and empty, or bring back its text from before your last visit |
-| Ctrl+Shift+Z or Ctrl+Y | Redo what was undone, in normal mode |
+| Ctrl+Z | In normal mode, undo the last change to the tree. In a card, undo its text: this visit's typing first, then its earlier visits one at a time; in a new, empty card, undo making it |
+| Ctrl+Shift+Z or Ctrl+Y | Redo what was undone, on the board or in the card |
 | Ctrl+F | Find in the cards, in either mode |
 | 0 to 4 | What the card prints: 0 automatic, 1 heading only, 2 full text, 3 scaffolding, 4 left out; in normal mode |
 | Ctrl+1 to 3 | The card's status: 1 draft, 2 done, 3 revise; in normal mode, on a card whose text prints, by the physical key on any layout. While the board has focus these take the place of Obsidian's Ctrl+1 to 3 for going to a tab |
@@ -88,7 +88,7 @@ On a phone, the active card's toolbar offers the same actions, and a long press 
 
 **Text is never discarded.** A card saves while you type and again whenever you leave it, Escape included. Deleted cards go to Obsidian's trash, and Ctrl+Z restores them.
 
-**Undo covers both the tree and the cards' text.** Inside a card, Ctrl+Z is the editor's own undo, letter by letter, but that history ends when you leave the card. So each visit that changes a card's text becomes one step in the board's undo, beside moves, inserts and deletes, in the order they were made. Opening a card again and pressing Ctrl+Z before typing brings back its text from before the last visit. Redo, Ctrl+Shift+Z or Ctrl+Y, takes back any undo until you make a new change. A step is only undone or redone while the card still holds the text it left there; a card changed since, by sync or in another tab, is left alone and Dendrite says so.
+**Each card undoes its own text, and the board undoes the tree.** Ctrl+Z on the board, or **Undo** in the bar, undoes changes to the tree: moves, indents, new and deleted cards, splits and merges, roles and statuses. A card's text is undone inside the card, so editing one card never puts another card's undo out of reach. Inside a card, Ctrl+Z is the editor's own undo, letter by letter, for this visit. Once this visit's typing is undone, or before you type, Ctrl+Z steps back through the card's earlier visits, one whole visit at a time. Ctrl+Shift+Z or Ctrl+Y brings them forward again, until you type. Undoing a new card on the board takes the text typed into it too, and redo brings both back. A card's history stops at a split, a merge or a change from outside Dendrite, such as a sync or another tab: earlier text is never written over text Dendrite did not put there, and Dendrite says so. Undoing the split or merge on the board makes the earlier history reachable again. The histories last until Obsidian closes.
 
 ## Splitting and merging cards
 
@@ -100,7 +100,7 @@ Undo reverses a move or a merge in one step, but never discards text written sin
 
 ## Manuscript settings and card properties
 
-**Settings** in the bar edits the manuscript's properties on its index note: a total limit, whether characters count spaces, words per page for page estimates, numbering, and the top heading level for export. The **sliders** button on a card edits its label and its limit.
+**Settings**, the gear at the bar's left, edits the manuscript's properties on its index note: a total limit, whether characters count spaces, words per page for page estimates, numbering, and the top heading level for export. The **sliders** button on a card edits its label and its limit.
 
 ### Quotas
 
@@ -210,6 +210,7 @@ Set in the manuscript's settings, under **PDF and Word**, or as properties on th
 | `dendrite_margin` | PDF | `2cm`, `1in` (a bare number is cm) | 2.5cm |
 | `dendrite_paper` | PDF | `a4` or `letter` | letter |
 | `dendrite_line_spacing` | PDF | `1.15` | single |
+| `dendrite_footnote_gap` | PDF | `14pt`, `0.5cm` (a bare number is points): space between the last line of text and the footnote rule | one line of text: font size × 1.2 × line spacing, so 18pt at 10pt and 1.5 |
 | `dendrite_page_numbers` | PDF | `false` to leave them off | numbered consecutively at the foot |
 | `dendrite_pandoc_defaults` | both | `styles/grant.yaml`, a Pandoc defaults file for anything else | none |
 | `dendrite_reference_docx` | Word | `styles/reference.docx`, whose styles Word export copies | Pandoc's |

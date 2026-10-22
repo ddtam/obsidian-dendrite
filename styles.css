@@ -38,6 +38,11 @@
     color: var(--text-muted);
 }
 
+/* Space between the manuscript's two icons and undo. */
+.dendrite-bar-gap {
+    margin-right: 8px;
+}
+
 .dendrite-bar-btn:hover {
     color: var(--text-normal);
     background: var(--background-modifier-hover);
