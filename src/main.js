@@ -424,6 +424,11 @@ class DendriteView extends ItemView {
         if (!this.nativeScroll) {
             board.addEventListener('wheel', (e) => this.onWheel(e),
                                    { passive: false });
+        } else {
+            // A phone scrolls natively: a touch is a hand scrolling.
+            board.addEventListener('touchmove', () => {
+                this.scrolledByHand = true;
+            }, { passive: true });
         }
         this.renderOrphans(stage);
         const cols = core.columns(this.root);
@@ -642,8 +647,12 @@ class DendriteView extends ItemView {
             now.removeClass('is-pending');
             now.removeClass('is-missing');
             // Its rendered height replaces the placeholder's, which moves
-            // the centre if the card is on the active card's lineage.
-            if (this.lineage && this.lineage.has(id)) this.centre(false);
+            // the centre if the card is on the active card's lineage;
+            // unless a column has been scrolled by hand since, as cards
+            // are drawn when scrolled into view and would pull it back.
+            if (this.lineage && this.lineage.has(id) && !this.scrolledByHand) {
+                this.centre(false);
+            }
             this.scheduleFlow();
             if (this.find) this.paintFind();
         }
@@ -759,6 +768,7 @@ class DendriteView extends ItemView {
      */
     centre(smooth = true, typed = false) {
         if (!this.board) return;
+        this.scrolledByHand = false;
         const node = this.active && this.byId.get(this.active);
         if (!node) return;
         const behavior = smooth ? 'smooth' : 'auto';
@@ -933,6 +943,7 @@ class DendriteView extends ItemView {
             this.anim = null;
         }
         const d = Number(col.dataset.depth);
+        this.scrolledByHand = true;
         const unit = e.deltaMode === 1 ? 16 :
             (e.deltaMode === 2 ? col.clientHeight : 1);
         this.setColOffset(d, this.colOffset(d) + e.deltaY * unit);

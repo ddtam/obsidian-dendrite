@@ -109,6 +109,37 @@ test('typing in a tall card keeps the caret in view, or centred',
     await view.endEdit();
 });
 
+test('a card drawn while a column is scrolled by hand does not pull the ' +
+     'board back to the active card', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    view.active = 'G-aaaaa';
+    view.applyActive(false);
+    let centred = 0;
+    const centre = view.centre.bind(view);
+    view.centre = (...a) => { centred++; return centre(...a); };
+    const redraw = async (id) => {
+        view.invalidate(id);
+        view.cardEls.get(id).addClass('is-pending');
+        await view.renderCard(id);
+    };
+    // Not scrolled: a card on the active path, drawn, re-centres.
+    await redraw('G-bbbbb');
+    assert.equal(centred, 1);
+    // Scrolled by hand: B coming into view and drawn moves nothing.
+    const col = view.board.querySelectorAll('.dendrite-col')[1];
+    view.onWheel({ target: col, deltaY: 200, deltaMode: 0,
+                   preventDefault() {} });
+    await redraw('G-bbbbb');
+    assert.equal(centred, 1, 'not pulled back');
+    // Moving to a card centres again, and redraws follow it again.
+    view.applyActive(false);
+    await redraw('G-bbbbb');
+    assert.equal(centred, 3);
+});
+
 test('leaving the editor saves at once, before the autosave fires',
      async () => {
     const { view, read, text } = await open('---\ndendrite_prefix: G\n---\n');

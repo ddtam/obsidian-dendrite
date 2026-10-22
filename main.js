@@ -2176,6 +2176,10 @@ var DendriteView = class extends ItemView {
         (e) => this.onWheel(e),
         { passive: false }
       );
+    } else {
+      board.addEventListener("touchmove", () => {
+        this.scrolledByHand = true;
+      }, { passive: true });
     }
     this.renderOrphans(stage);
     const cols = core.columns(this.root);
@@ -2394,7 +2398,9 @@ var DendriteView = class extends ItemView {
       b.appendChild(out);
       now.removeClass("is-pending");
       now.removeClass("is-missing");
-      if (this.lineage && this.lineage.has(id)) this.centre(false);
+      if (this.lineage && this.lineage.has(id) && !this.scrolledByHand) {
+        this.centre(false);
+      }
       this.scheduleFlow();
       if (this.find) this.paintFind();
     }
@@ -2500,6 +2506,7 @@ var DendriteView = class extends ItemView {
    */
   centre(smooth = true, typed = false) {
     if (!this.board) return;
+    this.scrolledByHand = false;
     const node = this.active && this.byId.get(this.active);
     if (!node) return;
     const behavior = smooth ? "smooth" : "auto";
@@ -2678,6 +2685,7 @@ var DendriteView = class extends ItemView {
       this.anim = null;
     }
     const d = Number(col.dataset.depth);
+    this.scrolledByHand = true;
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? col.clientHeight : 1;
     this.setColOffset(d, this.colOffset(d) + e.deltaY * unit);
     this.drawFlow();
