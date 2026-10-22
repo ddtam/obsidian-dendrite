@@ -313,7 +313,54 @@ var require_core = __commonJS({
       if (ROLES.includes(set)) return set;
       return node.children.length ? "section" : "prose";
     }
-    function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf) {
+    var KINDS = ["table", "figure"];
+    function withKinds(roleOf, kindOf) {
+      return (id) => {
+        const role = roleOf(id);
+        if (!KINDS.includes(kindOf(id))) return role;
+        return role === "notes" || role === "scaffolding" ? role : "prose";
+      };
+    }
+    function floatLabels(nodes, roleOf, kindOf) {
+      const out = /* @__PURE__ */ new Map();
+      const next = { table: 0, figure: 0 };
+      const walk = (node) => {
+        const role = roleFor(node, roleOf);
+        if (role === "notes") return;
+        const kind = kindOf ? kindOf(node.id) : null;
+        if (role !== "scaffolding" && KINDS.includes(kind)) {
+          next[kind] += 1;
+          out.set(node.id, (kind === "table" ? "Table " : "Figure ") + next[kind]);
+        }
+        for (const c of node.children) walk(c);
+      };
+      for (const n of nodes) walk(n);
+      return out;
+    }
+    var TABLE_LINE = /^\s*\|/;
+    var IMAGE_LINE = /^\s*!\[(\[[^\]]*\]|[^\]]*\]\([^)]*\))\]?\s*$/;
+    function floatText(body, kind, label) {
+      const lines = body.split("\n");
+      const isBody = (l) => kind === "table" ? TABLE_LINE.test(l) : IMAGE_LINE.test(l);
+      const content = lines.filter(isBody).join("\n");
+      const caption = lines.filter((l) => !isBody(l)).map((l) => l.trim().replace(/^#{1,6}\s+/, "")).filter(Boolean).join(" ");
+      const head = `**${label}.**` + (caption ? " " + caption : "");
+      const parts = kind === "table" ? [head, content] : [content, head];
+      return parts.filter(Boolean).join("\n\n");
+    }
+    function floatRefs(text, floats) {
+      if (!floats.size || !text) return text;
+      const byShort = /* @__PURE__ */ new Map();
+      for (const id of floats.keys()) byShort.set(shortId(id), id);
+      return text.replace(/\[\[([^\]|#]+)\]\]/g, (all, name) => {
+        const n = name.trim();
+        const id = floats.has(n) ? n : byShort.get(n);
+        return id ? `[[${id}|${floats.get(id)}]]` : all;
+      });
+    }
+    function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf, opts = {}) {
+      const kindOf = opts.kindOf || (() => null);
+      const floats = opts.floats || floatLabels(nodes, roleOf, kindOf);
       const top = Math.max(1, Math.min(6, headingTop || 1));
       const segs = [];
       const heading = (id, text, depth) => "#".repeat(Math.min(6, top + depth)) + " " + (numbers && numbers.has(id) ? numbers.get(id) + " " : "") + text;
@@ -345,6 +392,20 @@ var require_core = __commonJS({
           return;
         }
         const body = stripComments(raw).trim();
+        if (floats.has(node.id)) {
+          segs.push({
+            id: node.id,
+            depth,
+            left: comments(raw),
+            text: floatText(
+              body,
+              kindOf(node.id),
+              floats.get(node.id)
+            )
+          });
+          for (const c of node.children) walk(c, depth + 1);
+          return;
+        }
         const lines = body ? body.split("\n") : [];
         const h = lines.length ? HEADING.exec(lines[0].trim()) : null;
         const rest = (h ? lines.slice(1) : lines).join("\n").trim();
@@ -360,6 +421,10 @@ var require_core = __commonJS({
         for (const c of node.children) walk(c, depth + 1);
       };
       for (const n of nodes) walk(n, 0);
+      for (const s of segs) {
+        s.text = floatRefs(s.text, floats);
+        s.left = floatRefs(s.left, floats);
+      }
       return segs;
     }
     function renumberFootnotes(segments) {
@@ -557,20 +622,21 @@ var require_core = __commonJS({
       while (out.length && out[out.length - 1] === "") out.pop();
       return out.length ? out.join("\n") + "\n" : "";
     }
-    function exportMarkdown(nodes, bodyOf, headingTop, numbers, roleOf) {
+    function exportMarkdown(nodes, bodyOf, headingTop, numbers, roleOf, opts = {}) {
       const { segments, notes } = renumberFootnotes(
-        exportSegments(nodes, bodyOf, headingTop, numbers, roleOf)
+        exportSegments(nodes, bodyOf, headingTop, numbers, roleOf, opts)
       );
       const blocks = segments.map((s) => s.text).filter(Boolean);
       if (notes.length) blocks.push(footnoteBlock(notes));
       return normaliseMarkdown(blocks.join("\n\n"));
     }
-    function sectionNumbers(roots, hasHeading, roleOf) {
+    function sectionNumbers(roots, hasHeading, roleOf, kindOf) {
       const out = /* @__PURE__ */ new Map();
+      const isFloat = (id) => !!kindOf && KINDS.includes(kindOf(id));
       const spliced = (nodes) => nodes.flatMap((n) => {
         const role = roleFor(n, roleOf);
         if (role === "notes") return [];
-        if (role === "scaffolding" || !hasHeading(n.id)) {
+        if (role === "scaffolding" || !hasHeading(n.id) || isFloat(n.id)) {
           return spliced(n.children);
         }
         return [n];
@@ -845,7 +911,7 @@ var require_core = __commonJS({
       };
     }
     function countText(markdown, countSpaces) {
-      const plain = stripComments(markdown).replace(/!\[\[[^\]]*\]\]/g, " ").replace(/!\[[^\]]*\]\([^)]*\)/g, " ").replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, "$2").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\[(@[^\]]+)\]/g, "cite").replace(/^\s{0,3}#{1,6}\s+/gm, "").replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[.\]\s+)?/gm, "").replace(/^\s*>\s?/gm, "").replace(/[*_`~=]+/g, "");
+      const plain = stripComments(markdown).replace(/^\s*\|.*$/gm, " ").replace(/!\[\[[^\]]*\]\]/g, " ").replace(/!\[[^\]]*\]\([^)]*\)/g, " ").replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, "$2").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\[(@[^\]]+)\]/g, "cite").replace(/^\s{0,3}#{1,6}\s+/gm, "").replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[.\]\s+)?/gm, "").replace(/^\s*>\s?/gm, "").replace(/[*_`~=]+/g, "");
       const words = (plain.match(/\S+/g) || []).length;
       const collapsed = plain.replace(/\s+/g, " ").trim();
       const chars = countSpaces ? collapsed.length : collapsed.replace(/ /g, "").length;
@@ -854,7 +920,41 @@ var require_core = __commonJS({
     function measure(count, unit, wordsPerPage2) {
       if (unit === "words") return count.words;
       if (unit === "characters") return count.chars;
-      return count.words / (wordsPerPage2 || 500);
+      return count.words / (wordsPerPage2 || 500) + (count.pages || 0);
+    }
+    var LINES_PER_PAGE = 46;
+    var FIGURE_PAGE = 1 / 3;
+    function countManuscript(nodes, bodyOf, roleOf, countSpaces, opts = {}) {
+      const segs = exportSegments(nodes, bodyOf, 1, null, roleOf, opts);
+      const { segments, notes } = renumberFootnotes(segs);
+      const blocks = segments.map((x) => x.text).filter(Boolean);
+      if (notes.length) blocks.push(footnoteBlock(notes));
+      const n = countText(
+        normaliseMarkdown(blocks.join("\n\n")),
+        countSpaces
+      );
+      const heightOf = opts.heightOf || (() => null);
+      let pages = 0;
+      for (const sg of segs) {
+        if (!sg.text) continue;
+        const set = Number(heightOf(sg.id));
+        if (set > 0) {
+          pages += set;
+          continue;
+        }
+        const lines = sg.text.split("\n");
+        let run = 0;
+        for (const l of [...lines, ""]) {
+          if (TABLE_LINE.test(l)) {
+            run += 1;
+          } else if (run) {
+            pages += (run + 2) / LINES_PER_PAGE;
+            run = 0;
+          }
+          if (IMAGE_LINE.test(l)) pages += FIGURE_PAGE;
+        }
+      }
+      return { words: n.words, chars: n.chars, pages };
     }
     function findPatterns(query, opts = {}) {
       const flags = "g" + (opts.matchCase ? "" : "i");
@@ -967,6 +1067,10 @@ var require_core = __commonJS({
       exportSegments,
       roleFor,
       ROLES,
+      KINDS,
+      withKinds,
+      floatLabels,
+      countManuscript,
       STATUSES,
       isFlag,
       leftover,
@@ -1413,6 +1517,15 @@ var require_pandoc = __commonJS({
         (all, name, sub, alias) => (alias || sub || name).trim()
       ).replace(/==([^=\n]+)==/g, "$1");
     }
+    function pandocCaptions(md) {
+      return md.replace(
+        /^(\*\*Table \d+\.\*\*.*)\n\n(?=\s*\|)/gm,
+        "Table: $1\n\n"
+      ).replace(
+        new RegExp("^!\\[\\]\\(([^)\\n]*)\\)(\\{[^}\\n]*\\})?\\n\\n(\\*\\*Figure \\d+\\.\\*\\*.*)$", "gm"),
+        (all, src, attrs, cap) => `![${cap.replace(/[[\]]/g, "\\$&")}](${src})` + (attrs || "")
+      );
+    }
     async function fetchBib(keys, port, deps) {
       const call = async (ks) => {
         const res = await deps.fetch(
@@ -1507,6 +1620,11 @@ var require_pandoc = __commonJS({
           "\\fancypagestyle{plain}{" + style.join("") + "}"
         );
       }
+      out.push(
+        "\\usepackage{caption}",
+        "\\captionsetup{labelformat=empty,labelsep=none,justification=raggedright,singlelinecheck=false}",
+        "\\setlength{\\LTcapwidth}{\\textwidth}"
+      );
       return out.join("\n") + "\n";
     }
     function pandocArgs(o) {
@@ -1594,7 +1712,7 @@ var require_pandoc = __commonJS({
       return { pages, bodyEnd: mark ? Number(mark[1]) : null };
     }
     async function exportDocument(o, deps) {
-      let text = toPandoc(o.md, o.resolve || (() => null));
+      let text = pandocCaptions(toPandoc(o.md, o.resolve || (() => null)));
       const keys = citekeys(text);
       const dir = deps.tmpdir();
       const input = deps.join(dir, `dendrite-${Date.now()}.md`);
@@ -1653,11 +1771,12 @@ var require_pandoc = __commonJS({
       }
       return { ok: true, keys, layout };
     }
-    function measuredRate(words, layout, cited) {
+    function measuredRate(words, layout, cited, floatPages = 0) {
       if (!layout || !words) return null;
       const end = layout.bodyEnd || (cited ? null : layout.pages);
       if (!end || end < 2) return null;
-      return Math.round(words / (end - 0.5));
+      const text = end - 0.5 - floatPages;
+      return text >= 1 ? Math.round(words / text) : null;
     }
     function pandocError(err, cmd) {
       if (err && err.code === "ENOENT") {
@@ -1680,6 +1799,7 @@ var require_pandoc = __commonJS({
     }
     module2.exports = {
       citekeys,
+      pandocCaptions,
       pandocError,
       searchPath,
       condaBins,
@@ -1883,6 +2003,11 @@ var ROLE_ITEMS = [
   ["scaffolding", "Scaffolding: prints its children only", "layers", "3"],
   ["notes", "Left out of the manuscript", "eye-off", "4"]
 ];
+var KIND_ITEMS = [
+  [null, "Text", "text"],
+  ["table", "Table: numbered, caption above", "table"],
+  ["figure", "Figure: numbered, caption below", "image"]
+];
 var BRANCH_ROLE_NAMES = {
   "": "print automatically",
   section: "heading only",
@@ -1901,9 +2026,9 @@ var STATUS_ITEMS = [
 ];
 var PREVIEW = "dendrite-preview";
 var NOTES_AT = {
-  section: "Notes under each section",
-  end: "Notes at the end",
-  card: "Notes under each card"
+  section: "Footnotes collected under each section",
+  end: "Footnotes collected at the end",
+  card: "Footnotes under each card"
 };
 var DEFAULTS = {
   writingFolder: "Writing",
@@ -2733,6 +2858,16 @@ var DendriteView = class extends ItemView {
     this.setColOffset(d, this.colOffset(d) + e.deltaY * unit);
     this.drawFlow();
   }
+  /** A link to the card, to paste where a table or figure is cited. */
+  async copyRef(id) {
+    const ref = `[[${id}]]`;
+    try {
+      await this.pageWin().navigator.clipboard.writeText(ref);
+      new Notice(`Copied ${ref}`);
+    } catch (err) {
+      new Notice(`Could not copy ${ref}`);
+    }
+  }
   async copyId(id) {
     const short = core.shortId(id);
     try {
@@ -2794,6 +2929,16 @@ var DendriteView = class extends ItemView {
         }
       });
     }
+    m.addSeparator();
+    const kind = this.kindOf(id);
+    for (const [value, title, icon] of KIND_ITEMS) {
+      m.addItem((i) => {
+        i.setTitle(title).setIcon(icon).onClick(() => this.setKind(id, value));
+        if (typeof i.setChecked === "function") {
+          i.setChecked(kind === value);
+        }
+      });
+    }
     if (node && node.children.length) this.addBranchItems(m, id);
   }
   /**
@@ -2830,7 +2975,7 @@ var DendriteView = class extends ItemView {
   async setBranch(id, what, value) {
     const node = this.byId.get(id);
     if (!node) return;
-    const roleOf = (x) => this.roleOf(x);
+    const roleOf = (x) => this.printRoleOf(x);
     const key = what === "role" ? "dendrite_role" : "dendrite_status";
     const restores = [];
     for (const c of [node, ...core.descendants(node)]) {
@@ -2909,6 +3054,7 @@ var DendriteView = class extends ItemView {
       "sliders-horizontal",
       () => new CardModal(this, this.active).open()
     );
+    item("Copy reference", "link", () => this.copyRef(this.active));
     const id = this.active;
     const info = this.statusInfo && this.statusInfo.get(id);
     if (info && info.prints) {
@@ -3412,7 +3558,7 @@ var DendriteView = class extends ItemView {
     await this.writeLabels();
     if (ed.changed) await this.clearFinishedSplit(ed.file);
     const node = this.byId.get(ed.id);
-    if (ed.changed && node && !this.statusOf(ed.id) && core.roleFor(node, (x) => this.roleOf(x)) === "prose") {
+    if (ed.changed && node && !this.statusOf(ed.id) && core.roleFor(node, (x) => this.printRoleOf(x)) === "prose") {
       await this.setStatus(ed.id, "draft");
     }
     if (ed.changed) await this.plugin.lintCard(ed.file);
@@ -3692,7 +3838,7 @@ var DendriteView = class extends ItemView {
     await this.save(ed);
     this.recordVisit(ed.id, ed.before, original);
     const srcText = await this.app.vault.read(ed.file);
-    const srcStatus = core.roleFor(node, (x) => this.roleOf(x)) === "prose" ? this.statusOf(ed.id) : null;
+    const srcStatus = core.roleFor(node, (x) => this.printRoleOf(x)) === "prose" ? this.statusOf(ed.id) : null;
     const set = this.roleOf(ed.id);
     const role = set && set !== "section" ? set : null;
     const prints = !role || role === "prose";
@@ -3716,7 +3862,7 @@ var DendriteView = class extends ItemView {
     ed.changed = true;
     await this.save(ed);
     ed.before = cut.keep;
-    if (where === "child" && core.roleFor(node, (x) => this.roleOf(x)) !== "prose") {
+    if (where === "child" && core.roleFor(node, (x) => this.printRoleOf(x)) !== "prose") {
       await this.setStatus(
         ed.id,
         core.leftover(cut.keep) ? "unsplit" : null
@@ -3798,7 +3944,7 @@ var DendriteView = class extends ItemView {
       }]
     });
     await this.syncLabel(target.id, merged);
-    if (core.roleFor(target, (x) => this.roleOf(x)) === "prose") {
+    if (core.roleFor(target, (x) => this.printRoleOf(x)) === "prose") {
       await this.setStatus(target.id, mergedStatus);
     }
     await this.sweepStatuses();
@@ -4407,7 +4553,8 @@ var DendriteView = class extends ItemView {
     return core.sectionNumbers(
       this.root.children,
       (id) => this.hasHeading(id),
-      (id) => this.roleOf(id)
+      (id) => this.printRoleOf(id),
+      (id) => this.kindOf(id)
     );
   }
   /** Show each section card's number, updated in place. */
@@ -4442,6 +4589,36 @@ var DendriteView = class extends ItemView {
     const r = this.cardProps(id).dendrite_role;
     return core.ROLES.includes(r) ? r : null;
   }
+  /** A card's kind, if set: table or figure. */
+  kindOf(id) {
+    const k = this.cardProps(id).dendrite_kind;
+    return core.KINDS.includes(k) ? k : null;
+  }
+  /** The role a card prints by, its kind applied. */
+  printRoleOf(id) {
+    return core.withKinds(
+      (x) => this.roleOf(x),
+      (x) => this.kindOf(x)
+    )(id);
+  }
+  /** What export needs to number tables and figures. */
+  floatOpts(heights = false) {
+    const kindOf = (x) => this.kindOf(x);
+    const opts = { kindOf, floats: core.floatLabels(
+      this.root.children,
+      (x) => this.printRoleOf(x),
+      kindOf
+    ) };
+    if (heights) {
+      opts.heightOf = (x) => core.parseAmount(this.cardProps(x).dendrite_height);
+    }
+    return opts;
+  }
+  async setKind(id, kind) {
+    const f = this.cardFile(id);
+    if (f) await writeProps(this.app, f, { dendrite_kind: kind });
+    await this.sweepStatuses();
+  }
   async setRole(id, role) {
     const f = this.cardFile(id);
     if (f) await writeProps(this.app, f, { dendrite_role: role });
@@ -4462,7 +4639,7 @@ var DendriteView = class extends ItemView {
   async setStatusByKey(status) {
     const node = this.byId.get(this.active);
     if (!node) return;
-    if (core.roleFor(node, (x) => this.roleOf(x)) !== "prose") {
+    if (core.roleFor(node, (x) => this.printRoleOf(x)) !== "prose") {
       new Notice("Dendrite: a structural card takes its status from the cards below it.");
       return;
     }
@@ -4485,7 +4662,7 @@ var DendriteView = class extends ItemView {
     const report = core.statusReport(
       this.root,
       (id) => this.statusOf(id),
-      (id) => this.roleOf(id)
+      (id) => this.printRoleOf(id)
     );
     this.statusInfo = report.cards;
     for (const [id, card] of this.cardEls) {
@@ -4551,7 +4728,7 @@ var DendriteView = class extends ItemView {
     for (const n of core.allNodes(this.root)) {
       if (!this.cardFile(n.id)) continue;
       const s = this.statusOf(n.id);
-      const prints = core.roleFor(n, (id) => this.roleOf(id)) === "prose";
+      const prints = core.roleFor(n, (id) => this.printRoleOf(id)) === "prose";
       if (prints && (!s || s === "unsplit")) {
         await this.setStatus(n.id, "draft");
       } else if (!prints && s && s !== "unsplit") {
@@ -4591,7 +4768,7 @@ var DendriteView = class extends ItemView {
       if (up) await this.setStatus(node.id, null);
       return;
     }
-    if (core.roleFor(node, (x) => this.roleOf(x)) !== "prose") {
+    if (core.roleFor(node, (x) => this.printRoleOf(x)) !== "prose") {
       new Notice("Dendrite: a structural card takes its status from the cards below it.");
       return;
     }
@@ -4604,7 +4781,7 @@ var DendriteView = class extends ItemView {
       if (!node) continue;
       let out = false;
       for (let n = node; n && n.id; n = n.parent) {
-        if (core.roleFor(n, (x) => this.roleOf(x)) === "notes") {
+        if (core.roleFor(n, (x) => this.printRoleOf(x)) === "notes") {
           out = true;
           break;
         }
@@ -4615,19 +4792,21 @@ var DendriteView = class extends ItemView {
         this.roleOf(id) === "section"
       );
       const set = this.roleOf(id);
-      const role = out ? "notes" : core.roleFor(node, (x) => this.roleOf(x));
+      let role = out ? "notes" : core.roleFor(node, (x) => this.printRoleOf(x));
       const auto = out ? set !== "notes" : !set;
+      const kind = this.kindOf(id);
+      if (kind && role === "prose") role = kind;
       const grip = card.querySelector(":scope > .dendrite-grip");
       if (grip && grip.dataset.role !== role) {
         grip.dataset.role = role;
         const icon = grip.querySelector(".dendrite-role-icon");
         icon.empty();
-        setIcon(icon, ROLE_ITEMS.find((r) => r[0] === role)[2]);
+        setIcon(icon, (ROLE_ITEMS.find((r) => r[0] === role) || KIND_ITEMS.find((r) => r[0] === role))[2]);
       }
       if (grip) {
         grip.toggleClass("is-auto", auto);
-        const what = ROLE_ITEMS.find((r) => r[0] === role)[1];
-        grip.setAttr("aria-label", what + (auto ? " (automatic)" : "") + ". Click to change; drag to move the card.");
+        const what = (ROLE_ITEMS.find((r) => r[0] === role) || KIND_ITEMS.find((r) => r[0] === role))[1];
+        grip.setAttr("aria-label", what + (auto && !kind ? " (automatic)" : "") + ". Click to change; drag to move the card.");
       }
       card.toggleClass(
         "is-scaffolding",
@@ -4663,15 +4842,13 @@ var DendriteView = class extends ItemView {
     }
     const bodies = await this.loadBodies();
     const bodyOf = (id) => this.editing && this.editing.id === id ? this.editing.editor.value : bodies.get(id);
-    const countOf = (nodes) => core.countText(
-      core.exportMarkdown(
-        nodes,
-        bodyOf,
-        1,
-        null,
-        (id) => this.roleOf(id)
-      ),
-      ms.countSpaces
+    const floats = this.floatOpts(true);
+    const countOf = (nodes) => core.countManuscript(
+      nodes,
+      bodyOf,
+      (id) => this.printRoleOf(id),
+      ms.countSpaces,
+      floats
     );
     const total = ms.limit ? Object.assign(
       {},
@@ -4761,15 +4938,23 @@ var DendriteView = class extends ItemView {
     const bodies = await this.loadBodies();
     if (this.quotaTip !== tip) return;
     const bodyOf = (x) => this.editing && this.editing.id === x ? this.editing.editor.value : bodies.get(x);
-    const roleOf = (x) => this.roleOf(x);
-    const own = core.exportSegments([node], bodyOf, 1, null, roleOf).find((s) => s.id === id);
+    const roleOf = (x) => this.printRoleOf(x);
+    const floats = this.floatOpts();
+    const own = core.exportSegments(
+      [node],
+      bodyOf,
+      1,
+      null,
+      roleOf,
+      floats
+    ).find((s) => s.id === id);
     const rows = [[
       "This card",
       core.countText(own ? own.text : "", ms.countSpaces)
     ]];
     if (node.children.length) {
       rows.push(["With cards below", core.countText(
-        core.exportMarkdown([node], bodyOf, 1, null, roleOf),
+        core.exportMarkdown([node], bodyOf, 1, null, roleOf, floats),
         ms.countSpaces
       )]);
     }
@@ -5289,12 +5474,14 @@ var DendriteView = class extends ItemView {
       }
     }
     const ms = this.manuscript();
+    const floats = this.floatOpts(true);
     const text = core.exportMarkdown(
       scope,
       (id) => bodies.get(id),
       ms.headingTop,
       this.numbers(),
-      (id) => this.roleOf(id)
+      (id) => this.printRoleOf(id),
+      floats
     );
     const dir = normalizePath(
       (this.file.parent.path === "/" ? "" : this.file.parent.path + "/") + "exports"
@@ -5391,10 +5578,19 @@ var DendriteView = class extends ItemView {
     }
     const cites = result.keys.length ? ` with ${result.keys.length} citation(s)` : "";
     new Notice(`Dendrite: exported to ${rel}${cites}.`);
+    const bodies = whole ? await this.loadBodies() : null;
+    const counted = whole ? core.countManuscript(
+      this.root.children,
+      (id) => bodies.get(id),
+      (id) => this.printRoleOf(id),
+      ms.countSpaces,
+      this.floatOpts(true)
+    ) : null;
     const rate = whole ? pandoc.measuredRate(
-      core.countText(text, ms.countSpaces).words,
+      counted.words,
       result.layout,
-      result.keys.length > 0
+      result.keys.length > 0,
+      counted.pages
     ) : null;
     if (rate && rate !== ms.wordsPerPageMeasured) {
       await writeProps(
@@ -5547,23 +5743,35 @@ var DendritePreview = class extends ItemView {
       const f = this.cardFile(id);
       return f && this.app.metadataCache.getFileCache(f)?.frontmatter || {};
     };
-    const roleOf = (id) => {
+    const kindOf = (id) => {
+      const k = props(id).dendrite_kind;
+      return core.KINDS.includes(k) ? k : null;
+    };
+    const roleOf = core.withKinds((id) => {
       const r = props(id).dendrite_role;
       return core.ROLES.includes(r) ? r : null;
-    };
+    }, kindOf);
     const hasHeading = (id) => {
       const f = this.cardFile(id);
       const s = f && this.app.metadataCache.getFileCache(f)?.sections;
       const first = (s || []).find((x) => x.type !== "yaml");
       return !!first && first.type === "heading";
     };
-    const numbers = fm.dendrite_number_sections === true ? core.sectionNumbers(root.children, hasHeading, roleOf) : null;
-    const segs = core.gatherFootnotes(core.renumberFootnotes(
-      core.exportSegments(root.children, (id) => {
-        const b = this.bodies.get(id);
-        return b ? b.body : "";
-      }, headingTop, numbers, roleOf)
-    ).segments, this.notesAt);
+    const numbers = fm.dendrite_number_sections === true ? core.sectionNumbers(
+      root.children,
+      hasHeading,
+      roleOf,
+      kindOf
+    ) : null;
+    const segs = core.gatherFootnotes(
+      core.renumberFootnotes(
+        core.exportSegments(root.children, (id) => {
+          const b = this.bodies.get(id);
+          return b ? b.body : "";
+        }, headingTop, numbers, roleOf, { kindOf })
+      ).segments,
+      this.notesAt
+    );
     const statusOf = (id) => {
       const s = props(id).dendrite_status;
       return core.STATUSES.includes(s) ? s : null;
