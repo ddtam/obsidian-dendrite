@@ -844,6 +844,24 @@
                           transparent);
 }
 
+/* Within a changed line, the words that differ, more strongly tinted,
+   with spaces in them drawn. */
+.dendrite-version-diff .is-removed .dendrite-version-change {
+    background: color-mix(in srgb, var(--dendrite-now) 38%, transparent);
+    border-radius: 2px;
+}
+
+.dendrite-version-diff .is-added .dendrite-version-change {
+    background: color-mix(in srgb, var(--dendrite-before) 38%,
+                          transparent);
+    border-radius: 2px;
+}
+
+.dendrite-version-blank {
+    color: var(--text-faint);
+    font-style: italic;
+}
+
 .modal.dendrite-wide {
     width: min(1100px, 94vw);
     max-width: 94vw;

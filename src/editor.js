@@ -6,8 +6,6 @@
  *     focusAt(at, to), rangeAt(start, end), caretRect(), destroy() }
  *
  * `caretRect` gives the caret's top and bottom on the page, or null.
- * `opts.onCaret` is called when the caret moves without the text
- * changing.
  *
  * `rangeAt` gives a DOM range over the text between two offsets, for
  * painting find's matches, or null where the text is not on the page.
@@ -117,9 +115,6 @@ function obsidianEditor(app, parent, opts) {
         onUpdate(update, changed) {
             super.onUpdate(update, changed);
             if (changed) this.cardOpts.onChange();
-            else if (update.selectionSet && this.cardOpts.onCaret) {
-                this.cardOpts.onCaret();
-            }
             // The editor redraws its lines as text changes and as it
             // scrolls, which drops anything painted over the old ones.
             if (this.cardOpts.onRedraw) this.cardOpts.onRedraw();
@@ -216,12 +211,6 @@ function textEditor(opts) {
         opts.onChange();
     });
     ta.addEventListener('blur', () => opts.onBlur());
-    const moved = () => { if (opts.onCaret) opts.onCaret(); };
-    ta.addEventListener('click', moved);
-    ta.addEventListener('keyup', (e) => {
-        if (e.key.startsWith('Arrow') || e.key === 'Home' ||
-            e.key === 'End' || e.key.startsWith('Page')) moved();
-    });
     return {
         kind: 'text',
         el: ta,

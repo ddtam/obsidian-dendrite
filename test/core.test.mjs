@@ -730,3 +730,16 @@ test('lineDiff marks lines only in one text, in order', () => {
                      [[' ', 'a'], ['-', 'b'], [' ', 'c'], ['+', 'd']]);
     assert.deepEqual(c.lineDiff('x', 'x'), [[' ', 'x']]);
 });
+
+test('charDiff marks the words and spaces only in one line', () => {
+    // A trailing space is the whole difference.
+    assert.deepEqual(c.charDiff('foo bar ', 'foo bar'),
+                     [[['foo bar', false], [' ', true]],
+                      [['foo bar', false]]]);
+    assert.deepEqual(c.charDiff('the red fox', 'the brown fox'),
+                     [[['the ', false], ['red', true], [' fox', false]],
+                      [['the ', false], ['brown', true], [' fox', false]]]);
+    assert.deepEqual(c.charDiff('same', 'same'),
+                     [[['same', false]], [['same', false]]]);
+    assert.deepEqual(c.charDiff('', 'new'), [[], [['new', true]]]);
+});

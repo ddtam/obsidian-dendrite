@@ -246,6 +246,55 @@ var require_core = __commonJS({
       while (j < m) out.push(["+", y[j++]]);
       return out;
     }
+    var CHAR_DIFF_LIMIT = 25e4;
+    function charDiff(a, b) {
+      const split = (s) => s.match(/\s+|[\p{L}\p{N}_]+|./gsu) || [];
+      const x = split(a);
+      const y = split(b);
+      let p = 0;
+      while (p < x.length && p < y.length && x[p] === y[p]) p++;
+      let q = 0;
+      while (q < x.length - p && q < y.length - p && x[x.length - 1 - q] === y[y.length - 1 - q]) q++;
+      const xm = x.slice(p, x.length - q);
+      const ym = y.slice(p, y.length - q);
+      const keepX = xm.map(() => false);
+      const keepY = ym.map(() => false);
+      if (xm.length * ym.length <= CHAR_DIFF_LIMIT) {
+        const n = xm.length;
+        const m = ym.length;
+        const t = Array.from(
+          { length: n + 1 },
+          () => new Uint32Array(m + 1)
+        );
+        for (let i = n - 1; i >= 0; i--) {
+          for (let j = m - 1; j >= 0; j--) {
+            t[i][j] = xm[i] === ym[j] ? t[i + 1][j + 1] + 1 : Math.max(t[i + 1][j], t[i][j + 1]);
+          }
+        }
+        for (let i = 0, j = 0; i < n && j < m; ) {
+          if (xm[i] === ym[j]) {
+            keepX[i++] = true;
+            keepY[j++] = true;
+          } else if (t[i + 1][j] >= t[i][j + 1]) {
+            i++;
+          } else {
+            j++;
+          }
+        }
+      }
+      const segs = (all, keep) => {
+        const out = [];
+        all.forEach((tok, i) => {
+          const k = i - p;
+          const changed = k >= 0 && k < keep.length && !keep[k];
+          const last = out[out.length - 1];
+          if (last && last[1] === changed) last[0] += tok;
+          else out.push([tok, changed]);
+        });
+        return out;
+      };
+      return [segs(x, keepX), segs(y, keepY)];
+    }
     function columns(root) {
       const cols = [];
       const walk = (n, d) => {
@@ -934,6 +983,7 @@ var require_core = __commonJS({
       serialiseTree,
       writeIndexText,
       lineDiff,
+      charDiff,
       deriveLabel,
       stripComments,
       validPrefix,
@@ -1133,9 +1183,6 @@ var require_editor = __commonJS({
         onUpdate(update, changed) {
           super.onUpdate(update, changed);
           if (changed) this.cardOpts.onChange();
-          else if (update.selectionSet && this.cardOpts.onCaret) {
-            this.cardOpts.onCaret();
-          }
           if (this.cardOpts.onRedraw) this.cardOpts.onRedraw();
         }
         onunload() {
@@ -1239,13 +1286,6 @@ var require_editor = __commonJS({
         opts.onChange();
       });
       ta.addEventListener("blur", () => opts.onBlur());
-      const moved = () => {
-        if (opts.onCaret) opts.onCaret();
-      };
-      ta.addEventListener("click", moved);
-      ta.addEventListener("keyup", (e) => {
-        if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End" || e.key.startsWith("Page")) moved();
-      });
       return {
         kind: "text",
         el: ta,
@@ -2368,7 +2408,7 @@ var DendriteView = class extends ItemView {
    * Centre the active card, horizontally and vertically, and in every
    * other column the part of its lineage that column holds.
    */
-  centre(smooth = true) {
+  centre(smooth = true, typed = false) {
     if (!this.board) return;
     const node = this.active && this.byId.get(this.active);
     if (!node) return;
@@ -2379,7 +2419,12 @@ var DendriteView = class extends ItemView {
       return el ? { top: el.offsetTop, height: el.offsetHeight } : null;
     };
     const heights = [...cols].map((c) => c.clientHeight);
-    const own = this.ownOffset(node, pos(node.id), heights[node.depth]);
+    const own = this.ownOffset(
+      node,
+      pos(node.id),
+      heights[node.depth],
+      typed
+    );
     this.placed = node.id;
     const targets = core.alignColumns(
       this.cols,
@@ -2405,17 +2450,20 @@ var DendriteView = class extends ItemView {
   }
   /**
    * Where the active card's own column goes, or null to centre the card.
-   * While it is written in, the caret decides: at the column's middle
-   * in typewriter mode, otherwise kept in view, with a card that fits
-   * still centred. A card taller than its column shows its top when
-   * moved to, and stays where it is after that.
+   * While it is written in, only typing moves it, by the caret: to the
+   * column's middle in typewriter mode, otherwise into view, with a
+   * card that fits still centred. Anything else, such as a card beside
+   * it redrawn, leaves it where it is, so text never moves under a
+   * click. A card taller than its column shows its top when moved to,
+   * and stays where it is after that.
    */
-  ownOffset(node, box, height) {
+  ownOffset(node, box, height, typed) {
     if (!box || !height) return null;
     const d = node.depth;
     const ed = this.editing;
     const typewriter = this.plugin.settings.typewriter !== false;
     const tall = core.tallTop(box, height, CARD_MARGIN) !== null;
+    if (ed && ed.id === node.id && !typed) return this.colOffset(d);
     if (ed && ed.id === node.id && (typewriter || tall) && ed.editor.caretRect && this.colInners[d]) {
       const r = ed.editor.caretRect();
       if (r) {
@@ -2446,7 +2494,7 @@ var DendriteView = class extends ItemView {
     const win = this.pageWin();
     this.caretFrame = win.requestAnimationFrame(() => {
       this.caretFrame = null;
-      if (this.editing) this.centre(false);
+      if (this.editing) this.centre(false, true);
     });
   }
   /** A column's scroll position, however it is scrolled. */
@@ -3156,7 +3204,6 @@ var DendriteView = class extends ItemView {
           this.plugin.settings.autosaveMs
         );
       },
-      onCaret: () => this.followCaret(),
       onBlur: () => {
         this.save(ed);
       },
@@ -5730,6 +5777,61 @@ var VersionModal = class _VersionModal extends Modal {
   static shown(changed) {
     return changed.map((c, i) => c || !!changed[i - 1] || !!changed[i + 1]);
   }
+  /**
+   * Each run of changed lines paired in order, the first line only in
+   * the note now with the first only in the text from before, and so
+   * on. Returns, per row, its words marked by charDiff, or null.
+   */
+  static marks(rows) {
+    const out = rows.map(() => null);
+    for (let i = 0; i < rows.length; ) {
+      if (rows[i][0] === " ") {
+        i++;
+        continue;
+      }
+      const gone = [];
+      const back = [];
+      for (; i < rows.length && rows[i][0] !== " "; i++) {
+        (rows[i][0] === "-" ? gone : back).push(i);
+      }
+      const n = Math.min(gone.length, back.length);
+      for (let k = 0; k < n; k++) {
+        const [a, b] = core.charDiff(
+          rows[gone[k]][1],
+          rows[back[k]][1]
+        );
+        out[gone[k]] = a;
+        out[back[k]] = b;
+      }
+    }
+    return out;
+  }
+  /**
+   * A changed line's text, its changed words marked and any spaces in
+   * them drawn, since a change in spaces alone would otherwise show as
+   * nothing. A line of only spaces, or none, is marked whole.
+   */
+  static fillLine(el, line, marks) {
+    if (!marks && !line.trim()) marks = [[line, true]];
+    if (!marks) {
+      el.createSpan({ text: line });
+      return;
+    }
+    const shown = (t) => t.replace(/ /g, "\xB7").replace(/\t/g, "\u2192").replace(/\r/g, "\u240D").replace(/\u00a0/g, "\u237D");
+    for (const [text, changed] of marks) {
+      if (!changed) el.createSpan({ text });
+      else el.createSpan({
+        cls: "dendrite-version-change",
+        text: shown(text)
+      });
+    }
+    if (!line) {
+      el.createSpan({
+        cls: "dendrite-version-blank",
+        text: "blank line"
+      });
+    }
+  }
   drawUnified(box, rows) {
     const key = box.createEl("p", { cls: "dendrite-version-desc" });
     key.createSpan({ cls: "is-removed", text: "\u2212 the note now" });
@@ -5738,6 +5840,7 @@ var VersionModal = class _VersionModal extends Modal {
     key.createSpan({ text: ", each line only in that one" });
     const pre = box.createDiv({ cls: "dendrite-version-diff" });
     const keep = _VersionModal.shown(rows.map((r) => r[0] !== " "));
+    const marks = _VersionModal.marks(rows);
     let gap = false;
     let shown = 0;
     rows.forEach(([op, line], i) => {
@@ -5755,7 +5858,8 @@ var VersionModal = class _VersionModal extends Modal {
         cls: "dendrite-version-op",
         text: op === "-" ? "\u2212" : op
       });
-      row.createSpan({ text: line });
+      if (op === " ") row.createSpan({ text: line });
+      else _VersionModal.fillLine(row.createSpan(), line, marks[i]);
     });
   }
   /**
@@ -5766,14 +5870,14 @@ var VersionModal = class _VersionModal extends Modal {
     const pairs = [];
     for (let i = 0; i < rows.length; ) {
       if (rows[i][0] === " ") {
-        pairs.push([rows[i][1], rows[i][1], false]);
+        pairs.push([i, i, false]);
         i++;
         continue;
       }
       const gone = [];
       const back = [];
       for (; i < rows.length && rows[i][0] !== " "; i++) {
-        (rows[i][0] === "-" ? gone : back).push(rows[i][1]);
+        (rows[i][0] === "-" ? gone : back).push(i);
       }
       for (let k = 0; k < Math.max(gone.length, back.length); k++) {
         pairs.push([
@@ -5783,6 +5887,7 @@ var VersionModal = class _VersionModal extends Modal {
         ]);
       }
     }
+    const marks = _VersionModal.marks(rows);
     const table = box.createDiv({ cls: "dendrite-version-diff" }).createEl("table", { cls: "dendrite-version-split" });
     const head = table.createEl("tr");
     head.createEl("th", { cls: "is-removed", text: "The note now" });
@@ -5807,10 +5912,19 @@ var VersionModal = class _VersionModal extends Modal {
       gap = false;
       shown++;
       const tr = table.createEl("tr");
-      const cell = (text, cls) => tr.createEl("td", {
-        cls: text === null ? "is-blank" : changed ? cls : "",
-        text: text === null ? "" : text
-      });
+      const cell = (r, cls) => {
+        if (r === null) {
+          tr.createEl("td", { cls: "is-blank" });
+        } else if (!changed) {
+          tr.createEl("td", { text: rows[r][1] });
+        } else {
+          _VersionModal.fillLine(
+            tr.createEl("td", { cls }),
+            rows[r][1],
+            marks[r]
+          );
+        }
+      };
       cell(left, "is-removed");
       cell(right, "is-added");
     });
@@ -5959,7 +6073,7 @@ var DendriteSettings = class extends PluginSettingTab {
       s.obsidianEditor = v;
       save();
     }));
-    new Setting(containerEl).setName("Typewriter scrolling").setDesc("While a card is written in, the line with the cursor stays at the middle of the column. Off, the column moves only enough to keep the cursor in view.").addToggle((tg) => tg.setValue(s.typewriter).onChange((v) => {
+    new Setting(containerEl).setName("Typewriter scrolling").setDesc("As you type in a card, the line with the cursor moves to the middle of the column. Clicking and selecting never move it. Off, the column moves only enough to keep the cursor in view.").addToggle((tg) => tg.setValue(s.typewriter).onChange((v) => {
       s.typewriter = v;
       save();
     }));

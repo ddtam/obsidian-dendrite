@@ -202,6 +202,42 @@ test('keeping the earlier version settles it', async () => {
     assert.ok(await a.view.exportTo(null) !== null, 'export runs again');
 });
 
+test('the dialog marks the characters that differ, spaces made visible',
+     async () => {
+    const clock = { t: 1 };
+    const a = await device(FILES, clock);
+    const first = a.read(cardPath('G-aaaaa'));
+    for (const t of ['Second.\n', 'Second. \n', 'Second.\n']) {
+        clock.t += WINDOW_MS + 1;
+        await a.receive(cardPath('G-aaaaa'), first + t);
+    }
+    assert.ok(a.view.reverted.has('G-aaaaa'));
+    a.view.reviewVersion('G-aaaaa');
+    await tick(20);
+    const m = h.obsidian.lastModal;
+    const marks = (sel) => [...m.contentEl.querySelectorAll(sel)]
+        .map((e) => e.textContent);
+    // Only a trailing space differs: it shows as a dot on the line
+    // from before, and nothing on the line now is marked.
+    const rows = [...m.contentEl.querySelectorAll(
+        '.dendrite-version-diff > div')];
+    const back = rows.find((r) => r.classList.contains('is-added'));
+    assert.deepEqual([...back.querySelectorAll('.dendrite-version-change')]
+        .map((e) => e.textContent), ['·']);
+    assert.equal(back.textContent, '+Second.·');
+    const now = rows.find((r) => r.classList.contains('is-removed'));
+    assert.equal(now.querySelectorAll('.dendrite-version-change').length,
+                 0);
+    // Side by side marks the same.
+    m.contentEl.querySelectorAll(
+        '.dendrite-version-modes .clickable-icon')[1].onclick();
+    assert.deepEqual(
+        marks('.dendrite-version-split .dendrite-version-change'), ['·']);
+    m.contentEl.querySelectorAll(
+        '.dendrite-version-modes .clickable-icon')[0].onclick();
+    m.close();
+});
+
 test('a change made here over an index changed elsewhere is not written',
      async () => {
     const clock = { t: 1 };

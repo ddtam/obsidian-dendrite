@@ -86,6 +86,17 @@ test('typing in a tall card keeps the caret in view, or centred',
     type(view, 'Long text, more');
     await tick(5);
     assert.equal(view.colOffset(0), 610 - 200);
+    // A click moves the caret; a redraw after it moves nothing.
+    view.editing.editor.caretRect = () => {
+        const top = 100 - view.colOffset(0);
+        return { top, bottom: top + 20 };
+    };
+    view.centre(false);
+    assert.equal(view.colOffset(0), 610 - 200, 'not moved by a click');
+    view.editing.editor.caretRect = () => {
+        const top = 600 - view.colOffset(0);
+        return { top, bottom: top + 20 };
+    };
     // Off: the column moves only enough to bring the caret into view.
     view.plugin.settings.typewriter = false;
     view.setColOffset(0, 0);

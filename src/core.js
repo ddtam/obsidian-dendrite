@@ -329,6 +329,62 @@ function lineDiff(a, b) {
     return out;
 }
 
+// Above this many token pairs, a line's changed middle is marked whole.
+const CHAR_DIFF_LIMIT = 250000;
+
+/**
+ * Two lines compared by words, spaces and punctuation, as one list of
+ * [text, changed] per line, neighbours with the same mark joined.
+ */
+function charDiff(a, b) {
+    const split = (s) => s.match(/\s+|[\p{L}\p{N}_]+|./gsu) || [];
+    const x = split(a);
+    const y = split(b);
+    let p = 0;
+    while (p < x.length && p < y.length && x[p] === y[p]) p++;
+    let q = 0;
+    while (q < x.length - p && q < y.length - p &&
+           x[x.length - 1 - q] === y[y.length - 1 - q]) q++;
+    const xm = x.slice(p, x.length - q);
+    const ym = y.slice(p, y.length - q);
+    const keepX = xm.map(() => false);
+    const keepY = ym.map(() => false);
+    if (xm.length * ym.length <= CHAR_DIFF_LIMIT) {
+        const n = xm.length;
+        const m = ym.length;
+        const t = Array.from({ length: n + 1 },
+                             () => new Uint32Array(m + 1));
+        for (let i = n - 1; i >= 0; i--) {
+            for (let j = m - 1; j >= 0; j--) {
+                t[i][j] = xm[i] === ym[j] ? t[i + 1][j + 1] + 1 :
+                    Math.max(t[i + 1][j], t[i][j + 1]);
+            }
+        }
+        for (let i = 0, j = 0; i < n && j < m;) {
+            if (xm[i] === ym[j]) {
+                keepX[i++] = true;
+                keepY[j++] = true;
+            } else if (t[i + 1][j] >= t[i][j + 1]) {
+                i++;
+            } else {
+                j++;
+            }
+        }
+    }
+    const segs = (all, keep) => {
+        const out = [];
+        all.forEach((tok, i) => {
+            const k = i - p;
+            const changed = k >= 0 && k < keep.length && !keep[k];
+            const last = out[out.length - 1];
+            if (last && last[1] === changed) last[0] += tok;
+            else out.push([tok, changed]);
+        });
+        return out;
+    };
+    return [segs(x, keepX), segs(y, keepY)];
+}
+
 /** Nodes grouped by depth, each column in reading order. */
 function columns(root) {
     const cols = [];
@@ -1239,7 +1295,7 @@ module.exports = {
     normaliseMarkdown, renumberFootnotes, footnoteBlock,
     inlineToReferences, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
-    lineDiff,
+    lineDiff, charDiff,
     deriveLabel, stripComments, validPrefix, newId, makeNode, makeRoot,
     insertSibling, appendChild, moveWithin, indent, outdent, remove,
     descendants, allNodes, columns, exportMarkdown, cleanLabel,
