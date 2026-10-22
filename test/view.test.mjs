@@ -62,6 +62,42 @@ test('first card: typed text reaches its note and labels the index',
                  `- [[${id}|Specific Aims]]\n`);
 });
 
+test('typing in a tall card keeps the caret in view, or centred',
+     async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Long]]\n',
+        { 'G-aaaaa': 'Long text\n' });
+    await view.startEdit('G-aaaaa');
+    // jsdom lays nothing out: the card is 1000 high in a 400 column, and
+    // the caret 600 down the card, wherever the column has moved it.
+    const fix = (el, k, v) => Object.defineProperty(el, k, { value: v });
+    const card = view.cardEls.get('G-aaaaa');
+    fix(card, 'offsetTop', 0);
+    fix(card, 'offsetHeight', 1000);
+    fix(view.board.querySelector('.dendrite-col'), 'clientHeight', 400);
+    const inner = view.colInners[0];
+    fix(inner, 'scrollHeight', 2000);
+    inner.getBoundingClientRect = () => ({ top: -view.colOffset(0) });
+    view.editing.editor.caretRect = () => {
+        const top = 600 - view.colOffset(0);
+        return { top, bottom: top + 20 };
+    };
+    // Typewriter, the default: the caret's line sits mid-column.
+    type(view, 'Long text, more');
+    await tick(5);
+    assert.equal(view.colOffset(0), 610 - 200);
+    // Off: the column moves only enough to bring the caret into view.
+    view.plugin.settings.typewriter = false;
+    view.setColOffset(0, 0);
+    type(view, 'Long text, more still');
+    await tick(5);
+    assert.equal(view.colOffset(0), 620 + 24 - 400);
+    type(view, 'Long text, and more still');
+    await tick(5);
+    assert.equal(view.colOffset(0), 620 + 24 - 400, 'in view, held still');
+    await view.endEdit();
+});
+
 test('leaving the editor saves at once, before the autosave fires',
      async () => {
     const { view, read, text } = await open('---\ndendrite_prefix: G\n---\n');
@@ -965,7 +1001,7 @@ test('settings are grouped under headings by what they affect', () => {
         'Index note type', 'Card type', 'Top section heading level',
         '## Board', 'Card width', 'Vim-style keys',
         '## Writing in cards', 'Use Obsidian\'s editor in cards',
-        'Autosave delay',
+        'Typewriter scrolling', 'Autosave delay',
         '## PDF and Word export', 'Pandoc', 'PDF engine', 'Zotero port',
         'Fallback .bib',
         '## Other plugins', 'Keep Linter out of the writing folder',

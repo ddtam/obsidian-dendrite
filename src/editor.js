@@ -3,7 +3,11 @@
  * The card editor, in two kinds behind one interface:
  *
  *   { kind, el, value, focus(atStart), selection(), replace(text, at),
- *     focusAt(at, to), rangeAt(start, end), destroy() }
+ *     focusAt(at, to), rangeAt(start, end), caretRect(), destroy() }
+ *
+ * `caretRect` gives the caret's top and bottom on the page, or null.
+ * `opts.onCaret` is called when the caret moves without the text
+ * changing.
  *
  * `rangeAt` gives a DOM range over the text between two offsets, for
  * painting find's matches, or null where the text is not on the page.
@@ -113,6 +117,9 @@ function obsidianEditor(app, parent, opts) {
         onUpdate(update, changed) {
             super.onUpdate(update, changed);
             if (changed) this.cardOpts.onChange();
+            else if (update.selectionSet && this.cardOpts.onCaret) {
+                this.cardOpts.onCaret();
+            }
             // The editor redraws its lines as text changes and as it
             // scrolls, which drops anything painted over the old ones.
             if (this.cardOpts.onRedraw) this.cardOpts.onRedraw();
@@ -170,6 +177,11 @@ function obsidianEditor(app, parent, opts) {
             editor.setSelection(editor.offsetToPos(at),
                                 editor.offsetToPos(to));
         },
+        caretRect() {
+            const cm = ed.editor.cm;
+            const r = cm.coordsAtPos(cm.state.selection.main.head);
+            return r ? { top: r.top, bottom: r.bottom } : null;
+        },
         rangeAt(start, end) {
             const cm = ed.editor.cm;
             const vp = cm.viewport;
@@ -204,6 +216,12 @@ function textEditor(opts) {
         opts.onChange();
     });
     ta.addEventListener('blur', () => opts.onBlur());
+    const moved = () => { if (opts.onCaret) opts.onCaret(); };
+    ta.addEventListener('click', moved);
+    ta.addEventListener('keyup', (e) => {
+        if (e.key.startsWith('Arrow') || e.key === 'Home' ||
+            e.key === 'End' || e.key.startsWith('Page')) moved();
+    });
     return {
         kind: 'text',
         el: ta,
@@ -225,11 +243,44 @@ function textEditor(opts) {
             ta.focus();
             ta.setSelectionRange(at, to);
         },
+        caretRect() { return textCaret(ta); },
         // A text box's text is not in the page's text, so nothing in it
         // can be painted; find selects its match instead.
         rangeAt() { return null; },
         destroy() { ta.remove(); },
     };
+}
+
+/**
+ * Where a text box's caret is on the page. A text box does not say, so
+ * its text up to the caret is laid out in a hidden copy with the same
+ * width and type, and a mark after it is measured.
+ */
+function textCaret(ta) {
+    const doc = ta.ownerDocument;
+    const cs = doc.defaultView.getComputedStyle(ta);
+    const copy = doc.createElement('div');
+    for (const p of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight',
+                     'letterSpacing', 'tabSize', 'boxSizing', 'paddingTop',
+                     'paddingLeft', 'paddingRight', 'borderTopWidth',
+                     'borderLeftWidth', 'borderRightWidth']) {
+        copy.style[p] = cs[p];
+    }
+    copy.style.position = 'absolute';
+    copy.style.visibility = 'hidden';
+    copy.style.whiteSpace = 'pre-wrap';
+    copy.style.overflowWrap = 'break-word';
+    copy.style.width = ta.offsetWidth + 'px';
+    copy.textContent = ta.value.slice(0, ta.selectionEnd);
+    const mark = doc.createElement('span');
+    mark.textContent = '\u200b';
+    copy.appendChild(mark);
+    doc.body.appendChild(copy);
+    const top = ta.getBoundingClientRect().top + mark.offsetTop -
+        ta.scrollTop;
+    const height = mark.offsetHeight;
+    copy.remove();
+    return { top, bottom: top + height };
 }
 
 /** Obsidian's editor when asked for and available, else the text box. */

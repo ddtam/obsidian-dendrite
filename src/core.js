@@ -751,6 +751,32 @@ function mergeText(first, second) {
 // ---- column alignment ----------------------------------------------------
 
 /**
+ * Where a column showing a card taller than itself is moved to: the
+ * card's top, `margin` below the column's. Null when the card fits.
+ */
+function tallTop(card, height, margin) {
+    return card.height + 2 * margin > height ? card.top - margin : null;
+}
+
+/**
+ * Where the active column is moved while its card is written in, from
+ * the caret's top and bottom in the column. Typewriter: the caret's line
+ * at the column's middle. Otherwise the column holds still while the
+ * caret is at least `margin` inside it, and moves only enough to bring
+ * it back.
+ */
+function caretOffset(caret, height, current, margin, typewriter) {
+    const mid = (caret.top + caret.bottom) / 2;
+    if (typewriter) return mid - height / 2;
+    const m = Math.min(margin, (height - (caret.bottom - caret.top)) / 2);
+    if (caret.top - m < current) return caret.top - m;
+    if (caret.bottom + m > current + height) {
+        return caret.bottom + m - height;
+    }
+    return current;
+}
+
+/**
  * Where each column scrolls to, Gingko-style. The active card's column
  * centres it, and each column to its left centres the ancestor it holds.
  * A column to the right centres the active card's descendants it holds;
@@ -759,10 +785,12 @@ function mergeText(first, second) {
  * children always sit beside their parent.
  *
  * `cols` is columns(root); `pos(id)` gives a card's { top, height } in
- * its column; `heights[d]` is column d's visible height. Returns the
- * scrollTop for each column, or null to leave a column alone.
+ * its column; `heights[d]` is column d's visible height. `own`, if
+ * given, replaces the active card's centring in its own column, and the
+ * columns to its right follow it. Returns the scrollTop for each column,
+ * or null to leave a column alone.
  */
-function alignColumns(cols, active, pos, heights) {
+function alignColumns(cols, active, pos, heights, own = null) {
     const targets = cols.map(() => null);
     if (!active) return targets;
     const lineage = new Set([active.id]);
@@ -778,7 +806,7 @@ function alignColumns(cols, active, pos, heights) {
     for (let d = 0; d < cols.length; d++) {
         const inCol = cols[d].filter((n) => lineage.has(n.id));
         if (d === active.depth) {
-            targets[d] = centre([active], d);
+            targets[d] = own !== null ? own : centre([active], d);
             anchor[d] = active;
         } else if (inCol.length) {
             targets[d] = centre(inCol, d);
@@ -1203,7 +1231,7 @@ module.exports = {
     findPatterns, findMatches, shortId,
     parseLimit, formatLimit, countText, wordsPerPage, measure,
     sectionNumbers,
-    alignColumns, parseAmount, convert, quotas, fmtNum,
+    alignColumns, tallTop, caretOffset, parseAmount, convert, quotas, fmtNum,
     splitText, mergeText,
     mergeIntoAbove, mergeIntoParent, moveNode,
     flowPath, threadPath, exportSegments, roleFor, ROLES,

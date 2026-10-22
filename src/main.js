@@ -73,6 +73,7 @@ const DEFAULTS = {
     manageLinter: true,
     lintCards: true,
     obsidianEditor: true,
+    typewriter: true,
     pandocPath: 'pandoc',
     pdfEngine: 'xelatex',
     zoteroPort: 23119,
@@ -97,6 +98,8 @@ const CARD_UNSAFE_RULES = ['file-name-heading', 'capitalize-headings'];
 // A card note is `<prefix>-<5 characters>.md` inside a `cards` folder.
 const CARD_NAME = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-[a-z0-9]{5}$/;
 const UNDO_DEPTH = 50;
+// Space kept between the column's edge and the caret, or a tall card's top.
+const CARD_MARGIN = 24;
 // A card's label reaches the index once typing pauses this long, or when
 // the card is left, so the index is not rewritten on every autosave.
 const LABEL_IDLE_MS = 3000;
@@ -394,7 +397,19 @@ class DendriteView extends ItemView {
         this.colInners = [];
         this.offsets = [];
         board.addEventListener('scroll', (e) => {
-            if (e.target !== board) this.scheduleFlow();
+            if (e.target === board) return;
+            // The editor can scroll a column itself to show its caret,
+            // which on the desktop would stack on the view's own offset.
+            // That scroll is moved into the offset instead.
+            const col = e.target;
+            if (!this.nativeScroll && col.scrollTop &&
+                col.classList.contains('dendrite-col')) {
+                const d = Number(col.dataset.depth);
+                const by = col.scrollTop;
+                col.scrollTop = 0;
+                this.setColOffset(d, this.colOffset(d) + by);
+            }
+            this.scheduleFlow();
         }, true);
         // A copy or cut can be handled by another plugin that focuses a
         // hidden textarea, and the browser then scrolls the board to show
@@ -745,7 +760,10 @@ class DendriteView extends ItemView {
             return el ? { top: el.offsetTop, height: el.offsetHeight } : null;
         };
         const heights = [...cols].map((c) => c.clientHeight);
-        const targets = core.alignColumns(this.cols, node, pos, heights);
+        const own = this.ownOffset(node, pos(node.id), heights[node.depth]);
+        this.placed = node.id;
+        const targets = core.alignColumns(this.cols, node, pos, heights,
+                                          own);
         if (this.nativeScroll) {
             cols.forEach((col, d) => {
                 if (targets[d] !== null) {
@@ -761,6 +779,48 @@ class DendriteView extends ItemView {
                 (this.board.clientWidth - col.offsetWidth) / 2;
             this.board.scrollTo({ left, behavior });
         }
+    }
+
+    /**
+     * Where the active card's own column goes, or null to centre the card.
+     * While it is written in, the caret decides: at the column's middle
+     * in typewriter mode, otherwise kept in view, with a card that fits
+     * still centred. A card taller than its column shows its top when
+     * moved to, and stays where it is after that.
+     */
+    ownOffset(node, box, height) {
+        if (!box || !height) return null;
+        const d = node.depth;
+        const ed = this.editing;
+        const typewriter = this.plugin.settings.typewriter !== false;
+        const tall = core.tallTop(box, height, CARD_MARGIN) !== null;
+        if (ed && ed.id === node.id && (typewriter || tall) &&
+            ed.editor.caretRect && this.colInners[d]) {
+            const r = ed.editor.caretRect();
+            if (r) {
+                const base = this.colInners[d].getBoundingClientRect().top;
+                const caret = { top: r.top - base, bottom: r.bottom - base };
+                return core.caretOffset(caret, height, this.colOffset(d),
+                                        CARD_MARGIN, typewriter);
+            }
+        }
+        if (!tall) return null;
+        if (this.placed === node.id) {
+            const cur = this.colOffset(d);
+            return Math.max(box.top - CARD_MARGIN, Math.min(cur,
+                box.top + box.height + CARD_MARGIN - height));
+        }
+        return core.tallTop(box, height, CARD_MARGIN);
+    }
+
+    /** Move the active column to the caret once the editor has drawn. */
+    followCaret() {
+        if (this.caretFrame) return;
+        const win = this.pageWin();
+        this.caretFrame = win.requestAnimationFrame(() => {
+            this.caretFrame = null;
+            if (this.editing) this.centre(false);
+        });
     }
 
     /** A column's scroll position, however it is scrolled. */
@@ -1474,13 +1534,14 @@ class DendriteView extends ItemView {
                 ed.changed = true;
                 // Typed into, even if cleared again: Ctrl+Z is the text's.
                 ed.fresh = false;
-                // A growing card stays centred while it is written in.
-                this.centre(false);
+                // The column follows the caret while the card is written in.
+                this.followCaret();
                 this.scheduleCounts();
                 clearTimeout(ed.timer);
                 ed.timer = setTimeout(() => this.save(ed),
                                       this.plugin.settings.autosaveMs);
             },
+            onCaret: () => this.followCaret(),
             onBlur: () => { this.save(ed); },
             onEscape: () => { this.endEdit(); },
             onFind: () => { this.openFind(); },
@@ -4488,6 +4549,14 @@ class DendriteSettings extends PluginSettingTab {
                     s.obsidianEditor = v;
                     save();
                 }));
+        new Setting(containerEl).setName('Typewriter scrolling')
+            .setDesc('While a card is written in, the line with the cursor ' +
+                     'stays at the middle of the column. Off, the column ' +
+                     'moves only enough to keep the cursor in view.')
+            .addToggle((tg) => tg.setValue(s.typewriter).onChange((v) => {
+                s.typewriter = v;
+                save();
+            }));
         new Setting(containerEl).setName('Autosave delay')
             .setDesc('Milliseconds after the last keystroke before a card ' +
                      'is written to its note. Leaving a card always saves ' +

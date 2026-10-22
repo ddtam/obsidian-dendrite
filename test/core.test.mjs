@@ -271,6 +271,31 @@ test('a column with nothing on the active path aligns children beside ' +
     assert.equal(t[1], 270 - 200);
 });
 
+test('alignColumns: a tall card is placed by its caret or its top', () => {
+    const A = { id: 'A', depth: 0, children: [], parent: null };
+    const cols = [[A]];
+    // A is 1000 high in a 400 column. Centring it puts its middle at the
+    // column's middle, leaving the first 300 above the view.
+    const pos = () => ({ top: 0, height: 1000 });
+    let t = c.alignColumns(cols, A, pos, [400]);
+    assert.equal(t[0], 300, 'centred, the top is out of view');
+    assert.equal(c.tallTop({ top: 0, height: 1000 }, 400, 20), -20);
+    assert.equal(c.tallTop({ top: 0, height: 300 }, 400, 20), null);
+    t = c.alignColumns(cols, A, pos, [400], -20);
+    assert.equal(t[0], -20, 'the given offset is used for the active card');
+
+    // Typewriter: the caret's line sits at the middle wherever it is.
+    const caret = { top: 40, bottom: 60 };
+    assert.equal(c.caretOffset(caret, 400, 300, 30, true), 50 - 200);
+    // Otherwise the column holds still while the caret is in view, and
+    // moves only enough to bring it back.
+    assert.equal(c.caretOffset({ top: 500, bottom: 520 }, 400, 300, 30,
+                               false), 300);
+    assert.equal(c.caretOffset(caret, 400, 300, 30, false), 10);
+    assert.equal(c.caretOffset({ top: 900, bottom: 920 }, 400, 300, 30,
+                               false), 920 + 30 - 400);
+});
+
 test('quotas: fractions, conversion and the waterfall of allocations', () => {
     assert.equal(c.parseAmount('1/4'), 0.25);
     assert.deepEqual(c.convert(0.5, 'pages', 'words', 500, 6),

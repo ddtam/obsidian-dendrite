@@ -565,7 +565,20 @@ var require_core = __commonJS({
       const b = (second || "").replace(/^\s+/, "");
       return a && b ? a + "\n\n" + b : a || b;
     }
-    function alignColumns(cols, active, pos, heights) {
+    function tallTop(card, height, margin) {
+      return card.height + 2 * margin > height ? card.top - margin : null;
+    }
+    function caretOffset(caret, height, current, margin, typewriter) {
+      const mid = (caret.top + caret.bottom) / 2;
+      if (typewriter) return mid - height / 2;
+      const m = Math.min(margin, (height - (caret.bottom - caret.top)) / 2);
+      if (caret.top - m < current) return caret.top - m;
+      if (caret.bottom + m > current + height) {
+        return caret.bottom + m - height;
+      }
+      return current;
+    }
+    function alignColumns(cols, active, pos, heights, own = null) {
       const targets = cols.map(() => null);
       if (!active) return targets;
       const lineage = /* @__PURE__ */ new Set([active.id]);
@@ -581,7 +594,7 @@ var require_core = __commonJS({
       for (let d = 0; d < cols.length; d++) {
         const inCol = cols[d].filter((n) => lineage.has(n.id));
         if (d === active.depth) {
-          targets[d] = centre([active], d);
+          targets[d] = own !== null ? own : centre([active], d);
           anchor[d] = active;
         } else if (inCol.length) {
           targets[d] = centre(inCol, d);
@@ -889,6 +902,8 @@ var require_core = __commonJS({
       measure,
       sectionNumbers,
       alignColumns,
+      tallTop,
+      caretOffset,
       parseAmount,
       convert,
       quotas,
@@ -1118,6 +1133,9 @@ var require_editor = __commonJS({
         onUpdate(update, changed) {
           super.onUpdate(update, changed);
           if (changed) this.cardOpts.onChange();
+          else if (update.selectionSet && this.cardOpts.onCaret) {
+            this.cardOpts.onCaret();
+          }
           if (this.cardOpts.onRedraw) this.cardOpts.onRedraw();
         }
         onunload() {
@@ -1182,6 +1200,11 @@ var require_editor = __commonJS({
             editor.offsetToPos(to)
           );
         },
+        caretRect() {
+          const cm = ed.editor.cm;
+          const r = cm.coordsAtPos(cm.state.selection.main.head);
+          return r ? { top: r.top, bottom: r.bottom } : null;
+        },
         rangeAt(start, end) {
           const cm = ed.editor.cm;
           const vp = cm.viewport;
@@ -1216,6 +1239,13 @@ var require_editor = __commonJS({
         opts.onChange();
       });
       ta.addEventListener("blur", () => opts.onBlur());
+      const moved = () => {
+        if (opts.onCaret) opts.onCaret();
+      };
+      ta.addEventListener("click", moved);
+      ta.addEventListener("keyup", (e) => {
+        if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End" || e.key.startsWith("Page")) moved();
+      });
       return {
         kind: "text",
         el: ta,
@@ -1241,6 +1271,9 @@ var require_editor = __commonJS({
           ta.focus();
           ta.setSelectionRange(at, to);
         },
+        caretRect() {
+          return textCaret(ta);
+        },
         // A text box's text is not in the page's text, so nothing in it
         // can be painted; find selects its match instead.
         rangeAt() {
@@ -1250,6 +1283,42 @@ var require_editor = __commonJS({
           ta.remove();
         }
       };
+    }
+    function textCaret(ta) {
+      const doc = ta.ownerDocument;
+      const cs = doc.defaultView.getComputedStyle(ta);
+      const copy = doc.createElement("div");
+      for (const p of [
+        "fontFamily",
+        "fontSize",
+        "fontWeight",
+        "lineHeight",
+        "letterSpacing",
+        "tabSize",
+        "boxSizing",
+        "paddingTop",
+        "paddingLeft",
+        "paddingRight",
+        "borderTopWidth",
+        "borderLeftWidth",
+        "borderRightWidth"
+      ]) {
+        copy.style[p] = cs[p];
+      }
+      copy.style.position = "absolute";
+      copy.style.visibility = "hidden";
+      copy.style.whiteSpace = "pre-wrap";
+      copy.style.overflowWrap = "break-word";
+      copy.style.width = ta.offsetWidth + "px";
+      copy.textContent = ta.value.slice(0, ta.selectionEnd);
+      const mark = doc.createElement("span");
+      mark.textContent = "\u200B";
+      copy.appendChild(mark);
+      doc.body.appendChild(copy);
+      const top = ta.getBoundingClientRect().top + mark.offsetTop - ta.scrollTop;
+      const height = mark.offsetHeight;
+      copy.remove();
+      return { top, bottom: top + height };
     }
     function cardEditor2(app, parent, opts, useObsidian) {
       return useObsidian && obsidianEditor(app, parent, opts) || textEditor(opts);
@@ -1676,6 +1745,7 @@ var DEFAULTS = {
   manageLinter: true,
   lintCards: true,
   obsidianEditor: true,
+  typewriter: true,
   pandocPath: "pandoc",
   pdfEngine: "xelatex",
   zoteroPort: 23119,
@@ -1695,6 +1765,7 @@ var LINTER_ID = "obsidian-linter";
 var CARD_UNSAFE_RULES = ["file-name-heading", "capitalize-headings"];
 var CARD_NAME = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-[a-z0-9]{5}$/;
 var UNDO_DEPTH = 50;
+var CARD_MARGIN = 24;
 var LABEL_IDLE_MS = 3e3;
 function prefixOf(app, file) {
   const fm = app.metadataCache.getFileCache(file)?.frontmatter;
@@ -1956,7 +2027,15 @@ var DendriteView = class extends ItemView {
     this.colInners = [];
     this.offsets = [];
     board.addEventListener("scroll", (e) => {
-      if (e.target !== board) this.scheduleFlow();
+      if (e.target === board) return;
+      const col = e.target;
+      if (!this.nativeScroll && col.scrollTop && col.classList.contains("dendrite-col")) {
+        const d = Number(col.dataset.depth);
+        const by = col.scrollTop;
+        col.scrollTop = 0;
+        this.setColOffset(d, this.colOffset(d) + by);
+      }
+      this.scheduleFlow();
     }, true);
     for (const t of ["copy", "cut"]) {
       board.addEventListener(t, () => this.holdBoardScroll(), true);
@@ -2300,7 +2379,15 @@ var DendriteView = class extends ItemView {
       return el ? { top: el.offsetTop, height: el.offsetHeight } : null;
     };
     const heights = [...cols].map((c) => c.clientHeight);
-    const targets = core.alignColumns(this.cols, node, pos, heights);
+    const own = this.ownOffset(node, pos(node.id), heights[node.depth]);
+    this.placed = node.id;
+    const targets = core.alignColumns(
+      this.cols,
+      node,
+      pos,
+      heights,
+      own
+    );
     if (this.nativeScroll) {
       cols.forEach((col2, d) => {
         if (targets[d] !== null) {
@@ -2315,6 +2402,52 @@ var DendriteView = class extends ItemView {
       const left = col.offsetLeft - (this.board.clientWidth - col.offsetWidth) / 2;
       this.board.scrollTo({ left, behavior });
     }
+  }
+  /**
+   * Where the active card's own column goes, or null to centre the card.
+   * While it is written in, the caret decides: at the column's middle
+   * in typewriter mode, otherwise kept in view, with a card that fits
+   * still centred. A card taller than its column shows its top when
+   * moved to, and stays where it is after that.
+   */
+  ownOffset(node, box, height) {
+    if (!box || !height) return null;
+    const d = node.depth;
+    const ed = this.editing;
+    const typewriter = this.plugin.settings.typewriter !== false;
+    const tall = core.tallTop(box, height, CARD_MARGIN) !== null;
+    if (ed && ed.id === node.id && (typewriter || tall) && ed.editor.caretRect && this.colInners[d]) {
+      const r = ed.editor.caretRect();
+      if (r) {
+        const base = this.colInners[d].getBoundingClientRect().top;
+        const caret = { top: r.top - base, bottom: r.bottom - base };
+        return core.caretOffset(
+          caret,
+          height,
+          this.colOffset(d),
+          CARD_MARGIN,
+          typewriter
+        );
+      }
+    }
+    if (!tall) return null;
+    if (this.placed === node.id) {
+      const cur = this.colOffset(d);
+      return Math.max(box.top - CARD_MARGIN, Math.min(
+        cur,
+        box.top + box.height + CARD_MARGIN - height
+      ));
+    }
+    return core.tallTop(box, height, CARD_MARGIN);
+  }
+  /** Move the active column to the caret once the editor has drawn. */
+  followCaret() {
+    if (this.caretFrame) return;
+    const win = this.pageWin();
+    this.caretFrame = win.requestAnimationFrame(() => {
+      this.caretFrame = null;
+      if (this.editing) this.centre(false);
+    });
   }
   /** A column's scroll position, however it is scrolled. */
   colOffset(d) {
@@ -3015,7 +3148,7 @@ var DendriteView = class extends ItemView {
         ed.dirty = true;
         ed.changed = true;
         ed.fresh = false;
-        this.centre(false);
+        this.followCaret();
         this.scheduleCounts();
         clearTimeout(ed.timer);
         ed.timer = setTimeout(
@@ -3023,6 +3156,7 @@ var DendriteView = class extends ItemView {
           this.plugin.settings.autosaveMs
         );
       },
+      onCaret: () => this.followCaret(),
       onBlur: () => {
         this.save(ed);
       },
@@ -5823,6 +5957,10 @@ var DendriteSettings = class extends PluginSettingTab {
     heading("Writing in cards");
     new Setting(containerEl).setName("Use Obsidian's editor in cards").setDesc("Live preview, link and citation suggestions, and editor commands inside a card. Off, or if Obsidian's editor cannot start, cards use a plain text box.").addToggle((tg) => tg.setValue(s.obsidianEditor).onChange((v) => {
       s.obsidianEditor = v;
+      save();
+    }));
+    new Setting(containerEl).setName("Typewriter scrolling").setDesc("While a card is written in, the line with the cursor stays at the middle of the column. Off, the column moves only enough to keep the cursor in view.").addToggle((tg) => tg.setValue(s.typewriter).onChange((v) => {
+      s.typewriter = v;
       save();
     }));
     new Setting(containerEl).setName("Autosave delay").setDesc("Milliseconds after the last keystroke before a card is written to its note. Leaving a card always saves at once.").addSlider((sl) => sl.setLimits(200, 3e3, 100).setValue(s.autosaveMs).setDynamicTooltip().onChange((v) => {
