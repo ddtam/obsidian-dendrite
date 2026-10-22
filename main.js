@@ -1779,8 +1779,10 @@ var require_history = __commonJS({
             return "reverted";
           }
           const t = this.now();
-          if (last && t - last.t < WINDOW_MS) last.h = h;
-          else v.push({ h, t });
+          const o = !!outside;
+          if (last && t - last.t < WINDOW_MS) {
+            Object.assign(last, { h, s: t, o });
+          } else v.push({ h, t, s: t, o });
           if (v.length > KEEP) v.splice(0, v.length - KEEP);
           rec.text = text;
           await this.store.set(key, rec);
@@ -1792,13 +1794,31 @@ var require_history = __commonJS({
         const rec = await this.store.get(key);
         return rec && rec.reverted ? rec.text : null;
       }
+      /**
+       * For a card gone back: the newest text recorded, with where and when
+       * the newest version and the matched earlier one were seen. Null
+       * when the card has not gone back.
+       */
+      async detail(key) {
+        const rec = await this.store.get(key);
+        if (!rec || !rec.reverted) return null;
+        const v = rec.versions;
+        const seen = (x) => x && { at: x.s || x.t, outside: x.o };
+        const match = [...v].reverse().find((x) => x.h === rec.reverted.h);
+        return {
+          text: rec.text,
+          before: seen(v[v.length - 1]),
+          now: seen(match)
+        };
+      }
       /** Accept the card's current text as its newest version. */
       keep(key, text, compared) {
         return this.serial(key, async () => {
           const rec = await this.store.get(key);
           if (!rec) return;
           rec.reverted = null;
-          rec.versions.push({ h: hash(compared), t: this.now() });
+          const t = this.now();
+          rec.versions.push({ h: hash(compared), t, s: t, o: true });
           if (rec.versions.length > KEEP) {
             rec.versions.splice(0, rec.versions.length - KEEP);
           }
@@ -1930,6 +1950,8 @@ var DendriteView = class extends ItemView {
     this.dropped = /* @__PURE__ */ new Map();
     this.indexReverted = false;
     this.revertedAt = /* @__PURE__ */ new Map();
+    this.held = /* @__PURE__ */ new Map();
+    this.versionInfo = /* @__PURE__ */ new Map();
     this.labelTimer = null;
     this.ownBodies = /* @__PURE__ */ new Map();
     this.reverted = /* @__PURE__ */ new Set();
@@ -3288,6 +3310,7 @@ var DendriteView = class extends ItemView {
       saving: Promise.resolve(),
       before: core.splitFrontmatter(raw).body
     };
+    ed.saved = ed.before;
     const editor = cardEditor(this.app, this, {
       value: core.splitFrontmatter(raw).body,
       file: f,
@@ -3342,6 +3365,7 @@ var DendriteView = class extends ItemView {
     if (!ed.dirty) return ed.saving;
     ed.dirty = false;
     const text = ed.editor.value;
+    ed.saved = text;
     ed.saving = ed.saving.then(() => this.writeCard(
       ed.file,
       (data) => core.splitFrontmatter(data).fm + text
@@ -3371,7 +3395,7 @@ var DendriteView = class extends ItemView {
       await this.setStatus(ed.id, "draft");
     }
     if (ed.changed) await this.plugin.lintCard(ed.file);
-    if (ed.changed) {
+    if (ed.changed && !ed.recorded) {
       const after = core.splitFrontmatter(
         await this.app.vault.read(ed.file)
       ).body;
@@ -4061,12 +4085,46 @@ var DendriteView = class extends ItemView {
     if (own) this.ownBodies.delete(f.path);
     await this.checkVersion(id, text, own);
     if (this.find) this.scheduleFind(true);
-    if (this.editing && this.editing.id === id) return;
+    if (this.editing && this.editing.id === id) {
+      if (!own) await this.syncedWhileEditing(this.editing, text);
+      return;
+    }
     this.invalidate(id);
     const card = this.cardEls.get(id);
     if (card) {
       card.addClass("is-pending");
       this.renderCard(id);
+    }
+  }
+  /**
+   * A sync changed the note of the card being edited. With no unsaved
+   * typing the editor opens again on the new text, so a later save
+   * cannot write the old text back over it. With unsaved typing nothing
+   * is saved: the editor closes on the note as it came, and the card is
+   * marked with the typing to put back.
+   */
+  async syncedWhileEditing(ed, text) {
+    const { fm, body } = core.splitFrontmatter(text);
+    if (ed.editor.value === body) return;
+    clearTimeout(ed.timer);
+    if (ed.changed) this.recordVisit(ed.id, ed.before, ed.saved);
+    ed.recorded = true;
+    if (ed.dirty) {
+      ed.dirty = false;
+      this.held.set(ed.id, fm + ed.editor.value);
+      await this.endEdit();
+      this.reverted.add(ed.id);
+      this.revertedAt.set(ed.id, Date.now());
+      const node = this.byId.get(ed.id);
+      new Notice(`Dendrite: Card ${core.shortId(ed.id)}` + (node && node.label ? ` (${node.label})` : "") + ' changed outside Dendrite while you were typing in it, usually from a sync. Your typing was not saved over it. Click "typing kept" on the card to compare and choose.', 0);
+      this.updateStatuses();
+      return;
+    }
+    const at = Math.min(ed.editor.selection()[0], body.length);
+    await this.endEdit();
+    await this.startEdit(ed.id);
+    if (this.editing && this.editing.id === ed.id) {
+      this.editing.editor.focusAt(at);
     }
   }
   async onMetadata(f) {
@@ -4116,7 +4174,17 @@ var DendriteView = class extends ItemView {
     }
     const key = id === null ? "index" : id;
     if (id === null) this.indexReverted = r === "reverted";
-    const on = r === "reverted" || id === null && this.dropped.size > 0;
+    const on = r === "reverted" || this.held.has(id) || id === null && this.dropped.size > 0;
+    if (r === "reverted" && !this.versionInfo.has(key)) {
+      try {
+        const d = await this.history.detail(this.historyKey(id));
+        if (d) this.versionInfo.set(key, d);
+      } catch (err) {
+        console.error("Dendrite: version history failed", err);
+      }
+    } else if (r !== "reverted") {
+      this.versionInfo.delete(key);
+    }
     if (on === this.reverted.has(key)) return;
     if (!on) {
       this.reverted.delete(key);
@@ -4201,6 +4269,9 @@ var DendriteView = class extends ItemView {
    */
   async newerText(id) {
     if (id === null && this.dropBase) return this.dropBase;
+    if (this.held.has(id)) return this.held.get(id);
+    const info = this.versionInfo.get(id === null ? "index" : id);
+    if (info) return info.text;
     const text = await this.history.newer(this.historyKey(id));
     return text === void 0 ? null : text;
   }
@@ -4229,6 +4300,7 @@ var DendriteView = class extends ItemView {
       return;
     }
     if (this.editing && this.editing.id === id) await this.endEdit();
+    this.held.delete(id);
     await this.writeCard(f, () => text);
     this.pushUndo({
       active: id,
@@ -4259,6 +4331,8 @@ var DendriteView = class extends ItemView {
       this.indexText = text;
       this.indexReverted = false;
     }
+    this.held.delete(id);
+    this.versionInfo.delete(id === null ? "index" : id);
     this.reverted.delete(id === null ? "index" : id);
     this.updateStatuses();
   }
@@ -4406,8 +4480,9 @@ var DendriteView = class extends ItemView {
         return s;
       };
       if (this.reverted.has(id)) {
-        const s = show("reverted", "older copy \u27F2");
-        s.setAttr("aria-label", "Changed outside Dendrite to text this card had before. Click to compare and choose; nothing is written until you do");
+        const held = this.held.has(id);
+        const s = show("reverted", held ? "typing kept \u27F2" : "older copy \u27F2");
+        s.setAttr("aria-label", held ? "Changed outside Dendrite while you were typing in it. Click to compare and choose; your typing is not written until you do" : "Changed outside Dendrite to text this card had before. Click to compare and choose; nothing is written until you do");
         s.onclick = (e) => {
           e.stopPropagation();
           this.reviewVersion(id);
@@ -5842,9 +5917,11 @@ var VersionModal = class _VersionModal extends Modal {
     const f = index ? view.file : view.cardFile(id);
     const node = !index && view.byId.get(id);
     const name = index ? "The index" : `Card ${core.shortId(id)}` + (node && node.label ? ` (${node.label})` : "");
-    this.titleEl.setText(`${name} changed to an older copy`);
-    const now = f ? await view.app.vault.read(f) : "";
+    const held = !index && view.held.has(id);
+    this.titleEl.setText(held ? `${name} changed while you were typing in it` : `${name} changed to an older copy`);
+    const now = f ? await view.app.vault.cachedRead(f) : "";
     const before = await view.newerText(id);
+    const info = view.versionInfo.get(index ? "index" : id);
     const at = view.revertedAt.get(index ? "index" : id);
     const when = at ? ` at ${new Date(at).toLocaleString()}` : "";
     const p = (text) => contentEl.createEl("p", { text });
@@ -5852,10 +5929,20 @@ var VersionModal = class _VersionModal extends Modal {
       const n = view.dropped.size;
       const names = [...view.dropped].map(([k, label]) => core.shortId(k) + (label ? ` (${label})` : "")).join(", ");
       p(`It changed outside Dendrite${when} and no longer lists ${n} card${n === 1 ? "" : "s"} whose notes still exist: ${names}.`);
+    } else if (held) {
+      p(`It changed outside Dendrite${when}, usually from a sync, while you had typing in it not yet saved. The text from before is the card with your typing. Nothing has been written, and export waits until you choose.`);
     } else {
       p(`It changed outside Dendrite${when} to text this device had before.`);
     }
-    p("Usually a device with an old copy synced it, sometimes merged line by line with the current one. Restoring a backup yourself looks the same. Nothing has been written, and export waits until you choose.");
+    const from = (x) => x.outside ? "came from outside Dendrite" : "was written on this device";
+    const stamp = (x) => new Date(x.at).toLocaleString();
+    if (!held && info && info.before && info.before.outside !== void 0) {
+      p(`The text from before ${from(info.before)}, last at ${stamp(info.before)}.` + (info.before.outside ? " It can itself be the damaged or stale copy." : ""));
+    }
+    if (!held && info && info.now && info.now.outside !== void 0) {
+      p(`The note now matches text this device had at ${stamp(info.now)}, which ${from(info.now)}.`);
+    }
+    if (!held) p("Usually a device with an old copy synced it, sometimes merged line by line with the current one. Restoring a backup yourself looks the same. Nothing has been written, and export waits until you choose.");
     if (before === null) {
       p("No earlier text is recorded on this device, so there is nothing to compare or put back here.");
     } else {
