@@ -1423,28 +1423,32 @@ button.dendrite-review-btn:hover {
     min-height: 0;
 }
 .dendrite-version {
-    /* A card's shape: its padding, the room at its top where a card has
-       its status and role, and its body's type; but muted, an old
-       version for reference, which should not stand out over the card
-       it was replaced by. */
+    /* Drawn as a card: its look, padding and the room at its top where a
+       card has its status and role. */
     position: relative;
     flex: 0 0 auto;
-    background: var(--background-secondary);
-    border: 1px dashed var(--background-modifier-border);
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
     border-radius: var(--radius-m);
     padding: 36px 14px 10px;
-    color: var(--text-muted);
+}
+.dendrite-version > .dendrite-status {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    margin: 0;
 }
 .dendrite-version-head {
     position: absolute;
     top: 10px;
     left: 14px;
-    right: 14px;
+    /* Short of its flag, at the top right. */
+    right: 96px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     color: var(--text-faint);
     font-size: 0.85em;
-}
-.dendrite-version > .dendrite-card-body {
-    opacity: 0.75;
 }
 .dendrite-status-chip.is-stack.is-on {
     color: var(--text-accent);
@@ -1753,15 +1757,12 @@ button.dendrite-review-btn:hover {
     margin-bottom: var(--size-4-4, 16px);
 }
 
-/* Open comments on a card's old versions: its stack's edges, and each
-   such version in the fan, take the revise colour, so they are not left
-   unresolved under the card. */
+/* Open comments on a card's old versions, while folded: its stack's
+   edges take the revise colour, so they are not left unresolved under
+   the card. */
 .dendrite-card.has-stack-open::before,
 .dendrite-card.has-stack-open::after {
     border-color: var(--dendrite-revise, var(--color-orange));
-}
-.dendrite-version.has-open {
-    border-left: 3px solid var(--dendrite-revise, var(--color-orange));
 }
 
 /* Fanned out, a card's old versions are beside it: none drawn behind. */

@@ -3111,9 +3111,11 @@ class DendriteView extends ItemView {
             counts.set(id, open);
         }
         this.stackOpen = counts;
-        for (const [id, open] of counts) {
+        for (const [id, all] of counts) {
             const card = this.cardEls.get(id);
             if (!card) continue;
+            // Fanned out, each old version carries its own flag.
+            const open = this.fannedId === id ? 0 : all;
             card.toggleClass('has-stack-open', open > 0);
             const s = card.querySelector(`[data-stack="${id}"]`);
             if (!s) continue;
@@ -3250,6 +3252,15 @@ class DendriteView extends ItemView {
         const out = body.createDiv({ cls: 'dendrite-md markdown-rendered' });
         const notes = review.reviewItems(text);
         el.toggleClass('has-open', notes.length > 0);
+        // Its open comments flagged on it, as on any card.
+        if (notes.length) {
+            const chip = el.createDiv({ cls: 'dendrite-status' })
+                .createSpan({ cls: 'dendrite-status-chip is-revise',
+                              text: `${notes.length} open ⚑` });
+            const colour = this.plugin.statusColour &&
+                this.plugin.statusColour('revise');
+            if (colour) chip.style.setProperty('--dendrite-chip', colour);
+        }
         if (!text.trim()) {
             out.createDiv({ cls: 'dendrite-placeholder',
                             text: 'Empty card' });

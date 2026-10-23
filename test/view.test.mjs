@@ -3477,17 +3477,27 @@ test('an old version with open comments shows on its card, so they are ' +
     assert.equal(chip().textContent, '2 versions · 1 open');
     assert.ok(chip().hasClass('is-revise'));
     assert.ok(view.cardEls.get('G-ccccc').hasClass('has-stack-open'));
+    // Fanned out, the old version is a card with its own flag, and the
+    // card it was replaced by shows only how many versions there are.
     await view.toggleFan('G-ccccc');
-    const v = view.board.parentElement.querySelector('.dendrite-version');
-    assert.ok(v.hasClass('has-open'), 'flagged in the fan too');
+    await view.stackOpenReady;
+    const v = () => view.board.parentElement
+        .querySelector('.dendrite-version');
+    const flag = () => v().querySelector('.dendrite-status-chip');
+    assert.equal(flag() && flag().textContent, '1 open ⚑');
+    assert.ok(flag().hasClass('is-revise'));
+    assert.equal(chip().textContent, '2 versions');
+    assert.ok(!chip().hasClass('is-revise'));
+    assert.ok(!view.cardEls.get('G-ccccc').hasClass('has-stack-open'));
     assert.ok(view.cardEls.get('G-ccccc').hasClass('is-fanned'),
               'fanned out: no cards drawn behind it');
     await view.reviewAction('G-aaaaa', 0, 'resolve');
     await view.stackOpenReady;
-    assert.equal(chip().textContent, '2 versions');
-    assert.ok(!chip().hasClass('is-revise'));
-    assert.ok(!view.cardEls.get('G-ccccc').hasClass('has-stack-open'));
+    assert.equal(flag(), null, 'resolved: its flag goes');
     await view.toggleFan('G-ccccc');
+    await view.stackOpenReady;
+    assert.equal(chip().textContent, '2 versions');
+    assert.ok(!view.cardEls.get('G-ccccc').hasClass('has-stack-open'));
     assert.ok(!view.cardEls.get('G-ccccc').hasClass('is-fanned'),
               'folded: the cards behind it again');
 });
