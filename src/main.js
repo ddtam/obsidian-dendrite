@@ -31,6 +31,7 @@ const core = require('./core.js');
 const textedit = require('./textedit.js');
 const { cardEditor } = require('./editor.js');
 const pandoc = require('./pandoc.js');
+const review = require('./review.js');
 const { History, idbStore } = require('./history.js');
 
 const VIEW = 'dendrite-view';
@@ -644,8 +645,17 @@ class DendriteView extends ItemView {
         const comp = new Component();
         comp.load();
         const out = createDiv({ cls: 'dendrite-md markdown-rendered' });
+        // Review comments render as marks in the text and callouts under
+        // their paragraphs, where Obsidian alone would hide them.
+        const notes = review.reviewItems(text);
         if (text.trim()) {
-            await MarkdownRenderer.render(this.app, text, out, f.path, comp);
+            await MarkdownRenderer.render(this.app,
+                notes.length ? review.renderMarkdown(text) : text, out,
+                f.path, comp);
+            if (notes.length) {
+                review.decorate(out, notes,
+                                (n, what) => this.reviewAction(id, n, what));
+            }
         } else {
             out.createDiv({ cls: 'dendrite-placeholder',
                             text: 'Empty card' });
@@ -2874,6 +2884,160 @@ class DendriteView extends ItemView {
         await this.setStatus(this.active, status);
     }
 
+    /**
+     * Ask for a returned Word file, then show what it says and where in
+     * the cards, to choose which to add.
+     */
+    importReview() {
+        const input = this.pageDoc().createElement('input');
+        input.type = 'file';
+        input.accept = '.docx,application/vnd.openxmlformats-officedocument.' +
+            'wordprocessingml.document';
+        input.onchange = async () => {
+            const file = input.files && input.files[0];
+            if (!file) return;
+            let items;
+            try {
+                items = review.readReview(
+                    require('buffer').Buffer.from(await file.arrayBuffer()),
+                    require('zlib'));
+            } catch (err) {
+                new Notice(`Dendrite: ${file.name} could not be read as a ` +
+                           `Word file (${err.message}).`);
+                return;
+            }
+            if (!items.length) {
+                new Notice(`Dendrite: ${file.name} has no comments or ` +
+                           'tracked changes.');
+                return;
+            }
+            const cards = await this.reviewCards();
+            const rows = items.map((item) => {
+                const at = review.locate(item, cards);
+                return { item, at, use: !!at };
+            });
+            new ReviewImportModal(this, file.name, rows).open();
+        };
+        input.click();
+    }
+
+    /**
+     * Every card's text, in reading order, for finding passages in: only
+     * what export prints, since that is what a reviewer was sent; the
+     * rest blanked, so offsets still point into the card.
+     */
+    async reviewCards() {
+        await this.flush();
+        const bodies = await this.loadBodies();
+        const roleOf = (x) => this.printRoleOf(x);
+        return core.allNodes(this.root).filter((n) => bodies.has(n.id))
+            .map((n) => ({ id: n.id, text: core.printedOnly(
+                bodies.get(n.id), core.roleFor(n, roleOf)) }));
+    }
+
+    /**
+     * Write the chosen comments and changes into their cards, each card
+     * found again in its text as it is now, and set the cards that print
+     * their text to revise; one step to undo. A change goes in as one to
+     * apply only where its passage is still exactly as it was sent.
+     */
+    async addReview(rows, fallback) {
+        const cards = await this.reviewCards();
+        const byId = new Map();
+        let placed = 0;
+        let missed = 0;
+        for (const row of rows) {
+            const item = row.item;
+            let at = review.locate(item, cards);
+            let add;
+            // Only one never found goes on the selected card; one found
+            // before but not now has gone with its text.
+            if (!at && !row.at && fallback) {
+                const text = (cards.find((c) => c.id === fallback.id) ||
+                              { text: '' }).text.trimEnd();
+                at = { id: fallback.id, start: text.length,
+                       end: text.length, how: 'none' };
+            }
+            if (!at) {
+                missed++;
+                continue;
+            }
+            const quoted = at.how === 'none' && item.quote ?
+                `On “${item.quote}”: ` : '';
+            if (item.kind === 'comment') {
+                add = { kind: 'review', text: quoted + item.text };
+            } else if (at.how === 'exact') {
+                add = { kind: 'suggest', text: item.insert,
+                        quote: item.quote };
+            } else {
+                add = { kind: 'review', text: quoted + (item.quote ?
+                    `Suggested replacing “${item.quote}” with ` +
+                    `“${item.insert.trim()}”` :
+                    `Suggested adding “${item.insert.trim()}”`) +
+                    '. The text has changed here since it was sent.' };
+            }
+            Object.assign(add, { start: at.how === 'none' ? at.end :
+                                     at.start,
+                                 end: at.end, author: item.author,
+                                 date: item.date });
+            if (!byId.has(at.id)) byId.set(at.id, []);
+            byId.get(at.id).push(add);
+            placed++;
+        }
+        const restores = [];
+        for (const [id, adds] of byId) {
+            const f = this.cardFile(id);
+            if (!f) continue;
+            const data = await this.app.vault.read(f);
+            const out = await this.writeCard(f, (d) => {
+                const { fm, body } = core.splitFrontmatter(d);
+                return fm + review.addItems(body, adds);
+            });
+            restores.push({ path: f.path, text: data,
+                            ifBody: core.splitFrontmatter(out).body });
+            const info = this.statusInfo && this.statusInfo.get(id);
+            if (info && info.prints) await this.setStatus(id, 'revise');
+            this.invalidate(id);
+            await this.renderCard(id);
+        }
+        if (restores.length) {
+            this.pushUndo({ active: this.active, files: [], text: true,
+                            restores });
+        }
+        const n = restores.length;
+        new Notice(`Dendrite: ${placed} added to ${n} card` +
+            `${n === 1 ? '' : 's'}` + (missed ? `; ${missed} no longer ` +
+            'found, left out.' : '.'));
+    }
+
+    /**
+     * A review comment's button: resolve or dismiss takes the comment
+     * out and leaves the passage; apply shows the card with the change
+     * first. One step to undo either way.
+     */
+    async reviewAction(id, n, what) {
+        const f = this.cardFile(id);
+        if (!f) return;
+        if (this.editing && this.editing.id === id) await this.endEdit();
+        const data = await this.app.vault.read(f);
+        const { fm, body } = core.splitFrontmatter(data);
+        const write = async (text) => {
+            const out = await this.writeCard(f, () => fm + text);
+            this.pushUndo({ active: id, files: [], text: true,
+                restores: [{ path: f.path, text: data,
+                             ifBody: core.splitFrontmatter(out).body }] });
+            this.invalidate(id);
+            await this.renderCard(id);
+        };
+        if (what === 'apply') {
+            const after = review.removeItem(body, n, true);
+            new SuggestModal(this, id, body, after,
+                             () => write(after)).open();
+            return;
+        }
+        await write(review.removeItem(body, n));
+    }
+
     async setStatus(id, status) {
         const f = this.cardFile(id);
         if (!f) return;
@@ -2892,6 +3056,11 @@ class DendriteView extends ItemView {
         const report = core.statusReport(this.root,
             (id) => this.statusOf(id), (id) => this.printRoleOf(id));
         this.statusInfo = report.cards;
+        // Suggested changes on cards take the revise flag's colour.
+        const revise = this.plugin.statusColour &&
+            this.plugin.statusColour('revise');
+        if (revise) this.board.style.setProperty('--dendrite-revise', revise);
+        else this.board.style.removeProperty('--dendrite-revise');
         for (const [id, card] of this.cardEls) {
             const old = card.querySelector(':scope > .dendrite-status');
             if (old) old.remove();
@@ -3685,6 +3854,12 @@ class DendriteView extends ItemView {
                 .onClick(() => this.exportTo(node, 'pdf')));
             m.addItem((i) => i.setTitle('Word').setIcon('file-output')
                 .onClick(() => this.exportTo(node, 'docx')));
+            if (!node) {
+                m.addSeparator();
+                m.addItem((i) => i.setTitle('Import review from Word…')
+                    .setIcon('message-square')
+                    .onClick(() => this.importReview()));
+            }
         }
         if (event) m.showAtMouseEvent(event);
     }
@@ -4472,6 +4647,8 @@ class VersionModal extends Modal {
         super(view.app);
         this.view = view;
         this.id = id;
+        // What the two sides of the comparison are called.
+        this.labels = ['the note now', 'the text from before'];
     }
 
     async onOpen() {
@@ -4657,9 +4834,10 @@ class VersionModal extends Modal {
 
     drawUnified(box, rows) {
         const key = box.createEl('p', { cls: 'dendrite-version-desc' });
-        key.createSpan({ cls: 'is-removed', text: '− the note now' });
+        const [now, other] = this.labels;
+        key.createSpan({ cls: 'is-removed', text: `− ${now}` });
         key.createSpan({ text: ' · ' });
-        key.createSpan({ cls: 'is-added', text: '+ the text from before' });
+        key.createSpan({ cls: 'is-added', text: `+ ${other}` });
         key.createSpan({ text: ', each line only in that one' });
         const pre = box.createDiv({ cls: 'dendrite-version-diff' });
         const keep = VersionModal.shown(rows.map((r) => r[0] !== ' '));
@@ -4713,9 +4891,9 @@ class VersionModal extends Modal {
         const table = box.createDiv({ cls: 'dendrite-version-diff' })
             .createEl('table', { cls: 'dendrite-version-split' });
         const head = table.createEl('tr');
-        head.createEl('th', { cls: 'is-removed', text: 'The note now' });
-        head.createEl('th', { cls: 'is-added',
-                              text: 'The text from before' });
+        const cap = (t) => t[0].toUpperCase() + t.slice(1);
+        head.createEl('th', { cls: 'is-removed', text: cap(this.labels[0]) });
+        head.createEl('th', { cls: 'is-added', text: cap(this.labels[1]) });
         const keep = VersionModal.shown(pairs.map((x) => x[2]));
         let gap = false;
         let shown = 0;
@@ -4752,6 +4930,128 @@ class VersionModal extends Modal {
 }
 // Unified until a viewer picks side by side.
 VersionModal.mode = 'unified';
+
+/**
+ * A reviewer's suggested change to a card, shown as the comparison of
+ * the card now and the card with it, to apply or not.
+ */
+class SuggestModal extends VersionModal {
+    constructor(view, id, now, after, apply) {
+        super(view, id);
+        this.now = now;
+        this.after = after;
+        this.apply = apply;
+        this.labels = ['the card now', 'with the change'];
+    }
+
+    async onOpen() {
+        const { contentEl, view, id } = this;
+        const node = view.byId.get(id);
+        this.titleEl.setText(`Apply the suggested change to card ` +
+            `${core.shortId(id)}` + (node && node.label ?
+                ` (${node.label})` : ''));
+        contentEl.createEl('p', { text: 'The passage it was made on is ' +
+            'still in the card as the reviewer was sent it. Nothing has ' +
+            'been written yet.' });
+        this.showDiff(review.stripReview(this.now),
+                      review.stripReview(this.after));
+        const row = contentEl.createDiv({ cls: 'dendrite-version-choices' });
+        const yes = row.createEl('button', { cls: 'mod-cta',
+                                             text: 'Apply' });
+        yes.onclick = async () => {
+            this.close();
+            await this.apply();
+        };
+        row.createEl('button', { text: 'Cancel' }).onclick = () =>
+            this.close();
+    }
+}
+
+/**
+ * The comments and changes read from a returned Word file, each with the
+ * card it was found in, to choose which to add. A row not found in any
+ * card can go on the selected card instead.
+ */
+class ReviewImportModal extends Modal {
+    constructor(view, name, rows) {
+        super(view.app);
+        this.view = view;
+        this.name = name;
+        this.rows = rows;
+    }
+
+    onOpen() {
+        const { contentEl, view, rows } = this;
+        this.modalEl.addClass('dendrite-wide');
+        this.titleEl.setText(`Review comments in ${this.name}`);
+        const found = rows.filter((x) => x.at).length;
+        contentEl.createEl('p', { text: `${rows.length} comment` +
+            `${rows.length === 1 ? '' : 's'} and suggested change` +
+            `${rows.length === 1 ? '' : 's'}; ${found} found in the cards. ` +
+            'Each goes after its passage in the card, which is set to ' +
+            'revise. A change still made on the text as it was sent can ' +
+            'be applied from its card later; one whose passage has ' +
+            'changed since comes in as a comment. Nothing is written ' +
+            'until you add them, and Ctrl+Z on the board undoes it.' });
+        const list = contentEl.createDiv({ cls: 'dendrite-review-rows' });
+        const active = view.active && view.byId.get(view.active);
+        const count = () => rows.filter((x) => x.use).length;
+        let go = null;
+        for (const row of rows) {
+            const it = row.item;
+            const el = list.createDiv({ cls: 'dendrite-review-row' +
+                (it.kind === 'change' ? ' is-suggest' : '') });
+            const box = el.createEl('input', { type: 'checkbox' });
+            box.checked = row.use;
+            box.disabled = !row.at && !active;
+            box.onchange = () => {
+                row.use = box.checked;
+                go.setText(`Add ${count()}`);
+            };
+            const main = el.createDiv({ cls: 'dendrite-review-main' });
+            const meta = main.createDiv({ cls: 'dendrite-review-meta' });
+            meta.createEl('b', { text: it.author || 'Reviewer' });
+            meta.appendText(` · ${review.shortDate(it.date)} · ` +
+                (it.kind === 'change' ? 'suggested change' : 'comment'));
+            if (it.quote) {
+                main.createDiv({ cls: 'dendrite-review-quote',
+                                 text: `“${it.quote}”` });
+            }
+            main.createDiv({ cls: 'dendrite-review-text',
+                text: it.kind === 'comment' ? it.text :
+                    !it.insert ? 'Delete this.' :
+                    it.quote ? `Replace with “${it.insert.trim()}”` :
+                    `Add “${it.insert.trim()}”` });
+            const where = main.createDiv({ cls: 'dendrite-review-where' });
+            if (row.at) {
+                const node = view.byId.get(row.at.id);
+                where.setText(`→ card ${core.shortId(row.at.id)}` +
+                    (node && node.label ? ` (${node.label})` : '') +
+                    (row.at.how === 'close' ? ', found by most of its ' +
+                        'words: check it' : ''));
+            } else {
+                where.addClass('is-missing');
+                where.setText(active ? 'Not found in the cards. Ticked, ' +
+                    `it goes at the end of the selected card, ` +
+                    `${core.shortId(active.id)}, with the passage quoted.` :
+                    'Not found in the cards. Select a card to put it ' +
+                    'there instead.');
+            }
+        }
+        const buttons = contentEl.createDiv(
+            { cls: 'dendrite-version-choices' });
+        go = buttons.createEl('button', { cls: 'mod-cta',
+                                          text: `Add ${count()}` });
+        go.onclick = async () => {
+            this.close();
+            await view.addReview(rows.filter((x) => x.use), active);
+        };
+        buttons.createEl('button', { text: 'Cancel' }).onclick = () =>
+            this.close();
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
 
 class CardModal extends Modal {
     constructor(view, id) {
@@ -5096,6 +5396,8 @@ module.exports = class DendritePlugin extends Plugin {
             'revise or finish splitting', false, (v) => v.nextFlagged(-1));
         viewCommand('next-draft', 'Go to the next draft card', false,
             (v) => v.nextFlagged(1, (i) => i.prints && i.own === 'draft'));
+        viewCommand('import-review', 'Import review comments from a ' +
+            'returned Word file', false, (v) => v.importReview());
         viewCommand('add-types', 'Add the type property to the index ' +
             'and every card', false, (v) => v.sweepTypes());
         viewCommand('merge-into-above', 'Merge card into the card above',

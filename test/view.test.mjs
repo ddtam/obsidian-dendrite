@@ -2133,3 +2133,62 @@ test('a card set to table prints numbered, a link to it prints its ' +
     await view.exportTo(null);
     assert.match(read('W/Grant/exports/Grant.md'), /See \[\[G-ttttt\]\]\./);
 });
+
+test('review comments go into their cards as one undo step, set them to ' +
+     'revise, and are resolved, dismissed or applied from the card',
+     async () => {
+    const A = 'The cohort is composed of longitudinally paired samples.';
+    const B = 'Samples were collected between 2014 and 2023 under the ' +
+        'protocol.';
+    const { view, read, text } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': A, 'G-bbbbb': B });
+    const rows = [
+        { kind: 'comment', author: 'Aly Karsan', date: '2026-10-23',
+          text: 'How many?', quote: 'longitudinally paired samples',
+          before: 'The cohort is composed of ', after: '.' },
+        { kind: 'change', author: 'Aly Karsan', date: '2026-10-23',
+          quote: 'between 2014 and 2023', insert: 'from 2014 to 2023',
+          before: 'Samples were collected ', after: ' under the' },
+        { kind: 'comment', author: 'R', date: '2026-10-24',
+          text: 'Not in any card.', quote: 'gone entirely from the text',
+          before: '', after: '' },
+    ].map((item) => ({ item, at: {}, use: true }));
+    rows[2].at = null;
+    view.active = 'G-bbbbb';
+    await view.addReview(rows, view.byId.get('G-bbbbb'));
+    assert.equal(text(cardPath('G-aaaaa')), 'The cohort is composed of ' +
+        '==longitudinally paired samples==%%[!review] Aly Karsan, ' +
+        '2026-10-23: How many?%%.');
+    assert.equal(text(cardPath('G-bbbbb')), 'Samples were collected ' +
+        '==between 2014 and 2023==%%[!suggest] Aly Karsan, 2026-10-23: ' +
+        'from 2014 to 2023%% under the protocol.%%[!review] R, ' +
+        '2026-10-24: On “gone entirely from the text”: Not in any card.%%',
+        'one never found goes on the selected card, quoted');
+    assert.match(read(cardPath('G-aaaaa')), /dendrite_status: revise/);
+    assert.match(read(cardPath('G-bbbbb')), /dendrite_status: revise/);
+    await view.doUndo();
+    assert.equal(text(cardPath('G-aaaaa')), A, 'one step undoes all');
+    assert.equal(text(cardPath('G-bbbbb')), B);
+    assert.ok(!/revise/.test(read(cardPath('G-aaaaa'))), 'status too');
+    await view.addReview(rows.slice(0, 2), null);
+    // Drawn on the card: callouts with their buttons.
+    view.invalidate('G-bbbbb');
+    await view.renderCard('G-bbbbb');
+    const card = view.cardEls.get('G-bbbbb');
+    assert.equal(card.querySelectorAll('.dendrite-review-note').length, 1);
+    await view.reviewAction('G-aaaaa', 0, 'resolve');
+    assert.equal(text(cardPath('G-aaaaa')), A, 'resolved: as it was');
+    await view.reviewAction('G-bbbbb', 0, 'apply');
+    const m = h.obsidian.lastModal;
+    assert.match(m.titleEl.textContent, /Apply the suggested change/);
+    assert.equal(text(cardPath('G-bbbbb')).includes('[!suggest]'), true,
+                 'nothing written until applied');
+    await [...m.contentEl.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Apply').onclick();
+    assert.equal(text(cardPath('G-bbbbb')), 'Samples were collected from ' +
+        '2014 to 2023 under the protocol.');
+    await view.doUndo();
+    assert.match(text(cardPath('G-bbbbb')), /==between 2014 and 2023==/,
+                 'applying is undone in one step');
+});

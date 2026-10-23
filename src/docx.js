@@ -4,6 +4,8 @@
 // all text black. A .docx is a zip of XML files; reading and writing one
 // takes only what Word and Pandoc write, through Node's zlib, passed in.
 
+const { Buffer } = require('buffer');
+
 const CRC_TABLE = (() => {
     const t = new Uint32Array(256);
     for (let n = 0; n < 256; n++) {

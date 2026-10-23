@@ -145,9 +145,14 @@ function deriveLabel(body, aliases) {
     return cleanLabel(words.length > LABEL_WORDS ? cut + '…' : cut);
 }
 
-/** Obsidian comments are planning beside the prose; export drops them. */
+/**
+ * Obsidian comments are planning beside the prose; export drops them. A
+ * review comment's highlight on its passage goes with it.
+ */
 function stripComments(text) {
-    return text.replace(/%%[\s\S]*?%%/g, '');
+    return text
+        .replace(/==([^=\n]+?)==(?=%%\[!(?:review|suggest)\])/g, '$1')
+        .replace(/%%[\s\S]*?%%/g, '');
 }
 
 function validPrefix(prefix) {
@@ -568,6 +573,22 @@ function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf,
         s.left = floatRefs(s.left, floats);
     }
     return segs;
+}
+
+/**
+ * A card's text with what export leaves out of it blanked, its length
+ * kept so offsets still point into the card: all of a card that prints
+ * its text, the heading line of a section, nothing of scaffolding or
+ * notes. `role` is roleFor's.
+ */
+function printedOnly(raw, role) {
+    const blank = (t) => t.replace(/[^\n]/g, ' ');
+    if (role === 'prose') return raw;
+    if (role !== 'section') return blank(raw);
+    const m = /^(\s*)([^\n]*)/.exec(raw);
+    if (!HEADING.exec(m[2].trim())) return blank(raw);
+    const end = m[0].length;
+    return raw.slice(0, end) + blank(raw.slice(end));
 }
 
 /**
@@ -1441,7 +1462,7 @@ module.exports = {
     normaliseMarkdown, renumberFootnotes, footnoteBlock,
     inlineToReferences, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
-    lineDiff, charDiff,
+    lineDiff, charDiff, printedOnly,
     deriveLabel, stripComments, validPrefix, newId, makeNode, makeRoot,
     insertSibling, appendChild, moveWithin, indent, outdent, remove,
     descendants, allNodes, columns, exportMarkdown, cleanLabel,

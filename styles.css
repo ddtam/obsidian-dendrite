@@ -1216,3 +1216,114 @@
 .dendrite-menu-key::after {
     content: attr(data-key);
 }
+
+/* Review comments from a returned Word file. A comment is in the accent
+   colour: its passage tinted, a number after it, and a callout under its
+   paragraph. A suggested change is in the revise flag's colour: the text
+   it would take out faded and struck through, its new text tinted. */
+.dendrite-board,
+.modal {
+    --dendrite-review: var(--interactive-accent);
+    --dendrite-suggest: var(--dendrite-revise, var(--color-orange));
+}
+.dendrite-md mark.dendrite-review-mark {
+    background: color-mix(in srgb, var(--dendrite-review) 22%,
+                          transparent);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+.dendrite-md .dendrite-review-old {
+    color: var(--text-faint);
+    text-decoration: line-through;
+}
+.dendrite-md .dendrite-review-new {
+    background: color-mix(in srgb, var(--dendrite-suggest) 22%,
+                          transparent);
+    border-radius: 2px;
+    padding: 0 1px;
+    margin-left: 3px;
+}
+.dendrite-md sup.dendrite-review-n {
+    font-size: 0.65em;
+    margin-left: 2px;
+    font-weight: 600;
+    color: var(--dendrite-review);
+}
+.dendrite-md sup.dendrite-review-n.is-suggest {
+    color: var(--dendrite-suggest);
+}
+.dendrite-review-notes {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: -4px 0 12px;
+}
+.dendrite-review-note,
+.dendrite-review-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    border-left: 2px solid var(--dendrite-review);
+    padding: 3px 4px 3px 10px;
+    font-size: var(--font-ui-small);
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+.dendrite-review-note.is-suggest,
+.dendrite-review-row.is-suggest {
+    border-left-color: var(--dendrite-suggest);
+}
+.dendrite-review-note > .dendrite-review-n {
+    color: var(--dendrite-review);
+    font-weight: 600;
+    font-size: var(--font-ui-smaller);
+}
+.dendrite-review-note.is-suggest > .dendrite-review-n {
+    color: var(--dendrite-suggest);
+}
+.dendrite-review-main {
+    flex: 1;
+    min-width: 0;
+}
+.dendrite-review-meta {
+    color: var(--text-faint);
+    font-size: var(--font-ui-smaller);
+}
+.dendrite-review-meta b {
+    color: var(--text-muted);
+    font-weight: 600;
+}
+.dendrite-review-text {
+    color: var(--text-normal);
+}
+.dendrite-review-quote {
+    color: var(--text-muted);
+    font-style: italic;
+}
+.dendrite-review-where {
+    color: var(--text-faint);
+    font-size: var(--font-ui-smaller);
+}
+.dendrite-review-where.is-missing {
+    color: var(--text-error);
+}
+button.dendrite-review-btn {
+    font-size: var(--font-ui-smaller);
+    padding: 0 6px;
+    height: auto;
+    background: none;
+    box-shadow: none;
+    color: var(--text-faint);
+}
+button.dendrite-review-btn:hover {
+    color: var(--text-normal);
+}
+.dendrite-review-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 60vh;
+    overflow-y: auto;
+    margin-bottom: 12px;
+}

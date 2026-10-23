@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node esbuild.config.mjs",
     "dev": "node esbuild.config.mjs --watch",
-    "test": "node --test test/core.test.mjs test/view.test.mjs test/pandoc.test.mjs test/cli.test.mjs test/sync.test.mjs",
+    "test": "node --test test/core.test.mjs test/view.test.mjs test/pandoc.test.mjs test/cli.test.mjs test/sync.test.mjs test/review.test.mjs",
     "brat:release": "node scripts/brat-release.mjs"
   },
   "license": "MIT",
