@@ -363,6 +363,9 @@ class DendriteView extends ItemView {
         this.renameTimer = null;
         this.copiesTimer = null;
         this.inbox = [];
+        // Cards picked together, by Ctrl- or Shift-click, to act on at
+        // once; the active card is one of them while any are.
+        this.picked = new Set();
         // The card whose old versions are fanned out to its right.
         this.fannedId = null;
         this.fanEl = null;
@@ -780,6 +783,9 @@ class DendriteView extends ItemView {
             }, { passive: true });
         }
         this.renderOrphans(stage);
+        // A pane resized moves the columns, which the flow follows in the
+        // same frame, as it does a scroll.
+        if (this.resizer) this.resizer.observe(board);
         board.toggleClass('is-print-only', this.printOnly);
         this.shown = this.shownTree();
         if (this.shown && this.active && !this.shown.parent.has(this.active)) {
@@ -1057,6 +1063,7 @@ class DendriteView extends ItemView {
         for (const [id, el] of this.cardEls) {
             el.toggleClass('is-active', id === this.active);
             el.toggleClass('is-lineage', lineage.has(id));
+            el.toggleClass('is-picked', this.picked.has(id));
         }
         this.renderToolbar();
         this.scheduleFlow();
@@ -1532,6 +1539,10 @@ class DendriteView extends ItemView {
     }
 
     cardMenu(anchor, event) {
+        if (this.picked.size > 1 && this.picked.has(this.active)) {
+            this.pickedMenu(anchor, event);
+            return;
+        }
         const m = dendriteMenu();
         const id = this.active;
         const node = this.byId.get(id);
@@ -1710,8 +1721,236 @@ class DendriteView extends ItemView {
             return;
         }
         const card = e.target.closest('.dendrite-card');
-        if (card) this.select(card.dataset.id);
+        if (card) {
+            const id = card.dataset.id;
+            if (e.ctrlKey || e.metaKey) this.pickToggle(id);
+            else if (e.shiftKey) this.pickRun(id);
+            else {
+                this.clearPicked();
+                this.select(id);
+            }
+        }
         this.contentEl.focus();
+    }
+
+    // ---- picking several cards --------------------------------------
+
+    /** Pick a card, or let it go, with the active card picked as well. */
+    pickToggle(id) {
+        if (!this.picked.size && this.active && this.active !== id) {
+            this.picked.add(this.active);
+        }
+        if (this.picked.has(id)) this.picked.delete(id);
+        else this.picked.add(id);
+        this.showPicked();
+    }
+
+    /**
+     * Pick the run of cards from the active one to `id`, both included:
+     * cards side by side under one parent, as the board shows them.
+     */
+    pickRun(id) {
+        const from = this.active && this.byId.get(this.active);
+        const to = this.byId.get(id);
+        if (!from || !to) return;
+        if (from.parent !== to.parent) {
+            new Notice('Dendrite: a run is of cards side by side under ' +
+                       'one parent.');
+            return;
+        }
+        const sibs = this.kidsOf(from.parent);
+        const a = sibs.indexOf(from);
+        const b = sibs.indexOf(to);
+        if (a < 0 || b < 0) return;
+        this.picked = new Set(sibs.slice(Math.min(a, b), Math.max(a, b) + 1)
+            .map((n) => n.id));
+        this.showPicked();
+    }
+
+    clearPicked() {
+        if (!this.picked.size) return;
+        this.picked.clear();
+        this.showPicked();
+    }
+
+    showPicked() {
+        for (const [id, el] of this.cardEls) {
+            el.toggleClass('is-picked', this.picked.has(id));
+        }
+    }
+
+    /** The picked cards, in reading order. */
+    pickedInOrder() {
+        return core.allNodes(this.root).filter((n) => this.picked.has(n.id));
+    }
+
+    /**
+     * Put the picked cards under a new card in the first one's place,
+     * in order: `kind` 'section', a card with a heading to write, which
+     * numbers them below it; or 'scaffolding', which only groups them,
+     * so they print and number as before. Only cards side by side under
+     * one parent are grouped. One step to undo.
+     */
+    async groupPicked(kind) {
+        const nodes = this.pickedInOrder();
+        if (!nodes.length) return;
+        const parent = nodes[0].parent;
+        if (!nodes.every((n) => n.parent === parent)) {
+            new Notice('Dendrite: only cards side by side under one parent ' +
+                       'are grouped.');
+            return;
+        }
+        if (this.refuseWhileArriving() || this.refuseInPrintView()) return;
+        const prefix = this.prefix();
+        if (!prefix || !core.validPrefix(prefix)) {
+            new Notice('Dendrite: set a valid dendrite_prefix first.');
+            return;
+        }
+        if (this.editing) await this.endEdit();
+        const body = kind === 'section' ? '# ' : '';
+        const id = core.newId(prefix, (x) => this.taken(x));
+        const made = await this.createCardFile(id, body);
+        if (kind === 'scaffolding') {
+            await writeProps(this.app, made, { dendrite_role: 'scaffolding' });
+        }
+        this.snapshot([], [{ path: made.path, body }]);
+        const fresh = core.makeNode(id, '', null);
+        core.insertSibling(nodes[0], fresh, false);
+        for (const n of nodes) {
+            core.remove(n);
+            core.appendChild(fresh, n);
+        }
+        this.reindex();
+        this.active = id;
+        this.picked.clear();
+        if (!await this.writeIndex()) {
+            this.undo.pop();
+            await this.app.fileManager.trashFile(made);
+            return;
+        }
+        await this.sweepStatuses();
+        this.render();
+        if (kind === 'section') await this.startEdit(id);
+    }
+
+    /**
+     * Set a role or a status on every picked card, a status only where
+     * the card prints its text; one step to undo.
+     */
+    async setPicked(what, value) {
+        const roleOf = (x) => this.printRoleOf(x);
+        const key = what === 'role' ? 'dendrite_role' : 'dendrite_status';
+        const restores = [];
+        for (const n of this.pickedInOrder()) {
+            const f = this.cardFile(n.id);
+            if (!f) continue;
+            if (what === 'status' && core.roleFor(n, roleOf) !== 'prose') {
+                continue;
+            }
+            const cur = what === 'role' ? this.roleOf(n.id) :
+                this.statusOf(n.id);
+            if ((cur || null) === (value || null)) continue;
+            const data = await this.app.vault.read(f);
+            restores.push({ path: f.path, text: data,
+                            ifBody: core.splitFrontmatter(data).body });
+            await writeProps(this.app, f, { [key]: value || null });
+        }
+        if (what === 'role') await this.sweepStatuses();
+        if (restores.length) {
+            this.pushUndo({ active: this.active, files: [], created: [],
+                            restores, text: false });
+        }
+        const n = restores.length;
+        new Notice(`Dendrite: ${n} picked card${n === 1 ? '' : 's'} set ` +
+                   `to ${what === 'role' ?
+                       BRANCH_ROLE_NAMES[value || ''] : value}.`);
+    }
+
+    /** Delete every picked card and the cards below it; one undo. */
+    async deletePicked() {
+        const tops = this.pickedInOrder().filter((n) => {
+            for (let p = n.parent; p && p.id; p = p.parent) {
+                if (this.picked.has(p.id)) return false;
+            }
+            return true;
+        });
+        if (!tops.length || this.refuseWhileArriving() ||
+            this.refuseInPrintView()) return;
+        if (this.editing) await this.endEdit();
+        const doomed = tops.flatMap((n) => [n, ...core.descendants(n)]);
+        const files = [];
+        for (const n of doomed) {
+            const f = this.cardFile(n.id);
+            if (f) files.push({ path: f.path,
+                                data: await this.app.vault.read(f) });
+        }
+        this.snapshot(files);
+        const gone = new Set(doomed.map((n) => n.id));
+        const after = core.allNodes(this.root).find((n) =>
+            !gone.has(n.id) && core.allNodes(this.root).indexOf(n) >
+            core.allNodes(this.root).indexOf(tops[0]));
+        for (const n of tops) core.remove(n);
+        this.reindex();
+        this.picked.clear();
+        this.active = after ? after.id : (this.root.children[0] || {}).id ||
+            null;
+        if (!await this.writeIndex()) {
+            this.undo.pop();
+            return;
+        }
+        for (const n of doomed) {
+            const f = this.cardFile(n.id);
+            this.invalidate(n.id);
+            if (f) await this.app.fileManager.trashFile(f);
+        }
+        await this.sweepStatuses();
+        this.render();
+        new Notice(`Dendrite: deleted ${doomed.length} card(s). Ctrl+Z ` +
+                   'in the view restores them.');
+    }
+
+    /** The menu for the picked cards, from any of them. */
+    pickedMenu(anchor, event) {
+        const m = dendriteMenu();
+        const n = this.picked.size;
+        m.addItem((i) => {
+            i.setTitle(`${n} cards picked`);
+            if (typeof i.setIsLabel === 'function') i.setIsLabel(true);
+            else if (typeof i.setDisabled === 'function') i.setDisabled(true);
+        });
+        m.addSeparator();
+        for (const [value, title, icon] of STATUS_ITEMS) {
+            m.addItem((i) => i.setTitle(title).setIcon(icon)
+                .onClick(() => this.setPicked('status', value)));
+        }
+        m.addSeparator();
+        let sub = null;
+        m.addItem((i) => {
+            i.setTitle('Prints as');
+            if (typeof i.setSubmenu === 'function') sub = i.setSubmenu();
+        });
+        if (sub) styleMenu(sub, true);
+        for (const [value, title, icon] of
+            [[null, 'Prints automatically', 'wand'], ...ROLE_ITEMS]) {
+            (sub || m).addItem((i) => i.setTitle(sub ? title :
+                `Prints as: ${title}`).setIcon(icon)
+                .onClick(() => this.setPicked('role', value)));
+        }
+        m.addItem((i) => i.setTitle(this.menuLabel('Group into a new card…',
+                                                   'Ctrl+G'))
+            .setIcon('folder-plus')
+            .onClick(() => new GroupModal(this).open()));
+        m.addSeparator();
+        m.addItem((i) => i.setTitle(`Delete ${n} cards and their children`)
+            .setIcon('trash-2').onClick(() => this.deletePicked()));
+        if (event) {
+            m.showAtMouseEvent(event);
+            return;
+        }
+        if (anchor) {
+            const r = anchor.getBoundingClientRect();
+            m.showAtPosition({ x: r.left, y: r.bottom }, this.pageDoc());
+        }
     }
 
     /**
@@ -1719,6 +1958,8 @@ class DendriteView extends ItemView {
      * scrolling, so a menu opened on it stays beside it.
      */
     async select(id, move = true) {
+        // Going to a card not picked lets the picked ones go.
+        if (id && !this.picked.has(id)) this.clearPicked();
         if (!id || id === this.active) return;
         if (this.editing) await this.endEdit();
         const node = this.byId.get(id);
@@ -1793,6 +2034,10 @@ class DendriteView extends ItemView {
             // Leaving a card comes first; with no card open, find closes.
             if (this.editing) {
                 this.endEdit();
+                return false;
+            }
+            if (this.picked.size) {
+                this.clearPicked();
                 return false;
             }
             if (this.fannedId) {
@@ -2199,8 +2444,15 @@ class DendriteView extends ItemView {
         // and otherwise goes no further, as in the scope.
         if (e.key === 'Escape') {
             e.preventDefault();
-            if (this.fannedId) this.toggleFan(this.fannedId);
+            if (this.picked.size) this.clearPicked();
+            else if (this.fannedId) this.toggleFan(this.fannedId);
             else if (this.find) this.closeFind();
+            return;
+        }
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey &&
+            e.key.toLowerCase() === 'g' && this.picked.size) {
+            e.preventDefault();
+            new GroupModal(this).open();
             return;
         }
         // The number row by its physical key, since what a digit key types
@@ -2835,6 +3087,46 @@ class DendriteView extends ItemView {
         }
     }
 
+    /**
+     * Open review comments and suggested changes on a card's old
+     * versions, shown on the card: its versions chip says how many, in
+     * the revise colour, and its stack's edges take that colour, so they
+     * are not left unresolved under it. Read after the board is drawn.
+     */
+    async markOpenStacks() {
+        const counts = new Map();
+        for (const [id, card] of this.cardEls) {
+            const stack = this.stackOf(id);
+            if (!stack.length) {
+                card.removeClass('has-stack-open');
+                continue;
+            }
+            let open = 0;
+            for (const v of stack) {
+                const f = this.cardFile(v.id);
+                if (!f) continue;
+                open += review.reviewItems(core.splitFrontmatter(
+                    await this.app.vault.cachedRead(f)).body).length;
+            }
+            counts.set(id, open);
+        }
+        this.stackOpen = counts;
+        for (const [id, open] of counts) {
+            const card = this.cardEls.get(id);
+            if (!card) continue;
+            card.toggleClass('has-stack-open', open > 0);
+            const s = card.querySelector(`[data-stack="${id}"]`);
+            if (!s) continue;
+            const n = this.stackOf(id).length + 1;
+            s.setText(`${n} versions` + (open ? ` · ${open} open` : ''));
+            s.toggleClass('is-revise', open > 0);
+            const colour = open && this.plugin.statusColour &&
+                this.plugin.statusColour('revise');
+            if (colour) s.style.setProperty('--dendrite-chip', colour);
+            else s.style.removeProperty('--dendrite-chip');
+        }
+    }
+
     /** An old version taken out of a stack, its note to the trash. */
     async deleteVersion(id) {
         const node = this.byId.get(id);
@@ -2957,6 +3249,7 @@ class DendriteView extends ItemView {
         this.fanComps.push(comp);
         const out = body.createDiv({ cls: 'dendrite-md markdown-rendered' });
         const notes = review.reviewItems(text);
+        el.toggleClass('has-open', notes.length > 0);
         if (!text.trim()) {
             out.createDiv({ cls: 'dendrite-placeholder',
                             text: 'Empty card' });
@@ -4382,8 +4675,11 @@ class DendriteView extends ItemView {
             // Old versions show as card edges behind this one's top.
             card.toggleClass('has-stack', stack > 0);
             card.toggleClass('has-stacks', stack > 1);
+            // Fanned out, its old versions are beside it, not behind it.
+            card.toggleClass('is-fanned', stack > 0 && this.fannedId === id);
             if (stack) {
                 const s = show('stack', `${stack + 1} versions`);
+                s.dataset.stack = id;
                 s.toggleClass('is-on', this.fannedId === id);
                 s.setAttr('aria-label', this.fannedId === id ?
                           'Click to fold the old versions away' :
@@ -4398,6 +4694,7 @@ class DendriteView extends ItemView {
             if (!chip.childElementCount) continue;
             card.appendChild(chip);
         }
+        this.stackOpenReady = this.markOpenStacks();
         if (this.statusEl) {
             const t = report.tally;
             const parts = [];
@@ -5432,7 +5729,6 @@ class DendritePreview extends ItemView {
     async onClose() {
         if (this.observer) this.observer.disconnect();
         if (this.resizer) this.resizer.disconnect();
-        clearTimeout(this.fitTimer);
         for (const b of this.blocks.values()) {
             if (b.comp) b.comp.unload();
         }
@@ -5500,8 +5796,12 @@ class DendritePreview extends ItemView {
         if (this.resizer) this.resizer.disconnect();
         if (typeof ResizeObserver !== 'undefined') {
             this.resizer = new ResizeObserver(() => {
-                clearTimeout(this.fitTimer);
-                this.fitTimer = setTimeout(() => this.fitComments(), 100);
+                if (this.fitFrame) return;
+                const win = this.doc.ownerDocument.defaultView;
+                this.fitFrame = win.requestAnimationFrame(() => {
+                    this.fitFrame = null;
+                    this.fitComments();
+                });
             });
             this.resizer.observe(this.doc);
         }
@@ -5621,6 +5921,17 @@ class DendritePreview extends ItemView {
         }
         if (this.reviewAt >= list.length) this.reviewAt = list.length - 1;
         this.doc.toggleClass('has-comments', this.showComments);
+        if (!this.showComments && this.gutterEl) {
+            this.gutterEl.remove();
+            this.gutterEl = null;
+        } else if (this.gutterEl) {
+            const keep = new Set(list.map((x) => `${x.id}\u0000${x.n}`));
+            for (const el of [...this.gutterEl.children]) {
+                if (!keep.has(`${el.dataset.id}\u0000${el.dataset.n}`)) {
+                    el.remove();
+                }
+            }
+        }
         this.fitComments();
         this.navEl.toggleClass('is-hidden', !this.showComments);
         this.showPos();
@@ -5639,10 +5950,16 @@ class DendritePreview extends ItemView {
         if (!cur) return;
         const b = this.blocks.get(cur.id);
         if (!b) return;
-        const bubble = b.el.querySelector(
-            `.dendrite-pbubble[data-n="${cur.n}"]`);
+        const bubble = this.bubbleOf(cur.id, cur.n);
         if (bubble) bubble.addClass('is-current');
         for (const el of this.passageOf(b.el, cur.n)) el.addClass('is-current');
+        this.scheduleBubbles();
+    }
+
+    bubbleOf(id, n) {
+        return this.gutterEl ? [...this.gutterEl.children].find((el) =>
+            el.dataset.id === id && Number(el.dataset.n) === n) || null :
+            null;
     }
 
     /**
@@ -5680,41 +5997,49 @@ class DendritePreview extends ItemView {
         const b = this.blocks.get(cur.id);
         if (b && b.el.hasClass('is-pending')) await this.renderBlock(cur.id);
         this.showPos();
-        const bubble = b && b.el.querySelector(
-            `.dendrite-pbubble[data-n="${cur.n}"]`);
-        if (bubble && bubble.scrollIntoView) {
-            bubble.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        // The passage brought to the middle; its bubble is placed level
+        // with it.
+        const at = b && this.passageOf(b.el, cur.n)[0];
+        if (at && at.scrollIntoView) {
+            at.scrollIntoView({ block: 'center', behavior: 'smooth' });
         }
         if (this.file) this.plugin.focusCard(this.file, cur.id, false);
     }
 
     /**
-     * A card's review comments as bubbles in the margin, each level with
-     * its number in the text where it can be measured, and pushed down
-     * below the one before it.
+     * The gutter right of the text that holds every card's comments, one
+     * for the document, so the text keeps its own spacing.
      */
-    drawBubbles(id, b) {
+    gutter() {
+        if (!this.gutterEl || this.gutterEl.parentElement !== this.doc) {
+            this.gutterEl = this.doc.createDiv({ cls: 'dendrite-pgutter' });
+        }
+        return this.gutterEl;
+    }
+
+    /** A card's review comments as bubbles in the gutter. */
+    drawBubbles(id) {
+        const gutter = this.gutter();
+        for (const el of [...gutter.querySelectorAll('.dendrite-pbubble')]) {
+            if (el.dataset.id === id) el.remove();
+        }
         const body = (this.bodies.get(id) || {}).body || '';
         const items = review.reviewItems(body);
-        const mine = this.reviewList.filter((x) => x.id === id);
-        if (!mine.length) return;
-        b.el.addClass('has-bubbles');
-        const box = b.el.createDiv({ cls: 'dendrite-pbubbles' });
-        for (const { n } of mine) {
+        const blockEl = () => (this.blocks.get(id) || {}).el;
+        const mark = (n, on) => {
+            const b = blockEl();
+            if (!b) return;
+            for (const p of this.passageOf(b, n)) p.toggleClass('is-hover', on);
+        };
+        for (const { n } of this.reviewList.filter((x) => x.id === id)) {
             const it = items[n];
-            const el = box.createDiv({ cls: 'dendrite-pbubble' +
+            const el = gutter.createDiv({ cls: 'dendrite-pbubble' +
                 (it.kind === 'suggest' ? ' is-suggest' : '') });
             el.dataset.id = id;
             el.dataset.n = String(n);
             // Pointing at a bubble shows its passage in the text.
-            el.addEventListener('mouseenter', () => {
-                for (const p of this.passageOf(b.el, n)) p.addClass('is-hover');
-            });
-            el.addEventListener('mouseleave', () => {
-                for (const p of this.passageOf(b.el, n)) {
-                    p.removeClass('is-hover');
-                }
-            });
+            el.addEventListener('mouseenter', () => mark(n, true));
+            el.addEventListener('mouseleave', () => mark(n, false));
             const meta = el.createDiv({ cls: 'dendrite-review-meta' });
             meta.createEl('b', { text: it.author || 'Reviewer' });
             meta.appendText(` · ${review.shortDate(it.date)}`);
@@ -5745,68 +6070,78 @@ class DendritePreview extends ItemView {
                 };
             }
         }
-        this.layoutBubbles(b);
+        // In reading order, as they are gone through.
+        const order = new Map(this.reviewList.map((x, k) =>
+            [`${x.id}\u0000${x.n}`, k]));
+        const key = (el) =>
+            order.get(`${el.dataset.id}\u0000${el.dataset.n}`) ?? 1e9;
+        for (const el of [...gutter.children]
+            .sort((a, b) => key(a) - key(b))) {
+            gutter.appendChild(el);
+        }
+        this.fadeBubbles();
+        this.scheduleBubbles();
         this.showPos();
     }
 
-    /**
-     * Place a card's bubbles, each level with its number in the text and
-     * below the one before, and keep the card's part tall enough for
-     * them, so they do not run into the next card's. Done again when the
-     * preview changes width, since the text reflows.
-     */
-    layoutBubbles(b) {
-        const bubbles = [...b.el.querySelectorAll('.dendrite-pbubble')];
-        if (!bubbles.length) return;
-        b.el.style.minHeight = '';
-        const nums = [...b.el.querySelectorAll('sup.dendrite-review-n')];
-        let below = 0;
-        for (const el of bubbles) {
-            const n = Number(el.dataset.n);
-            const sup = nums.find((x) => x.textContent === String(n + 1));
-            const top = Math.max(sup ? sup.offsetTop : 0, below);
-            el.style.top = `${top}px`;
-            below = top + el.offsetHeight + 6;
-        }
-        if (below > b.el.offsetHeight) b.el.style.minHeight = `${below}px`;
+    scheduleBubbles() {
+        if (this.bubbleFrame || !this.doc) return;
+        const win = this.doc.ownerDocument.defaultView;
+        this.bubbleFrame = win.requestAnimationFrame(() => {
+            this.bubbleFrame = null;
+            this.layoutBubbles();
+        });
     }
 
     /**
-     * Room for the comments in the gutter right of the text: the preview
-     * spans the pane, the text keeps its readable width, centred while
-     * the gutter holds the comments, moved left as far as it must, and
-     * narrowed only when even that is short. The comments take up to 300
-     * pixels, less in a narrow pane. Every card's bubbles are then laid
-     * out again for the text as it now runs.
+     * Place the bubbles: each as near its passage's number as it can be,
+     * none overlapping, the one gone to level with its own, those
+     * before it moved up for it (core.stackNotes).
+     */
+    layoutBubbles() {
+        const gutter = this.gutterEl;
+        if (!gutter || !this.doc) return;
+        const bubbles = [...gutter.querySelectorAll('.dendrite-pbubble')];
+        const base = this.doc.getBoundingClientRect().top -
+            this.doc.scrollTop;
+        const anchors = bubbles.map((el) => {
+            const b = this.blocks.get(el.dataset.id);
+            const sup = b && this.passageOf(b.el, Number(el.dataset.n))
+                .slice(-1)[0];
+            const at = sup || (b && b.el);
+            return at ? at.getBoundingClientRect().top - base : 0;
+        });
+        const cur = this.reviewList[this.reviewAt];
+        const current = cur ? bubbles.findIndex((el) =>
+            el.dataset.id === cur.id && Number(el.dataset.n) === cur.n) : -1;
+        const tops = core.stackNotes(anchors,
+            bubbles.map((el) => el.offsetHeight), current, 8);
+        bubbles.forEach((el, k) => { el.style.top = `${tops[k]}px`; });
+    }
+
+    /**
+     * A card selected: the other cards' comments fade, when it has
+     * comments of its own to set apart.
+     */
+    fadeBubbles() {
+        const gutter = this.gutterEl;
+        if (!gutter) return;
+        const bubbles = [...gutter.querySelectorAll('.dendrite-pbubble')];
+        const mine = bubbles.some((el) => el.dataset.id === this.active);
+        for (const el of bubbles) {
+            el.toggleClass('is-faded', mine && el.dataset.id !== this.active);
+        }
+    }
+
+    /**
+     * Lay the bubbles out again for the text as it now runs. The widths
+     * themselves, the text's and the gutter's, are the stylesheet's,
+     * worked out from the pane's width as it changes, so a pane being
+     * resized moves them smoothly.
      */
     fitComments() {
-        const doc = this.doc;
-        if (!doc) return;
-        if (!this.showComments) {
-            for (const k of ['maxWidth', 'paddingLeft', 'paddingRight']) {
-                doc.style[k] = '';
-            }
-            doc.style.removeProperty('--dendrite-comment-margin');
-            return;
-        }
-        const pane = doc.parentElement;
-        const w = (pane && pane.clientWidth) || doc.clientWidth || 0;
-        if (!w) return;
-        const win = doc.ownerDocument.defaultView;
-        const line = parseFloat(win.getComputedStyle(doc)
-            .getPropertyValue('--file-line-width')) || 700;
-        const pad = 28;
-        const margin = Math.round(Math.min(300, Math.max(170, w * 0.36)));
-        const text = Math.max(200, Math.min(line, w - pad - margin));
-        const left = Math.max(pad, Math.min((w - text) / 2,
-                                            w - text - margin));
-        doc.style.maxWidth = 'none';
-        doc.style.paddingLeft = `${Math.round(left)}px`;
-        doc.style.paddingRight = `${Math.round(w - left - text)}px`;
-        doc.style.setProperty('--dendrite-comment-margin', `${margin}px`);
-        for (const b of this.blocks.values()) {
-            if (b.el.hasClass('has-bubbles')) this.layoutBubbles(b);
-        }
+        if (!this.doc || !this.showComments) return;
+        this.layoutBubbles();
     }
 
     renderSegments(segs) {
@@ -5816,6 +6151,11 @@ class DendritePreview extends ItemView {
                 if (b.comp) b.comp.unload();
                 b.el.remove();
                 this.blocks.delete(id);
+                if (this.gutterEl) {
+                    for (const el of [...this.gutterEl.children]) {
+                        if (el.dataset.id === id) el.remove();
+                    }
+                }
             }
         }
         for (const s of segs) {
@@ -5902,7 +6242,8 @@ class DendritePreview extends ItemView {
             await MarkdownRenderer.render(this.app, s.left,
                 b.el.createDiv({ cls: 'dendrite-left-out' }), path, b.comp);
         }
-        if (this.showComments && s.text) this.drawBubbles(id, b);
+        if (this.showComments && s.text) this.drawBubbles(id);
+        else this.scheduleBubbles();
     }
 
     /**
@@ -5935,6 +6276,7 @@ class DendritePreview extends ItemView {
         for (const [bid, b] of this.blocks) {
             b.el.toggleClass('is-active', bid === id);
         }
+        this.fadeBubbles();
         const b = this.blocks.get(id);
         if (b && b.el.scrollIntoView) {
             // One taller than most of the preview shows from its start.
@@ -6101,7 +6443,7 @@ class ManuscriptModal extends Modal {
         const st = ms.style;
         const draft = {};
         this.modalEl.addClass('dendrite-ms-modal');
-        this.titleEl.setText(`${view.file.basename}: settings`);
+        this.titleEl.setText(`${view.file.basename}: Settings`);
         const body = contentEl.createDiv({ cls: 'dendrite-ms-body' });
         const tabs = body.createDiv({ cls: 'dendrite-ms-tabs' });
         const panes = body.createDiv({ cls: 'dendrite-ms-panes' });
@@ -6786,6 +7128,47 @@ class ReviewImportModal extends Modal {
         }
         buttons.createEl('button', { text: 'Cancel' }).onclick = () =>
             this.close();
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+
+/**
+ * What a group of picked cards becomes: a section, with a heading that
+ * numbers them below it, or scaffolding, which only gathers them, so
+ * they print and number as they did.
+ */
+class GroupModal extends Modal {
+    constructor(view) {
+        super(view.app);
+        this.view = view;
+    }
+
+    onOpen() {
+        const { contentEl, view } = this;
+        const n = view.picked.size;
+        this.titleEl.setText(`Group ${n} cards under a new card`);
+        const choices = [
+            ['section', 'Section with a heading',
+             'A new section: you write its heading, and the cards become ' +
+             'its subsections, numbered and printed a level down.'],
+            ['scaffolding', 'Scaffolding',
+             'Only gathers them on the board: they print, and are ' +
+             'numbered, as they are now.']];
+        for (const [, label, desc] of choices) {
+            const p = contentEl.createEl('p');
+            p.createEl('b', { text: label });
+            p.appendText(`: ${desc}`);
+        }
+        const row = contentEl.createDiv({ cls: 'dendrite-version-choices' });
+        for (const [kind, label] of choices) {
+            const b = row.createEl('button', { text: label });
+            if (kind === 'section') b.addClass('mod-cta');
+            b.onclick = async () => {
+                this.close();
+                await view.groupPicked(kind);
+            };
+        }
     }
 
     onClose() { this.contentEl.empty(); }

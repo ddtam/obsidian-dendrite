@@ -42,10 +42,15 @@
     color: var(--text-muted);
 }
 
-/* A bar button that toggles a view, while on. */
+/* A bar button that toggles a view, while on: plain text on a faint
+   ground, not the accent, which would draw the eye to the bar. In a
+   switch, the view not shown is faded. */
 .dendrite-bar-btn.is-on {
-    color: var(--text-accent);
-    background: var(--background-modifier-active-hover);
+    color: var(--text-normal);
+    background: var(--background-modifier-hover);
+}
+.dendrite-seg .dendrite-seg-btn:not(.is-on) {
+    color: var(--text-faint);
 }
 
 /* Space between the bar's groups of buttons. */
@@ -1418,14 +1423,17 @@ button.dendrite-review-btn:hover {
     min-height: 0;
 }
 .dendrite-version {
-    /* A card's look: its padding, the room at its top where a card has
-       its status and role, and its body's type. */
+    /* A card's shape: its padding, the room at its top where a card has
+       its status and role, and its body's type; but muted, an old
+       version for reference, which should not stand out over the card
+       it was replaced by. */
     position: relative;
     flex: 0 0 auto;
-    background: var(--background-primary);
+    background: var(--background-secondary);
     border: 1px dashed var(--background-modifier-border);
     border-radius: var(--radius-m);
     padding: 36px 14px 10px;
+    color: var(--text-muted);
 }
 .dendrite-version-head {
     position: absolute;
@@ -1436,7 +1444,7 @@ button.dendrite-review-btn:hover {
     font-size: 0.85em;
 }
 .dendrite-version > .dendrite-card-body {
-    opacity: 0.8;
+    opacity: 0.75;
 }
 .dendrite-status-chip.is-stack.is-on {
     color: var(--text-accent);
@@ -1587,19 +1595,48 @@ button.dendrite-review-btn:hover {
 /* Review comments in the preview: the text keeps its width, and the
    comments sit in a margin to its right, each level with its number,
    as Word and Google Docs show them. */
-/* Spaced by the view, which keeps the text's readable width and puts
-   the comments in the gutter to its right. */
-.dendrite-preview-doc.has-comments {
-    max-width: none;
+/* With comments shown, the text keeps its readable width, centred while
+   the gutter to its right holds the comments, moved left as far as it
+   must, and narrowed only when even that is short. Worked out from the
+   pane's width (cqw), so it follows a pane being resized. The comments
+   take up to 300 pixels, less in a narrow pane. */
+.dendrite-preview {
+    container-type: inline-size;
 }
-.dendrite-pblock.has-bubbles {
+.dendrite-preview-doc.has-comments {
+    --dendrite-line: var(--file-line-width, 700px);
+    --dendrite-comment-margin: clamp(170px, 36cqw, 300px);
+    --dendrite-text: max(200px, min(var(--dendrite-line),
+        calc(100cqw - 28px - var(--dendrite-comment-margin))));
+    --dendrite-text-left: max(28px, min(
+        calc((100cqw - var(--dendrite-text)) / 2),
+        calc(100cqw - var(--dendrite-text) -
+             var(--dendrite-comment-margin))));
+    max-width: none;
+    box-sizing: border-box;
+    padding-left: var(--dendrite-text-left);
+    padding-right: calc(100cqw - var(--dendrite-text-left) -
+                        var(--dendrite-text));
+}
+/* One gutter for the document's comments, beside the text, scrolling
+   with it; each bubble placed in it by the view. */
+.dendrite-preview-doc.has-comments {
     position: relative;
 }
-.dendrite-pbubbles {
+.dendrite-pgutter {
     position: absolute;
     top: 0;
-    left: calc(100% + 18px);
-    width: calc(var(--dendrite-comment-margin, 300px) - 30px);
+    left: calc(var(--dendrite-text-left) + var(--dendrite-text) + 18px);
+    width: calc(var(--dendrite-comment-margin) - 30px);
+}
+.dendrite-pbubble {
+    transition: top 160ms ease, opacity 120ms ease;
+}
+.dendrite-pbubble.is-faded {
+    opacity: 0.4;
+}
+.dendrite-pbubble.is-faded:hover {
+    opacity: 1;
 }
 .dendrite-pbubble {
     position: absolute;
@@ -1702,4 +1739,36 @@ button.dendrite-review-btn:hover {
 .dendrite-preview-doc sup.dendrite-review-n.is-current,
 .dendrite-preview-doc sup.dendrite-review-n.is-hover {
     font-weight: var(--font-bold);
+}
+
+/* Cards picked together: outlined, and full strength while picked. */
+.dendrite-card.is-picked {
+    opacity: 1;
+    outline: 2px solid var(--interactive-accent);
+    outline-offset: 2px;
+}
+
+/* The manuscript settings' title set apart from its tabs. */
+.dendrite-ms-modal .modal-title {
+    margin-bottom: var(--size-4-4, 16px);
+}
+
+/* Open comments on a card's old versions: its stack's edges, and each
+   such version in the fan, take the revise colour, so they are not left
+   unresolved under the card. */
+.dendrite-card.has-stack-open::before,
+.dendrite-card.has-stack-open::after {
+    border-color: var(--dendrite-revise, var(--color-orange));
+}
+.dendrite-version.has-open {
+    border-left: 3px solid var(--dendrite-revise, var(--color-orange));
+}
+
+/* Fanned out, a card's old versions are beside it: none drawn behind. */
+.dendrite-card.has-stack.is-fanned {
+    margin-top: 0;
+}
+.dendrite-card.has-stack.is-fanned::before,
+.dendrite-card.has-stack.is-fanned::after {
+    display: none;
 }

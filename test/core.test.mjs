@@ -850,3 +850,24 @@ test('table rows count toward pages, not words; a figure is a third of ' +
     assert.equal(c.measure(n, 'pages', 500), n.words / 500 + n.pages);
     assert.equal(c.measure(n, 'words', 500), n.words);
 });
+
+test('comment bubbles sit as near their marks as they can without ' +
+     'overlapping, the current one level with its mark', () => {
+    const { stackNotes } = c;
+    // Apart: each level with its mark.
+    assert.deepEqual(stackNotes([0, 100, 300], [40, 40, 40], -1, 10),
+                     [0, 100, 300]);
+    // Crowded: each pushed down below the one before.
+    assert.deepEqual(stackNotes([0, 20, 30], [40, 40, 40], -1, 10),
+                     [0, 50, 100]);
+    // The current one level with its mark, those before it moved up.
+    assert.deepEqual(stackNotes([100, 120, 130], [40, 40, 40], 2, 10),
+                     [30, 80, 130]);
+    assert.deepEqual(stackNotes([100, 120, 130], [40, 40, 40], 1, 10),
+                     [70, 120, 170]);
+    // Never above the document's start, where they could not be reached:
+    // too near it, the bubbles stack down from it instead.
+    assert.deepEqual(stackNotes([0, 20, 30], [40, 40, 40], 2, 10),
+                     [0, 50, 100]);
+    assert.deepEqual(stackNotes([], [], -1, 10), []);
+});

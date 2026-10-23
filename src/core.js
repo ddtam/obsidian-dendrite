@@ -913,6 +913,34 @@ function sectionNumbers(roots, hasHeading, roleOf, kindOf) {
     return out;
 }
 
+/**
+ * Where comment bubbles go beside the text: each as near its mark as it
+ * can be without overlapping another, in order, `gap` apart. `anchors`
+ * are the marks' heights, in order, and `heights` the bubbles'. The
+ * bubble `current`, when one is gone to, is level with its mark, and
+ * those before it move up for it; -1 for none. None goes above 0, the
+ * document's start, where it could not be scrolled to: when those
+ * before the current one would, they stack down from it instead.
+ */
+function stackNotes(anchors, heights, current, gap) {
+    const n = anchors.length;
+    if (!n) return [];
+    const down = (from, first) => {
+        const top = new Array(n);
+        top[from] = first;
+        for (let i = from + 1; i < n; i++) {
+            top[i] = Math.max(anchors[i], top[i - 1] + heights[i - 1] + gap);
+        }
+        return top;
+    };
+    if (current < 0 || current >= n) return down(0, Math.max(0, anchors[0]));
+    const top = down(current, anchors[current]);
+    for (let i = current - 1; i >= 0; i--) {
+        top[i] = Math.min(anchors[i], top[i + 1] - heights[i] - gap);
+    }
+    return top[0] < 0 ? down(0, Math.max(0, anchors[0])) : top;
+}
+
 // ---- splitting and merging card text -------------------------------------
 
 /**
@@ -1502,6 +1530,7 @@ module.exports = {
     splitText, mergeText,
     mergeIntoAbove, mergeIntoParent, moveNode,
     flowPath, threadPath, exportSegments, roleFor, cardRole, ROLES, KINDS,
+    stackNotes,
     withKinds, floatLabels, countManuscript,
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,

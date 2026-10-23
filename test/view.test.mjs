@@ -3117,23 +3117,26 @@ test('the preview can show review comments as bubbles beside the text, ' +
     assert.deepEqual(bubbles().map((b) => b.querySelector(
         '.dendrite-pbubble-text').textContent),
         ['How many?', 'Suggests: big', 'Say when.']);
+    // One gutter for the document: the cards' parts keep their height.
+    assert.ok(bubbles().every((x) =>
+        x.closest('.dendrite-pgutter') && !x.closest('.dendrite-pblock')));
+    assert.ok([...view.blocks.values()].every((x) =>
+        x.el.style.minHeight === ''));
+    // A card selected: the other cards' comments fade.
+    view.highlight('G-ccccc');
+    assert.deepEqual(bubbles().map((x) => x.hasClass('is-faded')),
+                     [true, true, false]);
+    view.highlight('G-aaaaa');
+    assert.deepEqual(bubbles().map((x) => x.hasClass('is-faded')),
+                     [false, false, false], 'one with none fades none');
     const first = bubbles()[0];
     assert.match(first.textContent, /Aly Karsan/);
     assert.equal(first.querySelector('a').href, url);
     assert.ok(view.doc.hasClass('has-comments'));
-    // In a wide pane the text keeps its width and centre, the comments in
-    // the gutter; in a narrow one it moves left, then narrows.
-    const fit = (w) => {
-        Object.defineProperty(view.doc.parentElement, 'clientWidth',
-                              { value: w, configurable: true });
-        view.fitComments();
-        const st = view.doc.style;
-        return [parseInt(st.paddingLeft, 10), w -
-            parseInt(st.paddingLeft, 10) - parseInt(st.paddingRight, 10)];
-    };
-    assert.deepEqual(fit(1800), [550, 700], 'centred, as without comments');
-    assert.deepEqual(fit(1100), [100, 700], 'moved left for the gutter');
-    assert.deepEqual(fit(800), [28, 484], 'narrowed only when it must');
+    // The widths are the stylesheet's, from the pane's: nothing set here
+    // that would hold while a pane is resized.
+    assert.equal(view.doc.style.paddingLeft, '');
+    assert.equal(view.doc.style.maxWidth, '');
     const label = () => view.contentEl.querySelector(
         '.dendrite-pcomments-pos').textContent;
     assert.equal(label(), '3 comments');
@@ -3334,4 +3337,157 @@ test('a card that prints and has cards below sets theirs from a Cards ' +
     assert.match(read(cardPath('G-bbbbb')), /dendrite_status: revise/);
     assert.doesNotMatch(read(cardPath('G-aaaaa')), /revise/,
                         'its own is its own');
+});
+
+const SEVEN = '---\ndendrite_prefix: G\ndendrite_number_sections: true\n' +
+    '---\n' + ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((x) =>
+    `- [[G-${x.repeat(5)}|${x}]]\n`).join('') + '    - [[G-hhhhh|h]]\n';
+const sevenCards = () => Object.fromEntries(
+    ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map((x) =>
+        [`G-${x.repeat(5)}`, `# ${x.toUpperCase()}\nText ${x}.`]));
+const click = (view, id, mods = {}) => view.cardEls.get(id).dispatchEvent(
+    new h.window.MouseEvent('click', { bubbles: true, ...mods }));
+
+test('cards are picked with Ctrl-click, a run of them with Shift-click, ' +
+     'and a plain click or Escape lets them go', async () => {
+    const { view } = await open(SEVEN, sevenCards());
+    const picked = () => [...view.picked].sort();
+    click(view, 'G-aaaaa');
+    await tick(10);
+    click(view, 'G-ccccc', { ctrlKey: true });
+    await tick(10);
+    assert.deepEqual(picked(), ['G-aaaaa', 'G-ccccc']);
+    assert.ok(view.cardEls.get('G-ccccc').hasClass('is-picked'));
+    click(view, 'G-ccccc', { ctrlKey: true });
+    await tick(10);
+    assert.deepEqual(picked(), ['G-aaaaa'], 'Ctrl-click again lets go');
+    click(view, 'G-ddddd', { shiftKey: true });
+    await tick(10);
+    assert.deepEqual(picked(), ['G-aaaaa', 'G-bbbbb', 'G-ccccc', 'G-ddddd'],
+                     'Shift-click picks the run between');
+    click(view, 'G-hhhhh', { shiftKey: true });
+    await tick(10);
+    assert.deepEqual(picked(), ['G-aaaaa', 'G-bbbbb', 'G-ccccc', 'G-ddddd'],
+                     'a run is of cards side by side, under one parent');
+    view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
+        { key: 'Escape', bubbles: true }));
+    assert.deepEqual(picked(), []);
+    click(view, 'G-bbbbb', { ctrlKey: true });
+    await tick(10);
+    click(view, 'G-eeeee');
+    await tick(10);
+    assert.deepEqual(picked(), [], 'a plain click picks one card only');
+    assert.equal(view.active, 'G-eeeee');
+});
+
+test('picked cards are grouped under a new card, as a section with a ' +
+     'heading or as scaffolding, in one step to undo', async () => {
+    const { view, read, text } = await open(SEVEN, sevenCards());
+    const before = core.serialiseTree(view.root);
+    for (const id of ['G-aaaaa', 'G-bbbbb', 'G-ccccc', 'G-ddddd']) {
+        view.picked.add(id);
+    }
+    await view.groupPicked('section');
+    const top = view.root.children.map((n) => n.id);
+    const group = top[0];
+    assert.deepEqual(top.slice(1), ['G-eeeee', 'G-fffff', 'G-ggggg']);
+    assert.deepEqual(view.byId.get(group).children.map((n) => n.id),
+                     ['G-aaaaa', 'G-bbbbb', 'G-ccccc', 'G-ddddd']);
+    assert.equal(text(cardPath(group)), '# ', 'a heading to write');
+    assert.equal(view.editing && view.editing.id, group);
+    assert.equal(view.picked.size, 0);
+    await view.endEdit();
+    await view.doUndo();
+    assert.equal(core.serialiseTree(view.root), before, 'one step undoes');
+    assert.equal(read(cardPath(group)), undefined, 'its note goes too');
+    // As scaffolding: the cards below keep their numbers and levels.
+    for (const id of ['G-eeeee', 'G-fffff', 'G-ggggg']) view.picked.add(id);
+    await view.groupPicked('scaffolding');
+    const sc = view.root.children[4].id;
+    assert.deepEqual(view.byId.get(sc).children.map((n) => n.id),
+                     ['G-eeeee', 'G-fffff', 'G-ggggg']);
+    assert.match(read(cardPath(sc)), /dendrite_role: scaffolding/);
+    const nums = core.sectionNumbers(view.root.children,
+        (id) => /^#/.test(text(cardPath(id)) || ''),
+        (id) => view.printRoleOf(id), (id) => view.kindOf(id));
+    assert.equal(nums.get('G-eeeee'), '5.', 'numbered as before');
+    // Cards not side by side are not grouped.
+    view.picked.clear();
+    view.picked.add('G-aaaaa');
+    view.picked.add('G-hhhhh');
+    const now = core.serialiseTree(view.root);
+    h.notices.length = 0;
+    await view.groupPicked('section');
+    assert.equal(core.serialiseTree(view.root), now);
+    assert.match(h.notices[0], /side by side under one parent/);
+});
+
+test('with cards picked, the card menu acts on all of them, and grouping ' +
+     'asks what the group is', async () => {
+    const { view, read } = await open(SEVEN, sevenCards());
+    click(view, 'G-aaaaa');
+    await tick(10);
+    click(view, 'G-ccccc', { shiftKey: true });
+    await tick(10);
+    view.cardMenu(view.cardEls.get('G-bbbbb'), null);
+    const m = h.obsidian.lastMenu;
+    assert.equal(m.titles[0], '3 cards picked');
+    await menuItem(m, 'Status: revise').click();
+    await tick(20);
+    for (const id of ['G-aaaaa', 'G-bbbbb', 'G-ccccc']) {
+        assert.match(read(cardPath(id)), /dendrite_status: revise/);
+    }
+    await view.doUndo();
+    for (const id of ['G-aaaaa', 'G-bbbbb', 'G-ccccc']) {
+        assert.doesNotMatch(read(cardPath(id)), /revise/, 'one undo');
+    }
+    view.cardMenu(view.cardEls.get('G-bbbbb'), null);
+    await menuItem(h.obsidian.lastMenu, 'Group into a new card…').click();
+    const g = h.obsidian.lastModal;
+    assert.match(g.contentEl.textContent, /section/);
+    assert.match(g.contentEl.textContent, /[Ss]caffolding/);
+    await [...g.contentEl.querySelectorAll('button')].find((b) =>
+        /Scaffolding/.test(b.textContent)).onclick();
+    assert.equal(view.root.children[0].children.length, 3);
+    // Delete takes every picked card.
+    await view.endEdit();
+    view.picked.add('G-eeeee');
+    view.picked.add('G-fffff');
+    // Right-clicking a picked card makes it the active one, picks kept.
+    await view.select('G-eeeee', false);
+    assert.equal(view.picked.size, 2);
+    view.cardMenu(view.cardEls.get('G-eeeee'), null);
+    await menuItem(h.obsidian.lastMenu, /^Delete 2 cards/).click();
+    assert.ok(!view.byId.has('G-eeeee') && !view.byId.has('G-fffff'));
+    await view.doUndo();
+    assert.ok(view.byId.has('G-eeeee') && view.byId.has('G-fffff'));
+});
+
+test('an old version with open comments shows on its card, so they are ' +
+     'not buried in the stack', async () => {
+    const { view } = await open(STACK_INDEX, {
+        'G-aaaaa': '---\ndendrite_role: prose\n---\nThe ==old claim==' +
+            '%%[!review] Aly Karsan, 2026-10-23: Evidence?%% stands.',
+        'G-ccccc': 'New paragraph.', 'G-bbbbb': 'Next.' });
+    await view.promote('G-aaaaa', 'G-ccccc');
+    await view.stackOpenReady;
+    const chip = () => [...view.cardEls.get('G-ccccc')
+        .querySelectorAll('.dendrite-status-chip')]
+        .find((s) => /versions/.test(s.textContent));
+    assert.equal(chip().textContent, '2 versions · 1 open');
+    assert.ok(chip().hasClass('is-revise'));
+    assert.ok(view.cardEls.get('G-ccccc').hasClass('has-stack-open'));
+    await view.toggleFan('G-ccccc');
+    const v = view.board.parentElement.querySelector('.dendrite-version');
+    assert.ok(v.hasClass('has-open'), 'flagged in the fan too');
+    assert.ok(view.cardEls.get('G-ccccc').hasClass('is-fanned'),
+              'fanned out: no cards drawn behind it');
+    await view.reviewAction('G-aaaaa', 0, 'resolve');
+    await view.stackOpenReady;
+    assert.equal(chip().textContent, '2 versions');
+    assert.ok(!chip().hasClass('is-revise'));
+    assert.ok(!view.cardEls.get('G-ccccc').hasClass('has-stack-open'));
+    await view.toggleFan('G-ccccc');
+    assert.ok(!view.cardEls.get('G-ccccc').hasClass('is-fanned'),
+              'folded: the cards behind it again');
 });
