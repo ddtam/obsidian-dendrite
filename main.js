@@ -1614,6 +1614,31 @@ var require_docx = __commonJS({
       const bare = xml.replace(/<w:sectPr[^]*?<\/w:sectPr>/g, "");
       return bare.replace(/<\/w:body>/, sect + "</w:body>");
     }
+    function keepTables(xml, maxRows = 30) {
+      return xml.replace(/<w:tbl>[^]*?<\/w:tbl>/g, (tbl) => {
+        const rows = tbl.match(/<w:tr[ >][^]*?<\/w:tr>/g) || [];
+        if (rows.length < 2 || rows.length > maxRows) return tbl;
+        let k = 0;
+        return tbl.replace(/<w:tr[ >][^]*?<\/w:tr>/g, (tr) => {
+          const last = ++k === rows.length;
+          let out = tr.replace(/<w:trPr>/, "<w:trPr><w:cantSplit />");
+          if (out === tr) {
+            out = tr.replace(
+              /^(<w:tr[^>]*>)/,
+              "$1<w:trPr><w:cantSplit /></w:trPr>"
+            );
+          }
+          if (last) return out;
+          return out.replace(
+            /<w:p>(?!<w:pPr>)/g,
+            "<w:p><w:pPr></w:pPr>"
+          ).replace(
+            /<w:pPr>(<w:pStyle [^>]*\/>)?/g,
+            (m, style) => "<w:pPr>" + (style || "") + "<w:keepNext />"
+          );
+        });
+      });
+    }
     function reference(buf, st, zlib) {
       const files = readZip(buf, zlib).map((f) => {
         if (f.name === "word/styles.xml") {
@@ -1638,7 +1663,25 @@ var require_docx = __commonJS({
       });
       return writeZip(files, zlib);
     }
-    module2.exports = { crc32, readZip, writeZip, styleXml, pageXml, reference };
+    function keepDocument(buf, zlib) {
+      return writeZip(readZip(buf, zlib).map((f) => f.name === "word/document.xml" ? {
+        name: f.name,
+        data: Buffer.from(
+          keepTables(f.data.toString("utf8")),
+          "utf8"
+        )
+      } : f), zlib);
+    }
+    module2.exports = {
+      crc32,
+      readZip,
+      writeZip,
+      styleXml,
+      pageXml,
+      reference,
+      keepTables,
+      keepDocument
+    };
   }
 });
 
@@ -1939,7 +1982,7 @@ return {
     function restyledReference(buf, style, zlib) {
       return docx.reference(buf, {
         font: style.font,
-        fontSize: style.fontSize,
+        fontSize: style.fontSize || 10,
         lineSpacing: style.lineSpacing,
         paper: style.paper,
         marginPt: marginPt(style)
@@ -2109,6 +2152,15 @@ return {
       });
       try {
         await deps.run(o.pandoc || "pandoc", args);
+        if (o.format === "docx" && deps.zlib) {
+          try {
+            await deps.writeFile(o.output, docx.keepDocument(
+              await deps.readFile(o.output),
+              deps.zlib
+            ));
+          } catch (err) {
+          }
+        }
       } catch (err) {
         return { error: pandocError(err, o.pandoc || "pandoc") };
       } finally {
