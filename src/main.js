@@ -3709,10 +3709,23 @@ class DendriteView extends ItemView {
      */
     async reviewModal(name, items, inbox = null) {
         const cards = await this.reviewCards();
-        const rows = items.map((item) => {
+        const bodies = new Map();
+        const rows = [];
+        for (const item of items) {
             const at = review.locate(item, cards);
-            return { item, at, use: !!at };
-        });
+            // Already in its card, as from the same review sent twice:
+            // shown, but not added again unless ticked.
+            let dup = false;
+            if (at) {
+                if (!bodies.has(at.id)) {
+                    const f = this.cardFile(at.id);
+                    bodies.set(at.id, f ? core.splitFrontmatter(
+                        await this.app.vault.read(f)).body : '');
+                }
+                dup = review.alreadyIn(bodies.get(at.id), item);
+            }
+            rows.push({ item, at, dup, use: !!at && !dup });
+        }
         const modal = new ReviewImportModal(this, name, rows, inbox);
         modal.open();
         return modal;
@@ -5851,9 +5864,11 @@ class ReviewImportModal extends Modal {
         this.modalEl.addClass('dendrite-wide');
         this.titleEl.setText(`Review comments in ${this.name}`);
         const found = rows.filter((x) => x.at).length;
+        const dups = rows.filter((x) => x.dup).length;
         contentEl.createEl('p', { text: `${rows.length} comment` +
             `${rows.length === 1 ? '' : 's'} and suggested change` +
-            `${rows.length === 1 ? '' : 's'}; ${found} found in the cards. ` +
+            `${rows.length === 1 ? '' : 's'}; ${found} found in the cards` +
+            (dups ? `, ${dups} already in the cards` : '') + '. ' +
             'Each goes after its passage in the card, which is set to ' +
             'revise. A change still made on the text as it was sent can ' +
             'be applied from its card later; one whose passage has ' +
@@ -5889,7 +5904,11 @@ class ReviewImportModal extends Modal {
                     it.quote ? `Replace with “${it.insert.trim()}”` :
                     `Add “${it.insert.trim()}”` });
             const where = main.createDiv({ cls: 'dendrite-review-where' });
-            if (row.at) {
+            if (row.dup) {
+                where.addClass('is-missing');
+                where.setText(`Already in the card, ` +
+                    `${core.shortId(row.at.id)}: left unticked.`);
+            } else if (row.at) {
                 const node = view.byId.get(row.at.id);
                 where.setText(`→ card ${core.shortId(row.at.id)}` +
                     (node && node.label ? ` (${node.label})` : '') +
@@ -6650,12 +6669,26 @@ module.exports = class DendritePlugin extends Plugin {
             JSON.stringify([current, title, items]), 'utf8')));
         const cards = await this.reviewCardsOf(file);
         let found = 0;
+        let already = 0;
         const missing = [];
-        items.forEach((it, k) => {
-            if (review.locate(it, cards)) found++;
-            else missing.push({ n: k + 1, card: it.card || null,
-                                quote: it.quote });
-        });
+        const bodies = new Map();
+        for (const [k, it] of items.entries()) {
+            const at = review.locate(it, cards);
+            if (!at) {
+                missing.push({ n: k + 1, card: it.card || null,
+                               quote: it.quote });
+                continue;
+            }
+            found++;
+            if (!bodies.has(at.id)) {
+                const f = this.app.metadataCache.getFirstLinkpathDest(
+                    at.id, file.path);
+                bodies.set(at.id, f instanceof TFile ?
+                    core.splitFrontmatter(await this.app.vault.read(f))
+                        .body : '');
+            }
+            if (review.alreadyIn(bodies.get(at.id), it)) already++;
+        }
         const queue = this.settings.reviewQueue =
             this.settings.reviewQueue || [];
         let entry = queue.find((r) => r.key === key &&
@@ -6679,7 +6712,7 @@ module.exports = class DendritePlugin extends Plugin {
         }
         return { status: 202, json: { id: entry.id, state: entry.state,
                                       manuscript: current, found,
-                                      missing } };
+                                      already, missing } };
     }
 
     async reviewStatus(id) {

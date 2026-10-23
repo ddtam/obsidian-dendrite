@@ -167,14 +167,19 @@ Every card shows its role as an icon in its top right corner, faint when the rol
 
 **Review comments from a JSON file.** The same **Import review…** takes a `.json` file holding a list of comments, or `{ "items": [...] }`, each `{ "quote": "passage", "text": "comment", "author": "Name", "date": "2026-10-23", "card": "ab12c" }`. Only `text` is required; with no `date`, the comment is dated the day it is imported, and with no `author` it is signed Reviewer. `card`, a card's id with or without its prefix, makes the passage be looked for in that card only; without it, a passage found in more than one card is not placed. `before` and `after`, text either side of the passage, decide between repeats within a card. It goes through the same dialog, undo and revise status as a Word file, so a reviewer who cannot send Word, such as another program, can leave comments in the cards without writing to them.
 
-**Reviews sent by a program.** With **Accept reviews from programs on this computer** on in Dendrite's settings, Dendrite listens on `127.0.0.1`, port 27130 unless set otherwise, for reviews sent by a program, such as an agent, the way Better BibTeX answers Zotero requests on its own port. While it listens, it writes the address and a key to `~/.config/dendrite/review-api.json`, readable only by you, and removes the file when it stops. A program sends
+**Reviews sent by a program.** With **Accept reviews from programs on this computer** on in Dendrite's settings, Dendrite listens on `127.0.0.1`, port 27130 unless set otherwise, for reviews sent by a program, such as an agent, the way Better BibTeX answers Zotero requests on its own port. While it listens, it writes the address and a key to `~/.config/dendrite/review-api.json`, readable only by you, and removes the file when it stops. A program sends, for example from Python, building the body in the script rather than uploading a file, which some command guards refuse,
 
-```
-curl -X POST "$url" -H "Authorization: Bearer $key" \
-     -H "Content-Type: application/json" \
-     -d '{"manuscript": "DRAC-RAC-2026", "title": "RAC draft review",
-          "items": [{"card": "fd0zc", "quote": "...", "text": "...",
-                     "author": "Claude", "date": "2026-10-23"}]}'
+```python
+import json, os, urllib.request
+api = json.load(open(os.path.expanduser(
+    "~/.config/dendrite/review-api.json")))
+body = {"manuscript": "DRAC-RAC-2026", "title": "RAC draft review",
+        "items": [{"card": "fd0zc", "quote": "...", "text": "...",
+                   "author": "Claude", "date": "2026-10-23"}]}
+req = urllib.request.Request(api["url"], json.dumps(body).encode(),
+    {"Authorization": "Bearer " + api["key"],
+     "Content-Type": "application/json"})
+print(json.load(urllib.request.urlopen(req)))
 ```
 
 with items as in a JSON review file, and `manuscript` the manuscript's prefix, now or before a rename. The answer, at once, is `{ "id", "state": "pending", "found", "missing" }`, where `missing` lists each comment whose passage was not found in what the cards print, by number, card and quote, so the sender can correct it before you see it; `GET $url/<id>` with the key answers its state later, `pending`, `added` or `ignored`. Nothing is written to a card on arrival. A notice says the review came, and a **review: 15 from Claude** chip on the manuscript's bar opens the usual dialog: **Add** adds the ticked comments, **Ignore this review** adds none, and **Cancel** leaves it waiting, also across restarts. A request without the key, or from a web page, which sends an Origin header, is refused, and Dendrite sends no header that would let a page in. **New key** in the settings replaces the key. Another plugin can call `app.plugins.plugins.dendrite.submitReview({ manuscript, title, items })` for the same answer without the port. Desktop only.

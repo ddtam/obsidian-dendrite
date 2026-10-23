@@ -330,3 +330,21 @@ test('the review endpoint takes JSON only with its key, refuses web ' +
     }
     await assert.rejects(api.start({ port: -1, token: 'k' }));
 });
+
+test('a comment or change already in its card is known as one', () => {
+    const md = 'The ==cohort==%%[!review] Claude, 2026-10-23: How many?%% ' +
+        'was ==large==%%[!suggest] Aly Karsan, 2026-10-23: big%%.';
+    const c = (text, author = 'Claude') => ({ kind: 'comment', author,
+                                              text });
+    assert.ok(r.alreadyIn(md, c('How many?')));
+    assert.ok(r.alreadyIn(md, c('How  many?\n')), 'as it would be written');
+    assert.ok(!r.alreadyIn(md, c('How many?', 'Aly Karsan')),
+              'another reviewer\'s');
+    assert.ok(!r.alreadyIn(md, c('How few?')));
+    assert.ok(r.alreadyIn(md, { kind: 'change', author: 'Aly Karsan',
+                                quote: 'large', insert: 'big' }));
+    assert.ok(!r.alreadyIn(md, { kind: 'change', author: 'Aly Karsan',
+                                 quote: 'large', insert: 'huge' }));
+    assert.ok(r.alreadyIn('Text.%%[!review] Claude, 2026-10-23: On ' +
+        '“gone”: Lost.%%', c('Lost.')), 'one added with its passage quoted');
+});

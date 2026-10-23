@@ -578,6 +578,26 @@ const clean = (s, edges = false) => {
 };
 
 /**
+ * Whether an imported item, a comment or change, is already in a card's
+ * markdown `md`: one by the same reviewer saying the same, as it would
+ * have been written, a comment with its passage quoted included.
+ */
+function alreadyIn(md, item) {
+    const author = clean(item.author) || 'Reviewer';
+    return reviewItems(md).some((x) => {
+        if (x.author !== author) return false;
+        if (item.kind === 'change') {
+            return x.kind === 'suggest' &&
+                x.text === clean(item.insert, true);
+        }
+        const flat = (t) => clean(t).replace(/\s+/g, ' ');
+        const text = flat(item.text);
+        const had = flat(x.text);
+        return had === text || had.endsWith(`: ${text}`);
+    });
+}
+
+/**
  * A comment or suggestion as card markdown, on `passage` if one is
  * given. A suggestion's text is the new text for the passage.
  */
@@ -757,7 +777,8 @@ function decorate(root, items, act) {
 }
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
-                   plainMap, normalise, locate, reviewItems, itemText,
+                   plainMap, normalise, locate, reviewItems, alreadyIn,
+                   itemText,
                    addItems, removeItem,
                    stripReview, canHighlight, renderMarkdown, decorate,
                    shortDate };

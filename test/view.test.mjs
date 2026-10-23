@@ -2452,6 +2452,20 @@ test('a review submitted for a manuscript is queued with where its ' +
     assert.deepEqual(chips(), []);
     assert.deepEqual((await p.reviewStatus(out.json.id)).json.state,
                      'added');
+    // Sent again once added: queued, but what is already in the card
+    // comes unticked.
+    const again = await p.submitReview(sent);
+    assert.notEqual(again.json.id, out.json.id);
+    assert.equal(again.json.already, 1);
+    await view.openInbox(view.inbox[0]);
+    const dm = h.obsidian.lastModal;
+    assert.match(dm.contentEl.textContent, /1 already in the cards/);
+    assert.match(dm.contentEl.textContent, /Already in the card/);
+    assert.equal(dm.rows[0].use, false);
+    assert.equal(dm.contentEl.querySelector('.mod-cta').textContent,
+                 'Add 0');
+    await [...dm.contentEl.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Ignore this review').onclick();
     assert.equal((await p.reviewStatus('nope')).status, 404);
     // Ignored: nothing written.
     const two = await p.submitReview({ manuscript: 'G', items: [

@@ -2852,6 +2852,19 @@ var require_review = __commonJS({
       const t = String(s || "").replace(/%%/g, "%").replace(/\s*\n\s*/g, " ");
       return edges ? t : t.trim();
     };
+    function alreadyIn(md, item) {
+      const author = clean(item.author) || "Reviewer";
+      return reviewItems(md).some((x) => {
+        if (x.author !== author) return false;
+        if (item.kind === "change") {
+          return x.kind === "suggest" && x.text === clean(item.insert, true);
+        }
+        const flat = (t) => clean(t).replace(/\s+/g, " ");
+        const text = flat(item.text);
+        const had = flat(x.text);
+        return had === text || had.endsWith(`: ${text}`);
+      });
+    }
     function itemText(kind, passage, author, date, text) {
       const note = `%%[!${kind}] ${clean(author) || "Reviewer"}, ${date}: ${clean(text, kind === "suggest")}%%`;
       return passage ? `==${passage}==${note}` : note;
@@ -2996,6 +3009,7 @@ var require_review = __commonJS({
       normalise,
       locate,
       reviewItems,
+      alreadyIn,
       itemText,
       addItems,
       removeItem,
@@ -6668,10 +6682,22 @@ var DendriteView = class extends ItemView {
    */
   async reviewModal(name, items, inbox = null) {
     const cards = await this.reviewCards();
-    const rows = items.map((item) => {
+    const bodies = /* @__PURE__ */ new Map();
+    const rows = [];
+    for (const item of items) {
       const at = review.locate(item, cards);
-      return { item, at, use: !!at };
-    });
+      let dup = false;
+      if (at) {
+        if (!bodies.has(at.id)) {
+          const f = this.cardFile(at.id);
+          bodies.set(at.id, f ? core.splitFrontmatter(
+            await this.app.vault.read(f)
+          ).body : "");
+        }
+        dup = review.alreadyIn(bodies.get(at.id), item);
+      }
+      rows.push({ item, at, dup, use: !!at && !dup });
+    }
     const modal = new ReviewImportModal(this, name, rows, inbox);
     modal.open();
     return modal;
@@ -8701,7 +8727,8 @@ var ReviewImportModal = class extends Modal {
     this.modalEl.addClass("dendrite-wide");
     this.titleEl.setText(`Review comments in ${this.name}`);
     const found = rows.filter((x) => x.at).length;
-    contentEl.createEl("p", { text: `${rows.length} comment${rows.length === 1 ? "" : "s"} and suggested change${rows.length === 1 ? "" : "s"}; ${found} found in the cards. Each goes after its passage in the card, which is set to revise. A change still made on the text as it was sent can be applied from its card later; one whose passage has changed since comes in as a comment. Nothing is written until you add them, and Ctrl+Z on the board undoes it.` });
+    const dups = rows.filter((x) => x.dup).length;
+    contentEl.createEl("p", { text: `${rows.length} comment${rows.length === 1 ? "" : "s"} and suggested change${rows.length === 1 ? "" : "s"}; ${found} found in the cards` + (dups ? `, ${dups} already in the cards` : "") + ". Each goes after its passage in the card, which is set to revise. A change still made on the text as it was sent can be applied from its card later; one whose passage has changed since comes in as a comment. Nothing is written until you add them, and Ctrl+Z on the board undoes it." });
     const list = contentEl.createDiv({ cls: "dendrite-review-rows" });
     const active = view.active && view.byId.get(view.active);
     const count = () => rows.filter((x) => x.use).length;
@@ -8731,7 +8758,10 @@ var ReviewImportModal = class extends Modal {
         text: it.kind === "comment" ? it.text : !it.insert ? "Delete this." : it.quote ? `Replace with \u201C${it.insert.trim()}\u201D` : `Add \u201C${it.insert.trim()}\u201D`
       });
       const where = main.createDiv({ cls: "dendrite-review-where" });
-      if (row.at) {
+      if (row.dup) {
+        where.addClass("is-missing");
+        where.setText(`Already in the card, ${core.shortId(row.at.id)}: left unticked.`);
+      } else if (row.at) {
         const node = view.byId.get(row.at.id);
         where.setText(`\u2192 card ${core.shortId(row.at.id)}` + (node && node.label ? ` (${node.label})` : "") + (row.at.how === "close" ? ", found by most of its words: check it" : ""));
       } else {
@@ -9333,15 +9363,29 @@ module.exports = class DendritePlugin extends Plugin {
     )));
     const cards = await this.reviewCardsOf(file);
     let found = 0;
+    let already = 0;
     const missing = [];
-    items.forEach((it, k) => {
-      if (review.locate(it, cards)) found++;
-      else missing.push({
-        n: k + 1,
-        card: it.card || null,
-        quote: it.quote
-      });
-    });
+    const bodies = /* @__PURE__ */ new Map();
+    for (const [k, it] of items.entries()) {
+      const at = review.locate(it, cards);
+      if (!at) {
+        missing.push({
+          n: k + 1,
+          card: it.card || null,
+          quote: it.quote
+        });
+        continue;
+      }
+      found++;
+      if (!bodies.has(at.id)) {
+        const f = this.app.metadataCache.getFirstLinkpathDest(
+          at.id,
+          file.path
+        );
+        bodies.set(at.id, f instanceof TFile ? core.splitFrontmatter(await this.app.vault.read(f)).body : "");
+      }
+      if (review.alreadyIn(bodies.get(at.id), it)) already++;
+    }
     const queue = this.settings.reviewQueue = this.settings.reviewQueue || [];
     let entry = queue.find((r) => r.key === key && r.state === "pending");
     if (!entry) {
@@ -9367,6 +9411,7 @@ module.exports = class DendritePlugin extends Plugin {
       state: entry.state,
       manuscript: current,
       found,
+      already,
       missing
     } };
   }
