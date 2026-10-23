@@ -783,6 +783,21 @@ function renderMarkdown(md) {
 }
 
 /**
+ * What can be done with a review item, as [action, label, tooltip]: a
+ * suggestion applied or dismissed; a comment resolved, dealt with and
+ * remembered so a pull does not bring it back, or deleted, taken out of
+ * the card only, as one misplaced, which a pull offers again.
+ */
+function commentActions(it) {
+    return it.kind === 'suggest' ?
+        [['apply', 'Apply…', ''], ['dismiss', 'Dismiss', '']] :
+        [['resolve', 'Resolve', 'Dealt with: taken out, and not brought ' +
+          'back by a pull'],
+         ['delete', 'Delete', 'Taken out of Dendrite only, as misplaced; ' +
+          'a pull offers it again']];
+}
+
+/**
  * Under each paragraph of a rendered card, a callout for each review
  * comment in it, numbered as in the text. `act(n, what)` is called with
  * the comment's index and 'resolve' or, for a suggestion, 'apply' or
@@ -841,13 +856,13 @@ function decorate(root, items, act) {
                 `Suggests adding: ${it.text.trim()}`;
             main.append(meta, text);
             note.append(n, main);
-            const buttons = it.kind === 'suggest' ?
-                [['apply', 'Apply…'], ['dismiss', 'Dismiss']] :
-                [['resolve', 'Resolve']];
-            for (const [what, label] of buttons) {
+            const buttons = commentActions(it);
+            for (const [what, label, tip] of buttons) {
                 const btn = doc.createElement('button');
-                btn.className = 'dendrite-review-btn';
+                btn.className = 'dendrite-review-btn' +
+                    (what === 'delete' ? ' is-quiet' : '');
                 btn.textContent = label;
+                if (tip) btn.title = tip;
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     act(i, what);
@@ -864,6 +879,7 @@ function decorate(root, items, act) {
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    plainMap, normalise, locate, reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
+                   commentActions,
                    itemText,
                    addItems, removeItem,
                    stripReview, canHighlight, renderMarkdown, decorate,

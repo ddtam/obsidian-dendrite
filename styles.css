@@ -1872,3 +1872,12 @@ button.dendrite-review-btn:hover {
 .dendrite-float-table .dendrite-float-label:empty {
     display: none;
 }
+
+/* Delete, beside Resolve: the lesser action, taking a comment out of
+   Dendrite only. */
+.dendrite-review-btn.is-quiet,
+.dendrite-pbubble-btns button.is-quiet {
+    background: transparent;
+    box-shadow: none;
+    color: var(--text-faint);
+}

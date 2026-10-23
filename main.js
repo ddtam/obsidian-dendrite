@@ -3018,6 +3018,12 @@ var require_review = __commonJS({
         return `<mark class="dendrite-review-mark">${passage}</mark>${num}`;
       });
     }
+    function commentActions(it) {
+      return it.kind === "suggest" ? [["apply", "Apply\u2026", ""], ["dismiss", "Dismiss", ""]] : [
+        ["resolve", "Resolve", "Dealt with: taken out, and not brought back by a pull"],
+        ["delete", "Delete", "Taken out of Dendrite only, as misplaced; a pull offers it again"]
+      ];
+    }
     function decorate(root, items, act) {
       const nums = [...root.querySelectorAll("sup.dendrite-review-n")];
       const doc = root.ownerDocument;
@@ -3067,11 +3073,12 @@ var require_review = __commonJS({
           text.textContent = it.kind !== "suggest" ? said : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
           main.append(meta, text);
           note.append(n, main);
-          const buttons = it.kind === "suggest" ? [["apply", "Apply\u2026"], ["dismiss", "Dismiss"]] : [["resolve", "Resolve"]];
-          for (const [what, label] of buttons) {
+          const buttons = commentActions(it);
+          for (const [what, label, tip] of buttons) {
             const btn = doc.createElement("button");
-            btn.className = "dendrite-review-btn";
+            btn.className = "dendrite-review-btn" + (what === "delete" ? " is-quiet" : "");
             btn.textContent = label;
+            if (tip) btn.title = tip;
             btn.addEventListener("click", (e) => {
               e.stopPropagation();
               act(i, what);
@@ -3098,6 +3105,7 @@ var require_review = __commonJS({
       reviewKeys,
       needsLink,
       addLink,
+      commentActions,
       itemText,
       addItems,
       removeItem,
@@ -8576,7 +8584,7 @@ var DendriteView = class extends ItemView {
       return;
     }
     await write(review.removeItem(body, n));
-    if (item) await this.rememberDone(item);
+    if (item && what !== "delete") await this.rememberDone(item);
   }
   async setStatus(id, status) {
     const f = this.cardFile(id);
@@ -10022,8 +10030,12 @@ var DendritePreview = class extends ItemView {
         text: it.kind !== "suggest" ? text : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`
       });
       const row = el.createDiv({ cls: "dendrite-pbubble-btns" });
-      for (const [what, label] of it.kind === "suggest" ? [["apply", "Apply\u2026"], ["dismiss", "Dismiss"]] : [["resolve", "Resolve"]]) {
-        const btn = row.createEl("button", { text: label });
+      for (const [what, label, tip] of review.commentActions(it)) {
+        const btn = row.createEl("button", {
+          text: label,
+          cls: what === "delete" ? "is-quiet" : ""
+        });
+        if (tip) btn.title = tip;
         btn.onclick = async (e) => {
           if (e && e.stopPropagation) e.stopPropagation();
           if (this.plugin.reviewFromPreview) {

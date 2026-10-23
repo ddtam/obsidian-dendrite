@@ -207,8 +207,8 @@ test('on the board a comment\'s passage is marked and numbered, with a ' +
     assert.equal(notes[1].querySelector('.dendrite-review-text').textContent,
                  'Suggests: new');
     for (const b of root.querySelectorAll('button')) b.click();
-    assert.deepEqual(acts, [[0, 'resolve'], [1, 'apply'], [1, 'dismiss'],
-                            [2, 'resolve']]);
+    assert.deepEqual(acts, [[0, 'resolve'], [0, 'delete'], [1, 'apply'],
+                            [1, 'dismiss'], [2, 'resolve'], [2, 'delete']]);
 });
 
 test('a suggested insertion keeps its spaces, and applying it puts it ' +

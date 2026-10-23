@@ -4803,7 +4803,9 @@ class DendriteView extends ItemView {
             return;
         }
         await write(review.removeItem(body, n));
-        if (item) await this.rememberDone(item);
+        // Deleted, as misplaced, it is not remembered: a pull offers it
+        // again, to be placed where it belongs.
+        if (item && what !== 'delete') await this.rememberDone(item);
     }
 
     async setStatus(id, status) {
@@ -6294,10 +6296,10 @@ class DendritePreview extends ItemView {
                     it.passage ? `Suggests: ${it.text.trim()}` :
                     `Suggests adding: ${it.text.trim()}` });
             const row = el.createDiv({ cls: 'dendrite-pbubble-btns' });
-            for (const [what, label] of it.kind === 'suggest' ?
-                [['apply', 'Apply…'], ['dismiss', 'Dismiss']] :
-                [['resolve', 'Resolve']]) {
-                const btn = row.createEl('button', { text: label });
+            for (const [what, label, tip] of review.commentActions(it)) {
+                const btn = row.createEl('button', { text: label,
+                    cls: what === 'delete' ? 'is-quiet' : '' });
+                if (tip) btn.title = tip;
                 btn.onclick = async (e) => {
                     if (e && e.stopPropagation) e.stopPropagation();
                     if (this.plugin.reviewFromPreview) {

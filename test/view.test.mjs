@@ -3667,3 +3667,37 @@ test('pulling again links comments already in the cards that came ' +
     await view.doUndo();
     assert.equal(text(cardPath('G-aaaaa')), before);
 });
+
+test('a comment deleted here leaves the card and is not remembered, so a ' +
+     'pull offers it again; one resolved is remembered', async () => {
+    const { view, read, text } = await open(
+        '---\ndendrite_prefix: G\ndendrite_gdoc: https://docs.google.com/' +
+        'document/d/D/edit\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'The ==cohort==%%[!review] Joshua Bridgers, ' +
+          '2026-10-22: Wrong card?%% and ==size==%%[!review] Joshua ' +
+          'Bridgers, 2026-10-22: How many?%%.' });
+    // Both on the card's comment, Delete as well as Resolve.
+    view.invalidate('G-aaaaa');
+    await view.renderCard('G-aaaaa');
+    const note = view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-note');
+    assert.deepEqual([...note.querySelectorAll('button')]
+        .map((b) => b.textContent), ['Resolve', 'Delete']);
+    await view.reviewAction('G-aaaaa', 0, 'delete');
+    assert.equal(text(cardPath('G-aaaaa')), 'The cohort and ==size==' +
+        '%%[!review] Joshua Bridgers, 2026-10-22: How many?%%.');
+    assert.doesNotMatch(read(INDEX), /dendrite_review_done/,
+                        'deleted: nothing remembered');
+    await view.reviewAction('G-aaaaa', 0, 'resolve');
+    assert.match(read(INDEX), /dendrite_review_done/, 'resolved: remembered');
+    view.plugin.gdocReview = async () => ({ title: 'RAC', resolved: 0,
+        items: ['Wrong card?', 'How many?'].map((t, k) => ({
+            kind: 'comment', author: 'Joshua Bridgers', date: '2026-10-22',
+            text: t, quote: k ? 'size' : 'cohort', before: '', after: '' }))
+    });
+    const m = await view.pullGdoc();
+    assert.deepEqual(m.rows.map((r) => [r.use, !!r.done]),
+                     [[true, false], [false, true]],
+                     'the deleted one offered again; the resolved one not');
+    await view.doUndo();
+});
