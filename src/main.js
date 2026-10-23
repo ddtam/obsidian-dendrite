@@ -1032,14 +1032,7 @@ class DendriteView extends ItemView {
         svg.style.height = this.board.clientHeight + 'px';
         const box = this.board.getBoundingClientRect();
         const sx = this.board.scrollLeft;
-        const rel = (el) => {
-            const r = el.getBoundingClientRect();
-            return { left: r.left - box.left + sx,
-                     right: r.right - box.left + sx,
-                     top: r.top - box.top, bottom: r.bottom - box.top,
-                     r: parseFloat(getComputedStyle(el).borderTopLeftRadius)
-                        || 0 };
-        };
+        const rel = (el) => this.flowBox(el, box, sx);
         // Grey context: each card on the path opens into its whole group
         // of children. Purple thread: each card on the path leads to the
         // specific next card, ending at the active card.
@@ -1071,6 +1064,23 @@ class DendriteView extends ItemView {
         };
         draw('dendrite-flow-context', core.flowPath(pairs));
         draw('dendrite-flow-thread', core.threadPath(steps));
+    }
+
+    /**
+     * An element's box for the flow, in the board's content coordinates
+     * (`box` the board's rect, `sx` its scroll). A card with old versions
+     * starts at the top of its stack, the room above it its margin holds.
+     */
+    flowBox(el, box, sx) {
+        const r = el.getBoundingClientRect();
+        // The element's own window's, which in a popout is not this one.
+        const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+        const lift = el.classList.contains('has-stack') ?
+            parseFloat(cs.marginTop) || 0 : 0;
+        return { left: r.left - box.left + sx,
+                 right: r.right - box.left + sx,
+                 top: r.top - box.top - lift, bottom: r.bottom - box.top,
+                 r: parseFloat(cs.borderTopLeftRadius) || 0 };
     }
 
     /**
@@ -1443,38 +1453,27 @@ class DendriteView extends ItemView {
     cardMenu(anchor, event) {
         const { Menu } = require('obsidian');
         const m = new Menu();
+        const id = this.active;
+        const node = this.byId.get(id);
+        // A submenu where Obsidian has them, else its items in the menu
+        // itself, each titled with the submenu's name.
+        const submenu = (title, icon) => {
+            let sub = null;
+            m.addItem((i) => {
+                i.setTitle(title).setIcon(icon);
+                if (typeof i.setSubmenu === 'function') sub = i.setSubmenu();
+            });
+            const lead = sub ? '' : `${title}: `;
+            const into = sub || m;
+            return { into, item: (t, ic, fn) => into.addItem((i) =>
+                i.setTitle(typeof t === 'string' ? lead + t : t)
+                    .setIcon(ic).onClick(fn)) };
+        };
         const item = (title, icon, fn) => m.addItem((i) =>
             i.setTitle(title).setIcon(icon).onClick(fn));
-        item('New card above (Ctrl+↑)', 'arrow-up-to-line',
-             () => this.insert('above'));
-        item('Move up (Alt+↑)', 'arrow-up', () => this.structural('up'));
-        item('Move down (Alt+↓)', 'arrow-down',
-             () => this.structural('down'));
-        item('Indent (Alt+→)', 'indent', () => this.structural('indent'));
-        item('Outdent (Alt+←)', 'outdent', () => this.structural('outdent'));
-        m.addSeparator();
-        item('Card properties…', 'sliders-horizontal',
-             () => new CardModal(this, this.active).open());
-        item('Copy reference', 'link', () => this.copyRef(this.active));
-        {
-            const node = this.byId.get(this.active);
-            const sid = this.active;
-            item('New version of this card', 'layers',
-                 () => this.promote(sid));
-            if (node && node.parent && node.parent.id) {
-                const up = node.parent.id;
-                item('Replace the parent card with this one', 'layers',
-                     () => this.promote(up, sid));
-            }
-            if (this.stackOf(sid).length) {
-                item('Versions…', 'layers', () => this.openStack(sid));
-            }
-        }
-        // Status, then what this card prints.
-        const id = this.active;
+        // Status first, the change made most often to one card.
         const info = this.statusInfo && this.statusInfo.get(id);
         if (info && info.prints) {
-            m.addSeparator();
             for (const [value, title, icon, key] of STATUS_ITEMS) {
                 m.addItem((i) => {
                     i.setTitle(this.menuLabel(title, `Ctrl+${key}`))
@@ -1486,14 +1485,14 @@ class DendriteView extends ItemView {
                     }
                 });
             }
-        } else if (info && info.own === 'unsplit') {
             m.addSeparator();
+        } else if (info && info.own === 'unsplit') {
             item('Keep the leftover text as notes', 'check',
                  () => this.markStatus(id, null));
+            m.addSeparator();
         } else if (info && info.derived) {
             // A card that takes its status from the cards below it sets
             // theirs, every card there that prints its text.
-            m.addSeparator();
             for (const [value, title, icon] of STATUS_ITEMS) {
                 m.addItem((i) => {
                     i.setTitle(title.replace('Status', 'Cards below'))
@@ -1504,36 +1503,59 @@ class DendriteView extends ItemView {
                     }
                 });
             }
+            m.addSeparator();
         }
+        // What prints: the role, the kind, and the whole branch's.
+        this.addRoleItems(submenu('Prints as', 'printer').into, id);
+        // Versions: a card replaced keeps its old self in a stack.
+        const versions = submenu('Versions', 'history');
+        versions.item('New version of this card', 'file-plus-2',
+                      () => this.promote(id));
+        if (node && node.parent && node.parent.id) {
+            const up = node.parent.id;
+            versions.item('Replace the parent card with this one',
+                          'replace', () => this.promote(up, id));
+        }
+        if (this.stackOf(id).length) {
+            versions.item(this.fannedId === id ? 'Hide old versions' :
+                          'Show old versions', 'panel-right-open',
+                          () => this.toggleFan(id));
+            versions.item('Make an old version current, or delete one…',
+                          'list-ordered', () => this.openStack(id));
+        }
+        // The card's place in the tree, with the keys that do the same.
+        const structure = submenu('Structure', 'move');
+        structure.item('New card above (Ctrl+↑)', 'arrow-up-to-line',
+                       () => this.insert('above'));
+        structure.item('Move up (Alt+↑)', 'arrow-up',
+                       () => this.structural('up'));
+        structure.item('Move down (Alt+↓)', 'arrow-down',
+                       () => this.structural('down'));
+        structure.item('Indent (Alt+→)', 'indent',
+                       () => this.structural('indent'));
+        structure.item('Outdent (Alt+←)', 'outdent',
+                       () => this.structural('outdent'));
+        structure.into.addSeparator();
+        structure.item('Merge into the card above', 'merge',
+                       () => this.merge('above'));
+        structure.item('Merge into the parent card', 'arrow-left-to-line',
+                       () => this.merge('parent'));
         m.addSeparator();
-        this.addRoleItems(m, id);
-        m.addSeparator();
-        const branch = this.byId.get(this.active);
-        let sub = null;
-        m.addItem((i) => {
-            i.setTitle('Export this branch').setIcon('file-output');
-            if (typeof i.setSubmenu === 'function') sub = i.setSubmenu();
-        });
-        const into = sub || m;
-        const lead = sub ? '' : 'Export this branch to ';
+        const exp = submenu('Export this branch', 'file-output');
         const formats = [['Markdown', 'md']];
         if (Platform.isDesktopApp) {
             formats.push(['PDF', 'pdf'], ['Word', 'docx']);
         }
         for (const [title, fmt] of formats) {
-            into.addItem((i) => i.setTitle(lead + title)
-                .setIcon('file-output')
-                .onClick(() => this.exportTo(branch, fmt)));
+            exp.item(title, 'file-output', () => this.exportTo(node, fmt));
         }
+        item('Card properties…', 'sliders-horizontal',
+             () => new CardModal(this, id).open());
+        item('Copy reference', 'link', () => this.copyRef(id));
         item('Open card note', 'file', () => {
-            const f = this.cardFile(this.active);
+            const f = this.cardFile(id);
             if (f) this.plugin.openAsMarkdown(f);
         });
-        m.addSeparator();
-        item('Merge into the card above', 'merge',
-             () => this.merge('above'));
-        item('Merge into the parent card', 'arrow-left-to-line',
-             () => this.merge('parent'));
         m.addSeparator();
         item('Delete card and its children (Ctrl+Backspace)', 'trash-2',
              () => this.deleteActive());
@@ -3854,6 +3876,30 @@ class DendriteView extends ItemView {
                                 r.items);
     }
 
+    /**
+     * Keys of the review comments and changes resolved, applied or
+     * dismissed in this manuscript, kept on its index.
+     */
+    reviewDone() {
+        const fm = this.file &&
+            this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+        const d = fm && fm.dendrite_review_done;
+        return Array.isArray(d) ? d.map(String) : [];
+    }
+
+    /** Remember a comment or change as dealt with, by its keys. */
+    async rememberDone(item) {
+        if (!this.file) return;
+        const keys = review.reviewKeys(item);
+        await this.app.fileManager.processFrontMatter(this.file, (fm) => {
+            const had = Array.isArray(fm.dendrite_review_done) ?
+                fm.dendrite_review_done.map(String) : [];
+            const all = [...had.filter((k) => !keys.includes(k)), ...keys];
+            // The latest, enough for any review round.
+            fm.dendrite_review_done = all.slice(-1000);
+        });
+    }
+
     /** Every old version kept in a stack, with its whole text. */
     async oldVersionCards() {
         const bodies = await this.loadBodies();
@@ -3966,6 +4012,7 @@ class DendriteView extends ItemView {
     async reviewModal(name, items, inbox = null) {
         const cards = await this.reviewCards();
         const old = await this.oldVersionCards();
+        const doneKeys = new Set(this.reviewDone());
         const bodies = new Map();
         const body = async (id) => {
             if (!bodies.has(id)) {
@@ -4000,7 +4047,11 @@ class DendriteView extends ItemView {
                 }
                 dup = review.alreadyIn(texts.join('\n\n'), item);
             }
-            rows.push({ item, at, dup, use: !!at && !dup });
+            // Resolved, applied or dismissed here before, which a doc
+            // still holding it open would otherwise bring back.
+            const done = !dup && review.reviewKeys(item)
+                .some((k) => doneKeys.has(k));
+            rows.push({ item, at, dup, done, use: !!at && !dup && !done });
         }
         const modal = new ReviewImportModal(this, name, rows, inbox);
         modal.open();
@@ -4056,7 +4107,8 @@ class DendriteView extends ItemView {
                 at.how === 'old' ?
                     `On “${item.quote}”, in an earlier version: ` : '';
             if (item.kind === 'comment') {
-                add = { kind: 'review', text: quoted + item.text };
+                add = { kind: 'review', text: quoted + item.text +
+                        (item.link ? ` ${item.link}` : '') };
             } else if (at.how === 'exact') {
                 add = { kind: 'suggest', text: item.insert,
                         quote: item.quote };
@@ -4125,13 +4177,17 @@ class DendriteView extends ItemView {
                 await this.fanReady;
             }
         };
+        const item = review.reviewItems(body)[n];
         if (what === 'apply') {
             const after = review.removeItem(body, n, true);
-            new SuggestModal(this, id, body, after,
-                             () => write(after)).open();
+            new SuggestModal(this, id, body, after, async () => {
+                await write(after);
+                if (item) await this.rememberDone(item);
+            }).open();
             return;
         }
         await write(review.removeItem(body, n));
+        if (item) await this.rememberDone(item);
     }
 
     async setStatus(id, status) {
@@ -6237,10 +6293,12 @@ class ReviewImportModal extends Modal {
         this.titleEl.setText(`Review comments in ${this.name}`);
         const found = rows.filter((x) => x.at).length;
         const dups = rows.filter((x) => x.dup).length;
+        const done = rows.filter((x) => x.done).length;
         contentEl.createEl('p', { text: `${rows.length} comment` +
             `${rows.length === 1 ? '' : 's'} and suggested change` +
             `${rows.length === 1 ? '' : 's'}; ${found} found in the cards` +
-            (dups ? `, ${dups} already in the cards` : '') + '. ' +
+            (dups ? `, ${dups} already in the cards` : '') +
+            (done ? `, ${done} resolved here before` : '') + '. ' +
             'Each goes after its passage in the card, which is set to ' +
             'revise. A change still made on the text as it was sent can ' +
             'be applied from its card later; one whose passage has ' +
@@ -6276,7 +6334,19 @@ class ReviewImportModal extends Modal {
                     it.quote ? `Replace with “${it.insert.trim()}”` :
                     `Add “${it.insert.trim()}”` });
             const where = main.createDiv({ cls: 'dendrite-review-where' });
-            if (row.dup) {
+            if (it.link) {
+                const a = main.createEl('a', { cls: 'dendrite-review-open',
+                                               text: 'Open in Google Docs' });
+                a.href = it.link;
+                a.onclick = (e) => {
+                    e.preventDefault();
+                    openExternal(it.link);
+                };
+            }
+            if (row.done) {
+                where.addClass('is-missing');
+                where.setText('Resolved here before: left unticked.');
+            } else if (row.dup) {
                 where.addClass('is-missing');
                 where.setText(`Already in the card, ` +
                     `${core.shortId(row.at.id)}: left unticked.`);

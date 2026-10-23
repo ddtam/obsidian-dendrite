@@ -1412,30 +1412,44 @@ button.dendrite-review-btn:hover {
     color: var(--text-accent);
 }
 
-/* A card with old versions: the top edges of one or two cards behind
-   it, offset up and right in the gap above it, in the border's colour.
-   Drawn only outside the card, so a faded card does not show them
-   through itself. */
+/* A card with old versions, as a rolodex: the top of a card behind it,
+   centred and narrower, and of a third behind that for two or more,
+   shaded and outlined so they read against the column. They stop short
+   of the card, so the selected card's outline stays clear, and the card
+   is moved down by as much, so they do not reach the card above. Chosen
+   by Derek from rendered variants on 2026-10-23. */
+.dendrite-card.has-stack {
+    --dendrite-stack-lift-1: 10px;
+    --dendrite-stack-width-1: 92%;
+    --dendrite-stack-lift-2: 8px;
+    --dendrite-stack-width-2: 80%;
+    margin-top: var(--dendrite-stack-lift-1);
+}
+.dendrite-card.has-stacks {
+    margin-top: calc(var(--dendrite-stack-lift-1) +
+                     var(--dendrite-stack-lift-2));
+}
 .dendrite-card.has-stack::before,
 .dendrite-card.has-stacks::after {
     content: '';
     position: absolute;
-    left: 6px;
-    right: -4px;
-    top: -5px;
-    height: 5px;
+    left: calc((100% - var(--dendrite-stack-width-1)) / 2);
+    width: var(--dendrite-stack-width-1);
+    top: calc(-1 * var(--dendrite-stack-lift-1));
+    height: calc(var(--dendrite-stack-lift-1) - 2px);
     box-sizing: border-box;
-    border: 1px solid var(--background-modifier-border);
+    border: 1px solid var(--background-modifier-border-hover);
     border-bottom: none;
     border-radius: 6px 6px 0 0;
-    background: var(--background-primary);
+    background: var(--background-secondary);
     pointer-events: none;
 }
 .dendrite-card.has-stacks::after {
-    left: 12px;
-    right: -8px;
-    top: -9px;
-    height: 4px;
+    left: calc((100% - var(--dendrite-stack-width-2)) / 2);
+    width: var(--dendrite-stack-width-2);
+    top: calc(-1 * (var(--dendrite-stack-lift-1) +
+                    var(--dendrite-stack-lift-2)));
+    height: var(--dendrite-stack-lift-2);
 }
 
 /* Manuscript settings: tabs down the left, one section at a time, Save

@@ -2852,17 +2852,46 @@ var require_review = __commonJS({
       const t = String(s || "").replace(/%%/g, "%").replace(/\s*\n\s*/g, " ");
       return edges ? t : t.trim();
     };
+    var LINK = /\s+(https:\/\/docs\.google\.com\/\S+)$/;
+    function noteLink(text) {
+      const m = LINK.exec(String(text || ""));
+      return m ? { text: text.slice(0, m.index), url: m[1] } : { text: String(text || ""), url: "" };
+    }
+    var flat = (t) => clean(t).replace(/\s+/g, " ");
+    function reviewKeys(it) {
+      const author = clean(it.author) || "Reviewer";
+      const keys = [];
+      const hash = (s) => docx.crc32(Buffer.from(s, "utf8")).toString(16);
+      if (it.kind === "change" || it.kind === "suggest") {
+        const out = it.kind === "change" ? it.quote : it.passage;
+        const put = it.kind === "change" ? it.insert : it.text;
+        keys.push("s:" + hash(`${author}\0${flat(out)}\0${flat(put)}`));
+        return keys;
+      }
+      const { text, url } = noteLink(it.text);
+      const gid = it.gid || (/[?&]disco=([\w-]+)/.exec(url || it.link || "") || [])[1];
+      if (gid) keys.push(`g:${gid}`);
+      const bare = flat(text).replace(
+        /^On “[^”]*”(?:, in an earlier version)?: /,
+        ""
+      );
+      keys.push("c:" + hash(`${author}\0${bare}`));
+      return keys;
+    }
     function alreadyIn(md, item) {
       const author = clean(item.author) || "Reviewer";
+      const keys = reviewKeys(item);
       return reviewItems(md).some((x) => {
+        if (item.gid && reviewKeys(x).includes(`g:${item.gid}`)) {
+          return true;
+        }
         if (x.author !== author) return false;
         if (item.kind === "change") {
           return x.kind === "suggest" && x.text === clean(item.insert, true);
         }
-        const flat = (t) => clean(t).replace(/\s+/g, " ");
         const text = flat(item.text);
-        const had = flat(x.text);
-        return had === text || had.endsWith(`: ${text}`);
+        const had = flat(noteLink(x.text).text);
+        return had === text || had.endsWith(`: ${text}`) || reviewKeys(x).some((k) => keys.includes(k));
       });
     }
     function itemText(kind, passage, author, date, text) {
@@ -2980,7 +3009,17 @@ var require_review = __commonJS({
           meta.append(who, ` \xB7 ${shortDate(it.date)}`);
           const text = doc.createElement("div");
           text.className = "dendrite-review-text";
-          text.textContent = it.kind !== "suggest" ? it.text : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
+          const { text: said, url } = noteLink(it.text);
+          if (url && it.kind !== "suggest") {
+            const a = doc.createElement("a");
+            a.className = "dendrite-review-link";
+            a.href = url;
+            a.textContent = "\u2197";
+            a.title = "Open this comment in Google Docs";
+            a.addEventListener("click", (e) => e.stopPropagation());
+            meta.append(" ", a);
+          }
+          text.textContent = it.kind !== "suggest" ? said : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
           main.append(meta, text);
           note.append(n, main);
           const buttons = it.kind === "suggest" ? [["apply", "Apply\u2026"], ["dismiss", "Dismiss"]] : [["resolve", "Resolve"]];
@@ -3010,6 +3049,8 @@ var require_review = __commonJS({
       locate,
       reviewItems,
       alreadyIn,
+      noteLink,
+      reviewKeys,
       itemText,
       addItems,
       removeItem,
@@ -3411,7 +3452,7 @@ function onApi() {
       }
       return out;
     }
-    function commentItems(comments) {
+    function commentItems(comments, docId = "") {
       const out = [];
       for (const c of comments || []) {
         if (c.resolved || c.deleted) continue;
@@ -3423,7 +3464,8 @@ function onApi() {
           text: (c.content || "") + replies.join(""),
           quote: unescapeHtml(c.quotedFileContent && c.quotedFileContent.value),
           before: "",
-          after: ""
+          after: "",
+          ...c.id ? { gid: c.id, link: docId ? `${docUrl(docId)}?disco=${c.id}` : "" } : {}
         });
       }
       return out;
@@ -3467,7 +3509,7 @@ function onApi() {
       const meta = await getJson(request, `${DRIVE}${docId}?fields=name,mimeType`, token);
       const comments = await driveComments(request, docId, token);
       const resolved = comments.filter((c) => c.resolved).length;
-      const drive = commentItems(comments);
+      const drive = commentItems(comments, docId);
       if (meta.mimeType === GDOC) {
         const doc = await getJson(request, `${DOCS}${docId}?suggestionsViewMode=SUGGESTIONS_INLINE`, token);
         return {
@@ -3497,12 +3539,14 @@ function onApi() {
         zlib
       );
       const flat = (t) => String(t || "").replace(/\s+/g, " ").trim();
-      const inWord = new Set(word.filter((w) => w.kind === "comment").map((w) => `${w.author}\0${flat(w.text)}`));
-      return {
-        title: meta.name || "",
-        resolved,
-        items: [...word, ...drive.filter((c) => !inWord.has(`${c.author}\0${flat(c.text)}`))]
-      };
+      const inWord = new Map(word.filter((w) => w.kind === "comment").map((w) => [`${w.author}\0${flat(w.text)}`, w]));
+      const extra = [];
+      for (const c of drive) {
+        const w = inWord.get(`${c.author}\0${flat(c.text)}`);
+        if (w) Object.assign(w, { gid: c.gid, link: c.link });
+        else extra.push(c);
+      }
+      return { title: meta.name || "", resolved, items: [...word, ...extra] };
     }
     module2.exports = {
       SCOPE,
@@ -4691,16 +4735,7 @@ var DendriteView = class extends ItemView {
     svg.style.height = this.board.clientHeight + "px";
     const box = this.board.getBoundingClientRect();
     const sx = this.board.scrollLeft;
-    const rel = (el) => {
-      const r = el.getBoundingClientRect();
-      return {
-        left: r.left - box.left + sx,
-        right: r.right - box.left + sx,
-        top: r.top - box.top,
-        bottom: r.bottom - box.top,
-        r: parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0
-      };
-    };
+    const rel = (el) => this.flowBox(el, box, sx);
     const pairs = [];
     const steps = [];
     for (let n = node; n && n.id; n = this.upOf(n)) {
@@ -4729,6 +4764,23 @@ var DendriteView = class extends ItemView {
     };
     draw("dendrite-flow-context", core.flowPath(pairs));
     draw("dendrite-flow-thread", core.threadPath(steps));
+  }
+  /**
+   * An element's box for the flow, in the board's content coordinates
+   * (`box` the board's rect, `sx` its scroll). A card with old versions
+   * starts at the top of its stack, the room above it its margin holds.
+   */
+  flowBox(el, box, sx) {
+    const r = el.getBoundingClientRect();
+    const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+    const lift = el.classList.contains("has-stack") ? parseFloat(cs.marginTop) || 0 : 0;
+    return {
+      left: r.left - box.left + sx,
+      right: r.right - box.left + sx,
+      top: r.top - box.top - lift,
+      bottom: r.bottom - box.top,
+      r: parseFloat(cs.borderTopLeftRadius) || 0
+    };
   }
   /**
    * Centre the active card, horizontally and vertically, and in every
@@ -5103,51 +5155,21 @@ var DendriteView = class extends ItemView {
   cardMenu(anchor, event) {
     const { Menu } = require("obsidian");
     const m = new Menu();
-    const item = (title, icon, fn) => m.addItem((i) => i.setTitle(title).setIcon(icon).onClick(fn));
-    item(
-      "New card above (Ctrl+\u2191)",
-      "arrow-up-to-line",
-      () => this.insert("above")
-    );
-    item("Move up (Alt+\u2191)", "arrow-up", () => this.structural("up"));
-    item(
-      "Move down (Alt+\u2193)",
-      "arrow-down",
-      () => this.structural("down")
-    );
-    item("Indent (Alt+\u2192)", "indent", () => this.structural("indent"));
-    item("Outdent (Alt+\u2190)", "outdent", () => this.structural("outdent"));
-    m.addSeparator();
-    item(
-      "Card properties\u2026",
-      "sliders-horizontal",
-      () => new CardModal(this, this.active).open()
-    );
-    item("Copy reference", "link", () => this.copyRef(this.active));
-    {
-      const node = this.byId.get(this.active);
-      const sid = this.active;
-      item(
-        "New version of this card",
-        "layers",
-        () => this.promote(sid)
-      );
-      if (node && node.parent && node.parent.id) {
-        const up = node.parent.id;
-        item(
-          "Replace the parent card with this one",
-          "layers",
-          () => this.promote(up, sid)
-        );
-      }
-      if (this.stackOf(sid).length) {
-        item("Versions\u2026", "layers", () => this.openStack(sid));
-      }
-    }
     const id = this.active;
+    const node = this.byId.get(id);
+    const submenu = (title, icon) => {
+      let sub = null;
+      m.addItem((i) => {
+        i.setTitle(title).setIcon(icon);
+        if (typeof i.setSubmenu === "function") sub = i.setSubmenu();
+      });
+      const lead = sub ? "" : `${title}: `;
+      const into = sub || m;
+      return { into, item: (t, ic, fn) => into.addItem((i) => i.setTitle(typeof t === "string" ? lead + t : t).setIcon(ic).onClick(fn)) };
+    };
+    const item = (title, icon, fn) => m.addItem((i) => i.setTitle(title).setIcon(icon).onClick(fn));
     const info = this.statusInfo && this.statusInfo.get(id);
     if (info && info.prints) {
-      m.addSeparator();
       for (const [value, title, icon, key] of STATUS_ITEMS) {
         m.addItem((i) => {
           i.setTitle(this.menuLabel(title, `Ctrl+${key}`)).setIcon(icon).onClick(() => this.markStatus(id, value));
@@ -5157,15 +5179,15 @@ var DendriteView = class extends ItemView {
           }
         });
       }
-    } else if (info && info.own === "unsplit") {
       m.addSeparator();
+    } else if (info && info.own === "unsplit") {
       item(
         "Keep the leftover text as notes",
         "check",
         () => this.markStatus(id, null)
       );
-    } else if (info && info.derived) {
       m.addSeparator();
+    } else if (info && info.derived) {
       for (const [value, title, icon] of STATUS_ITEMS) {
         m.addItem((i) => {
           i.setTitle(title.replace("Status", "Cards below")).setIcon(icon).onClick(() => this.setBranch(id, "status", value));
@@ -5174,40 +5196,91 @@ var DendriteView = class extends ItemView {
           }
         });
       }
+      m.addSeparator();
     }
+    this.addRoleItems(submenu("Prints as", "printer").into, id);
+    const versions = submenu("Versions", "history");
+    versions.item(
+      "New version of this card",
+      "file-plus-2",
+      () => this.promote(id)
+    );
+    if (node && node.parent && node.parent.id) {
+      const up = node.parent.id;
+      versions.item(
+        "Replace the parent card with this one",
+        "replace",
+        () => this.promote(up, id)
+      );
+    }
+    if (this.stackOf(id).length) {
+      versions.item(
+        this.fannedId === id ? "Hide old versions" : "Show old versions",
+        "panel-right-open",
+        () => this.toggleFan(id)
+      );
+      versions.item(
+        "Make an old version current, or delete one\u2026",
+        "list-ordered",
+        () => this.openStack(id)
+      );
+    }
+    const structure = submenu("Structure", "move");
+    structure.item(
+      "New card above (Ctrl+\u2191)",
+      "arrow-up-to-line",
+      () => this.insert("above")
+    );
+    structure.item(
+      "Move up (Alt+\u2191)",
+      "arrow-up",
+      () => this.structural("up")
+    );
+    structure.item(
+      "Move down (Alt+\u2193)",
+      "arrow-down",
+      () => this.structural("down")
+    );
+    structure.item(
+      "Indent (Alt+\u2192)",
+      "indent",
+      () => this.structural("indent")
+    );
+    structure.item(
+      "Outdent (Alt+\u2190)",
+      "outdent",
+      () => this.structural("outdent")
+    );
+    structure.into.addSeparator();
+    structure.item(
+      "Merge into the card above",
+      "merge",
+      () => this.merge("above")
+    );
+    structure.item(
+      "Merge into the parent card",
+      "arrow-left-to-line",
+      () => this.merge("parent")
+    );
     m.addSeparator();
-    this.addRoleItems(m, id);
-    m.addSeparator();
-    const branch = this.byId.get(this.active);
-    let sub = null;
-    m.addItem((i) => {
-      i.setTitle("Export this branch").setIcon("file-output");
-      if (typeof i.setSubmenu === "function") sub = i.setSubmenu();
-    });
-    const into = sub || m;
-    const lead = sub ? "" : "Export this branch to ";
+    const exp = submenu("Export this branch", "file-output");
     const formats = [["Markdown", "md"]];
     if (Platform.isDesktopApp) {
       formats.push(["PDF", "pdf"], ["Word", "docx"]);
     }
     for (const [title, fmt] of formats) {
-      into.addItem((i) => i.setTitle(lead + title).setIcon("file-output").onClick(() => this.exportTo(branch, fmt)));
+      exp.item(title, "file-output", () => this.exportTo(node, fmt));
     }
+    item(
+      "Card properties\u2026",
+      "sliders-horizontal",
+      () => new CardModal(this, id).open()
+    );
+    item("Copy reference", "link", () => this.copyRef(id));
     item("Open card note", "file", () => {
-      const f = this.cardFile(this.active);
+      const f = this.cardFile(id);
       if (f) this.plugin.openAsMarkdown(f);
     });
-    m.addSeparator();
-    item(
-      "Merge into the card above",
-      "merge",
-      () => this.merge("above")
-    );
-    item(
-      "Merge into the parent card",
-      "arrow-left-to-line",
-      () => this.merge("parent")
-    );
     m.addSeparator();
     item(
       "Delete card and its children (Ctrl+Backspace)",
@@ -7336,6 +7409,25 @@ var DendriteView = class extends ItemView {
       r.items
     );
   }
+  /**
+   * Keys of the review comments and changes resolved, applied or
+   * dismissed in this manuscript, kept on its index.
+   */
+  reviewDone() {
+    const fm = this.file && this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+    const d = fm && fm.dendrite_review_done;
+    return Array.isArray(d) ? d.map(String) : [];
+  }
+  /** Remember a comment or change as dealt with, by its keys. */
+  async rememberDone(item) {
+    if (!this.file) return;
+    const keys = review.reviewKeys(item);
+    await this.app.fileManager.processFrontMatter(this.file, (fm) => {
+      const had = Array.isArray(fm.dendrite_review_done) ? fm.dendrite_review_done.map(String) : [];
+      const all = [...had.filter((k) => !keys.includes(k)), ...keys];
+      fm.dendrite_review_done = all.slice(-1e3);
+    });
+  }
   /** Every old version kept in a stack, with its whole text. */
   async oldVersionCards() {
     const bodies = await this.loadBodies();
@@ -7422,6 +7514,7 @@ var DendriteView = class extends ItemView {
   async reviewModal(name, items, inbox = null) {
     const cards = await this.reviewCards();
     const old = await this.oldVersionCards();
+    const doneKeys = new Set(this.reviewDone());
     const bodies = /* @__PURE__ */ new Map();
     const body = async (id) => {
       if (!bodies.has(id)) {
@@ -7453,7 +7546,8 @@ var DendriteView = class extends ItemView {
         }
         dup = review.alreadyIn(texts.join("\n\n"), item);
       }
-      rows.push({ item, at, dup, use: !!at && !dup });
+      const done = !dup && review.reviewKeys(item).some((k) => doneKeys.has(k));
+      rows.push({ item, at, dup, done, use: !!at && !dup && !done });
     }
     const modal = new ReviewImportModal(this, name, rows, inbox);
     modal.open();
@@ -7506,7 +7600,7 @@ var DendriteView = class extends ItemView {
       }
       const quoted = !item.quote ? "" : at.how === "none" ? `On \u201C${item.quote}\u201D: ` : at.how === "old" ? `On \u201C${item.quote}\u201D, in an earlier version: ` : "";
       if (item.kind === "comment") {
-        add = { kind: "review", text: quoted + item.text };
+        add = { kind: "review", text: quoted + item.text + (item.link ? ` ${item.link}` : "") };
       } else if (at.how === "exact") {
         add = {
           kind: "suggest",
@@ -7586,18 +7680,17 @@ var DendriteView = class extends ItemView {
         await this.fanReady;
       }
     };
+    const item = review.reviewItems(body)[n];
     if (what === "apply") {
       const after = review.removeItem(body, n, true);
-      new SuggestModal(
-        this,
-        id,
-        body,
-        after,
-        () => write(after)
-      ).open();
+      new SuggestModal(this, id, body, after, async () => {
+        await write(after);
+        if (item) await this.rememberDone(item);
+      }).open();
       return;
     }
     await write(review.removeItem(body, n));
+    if (item) await this.rememberDone(item);
   }
   async setStatus(id, status) {
     const f = this.cardFile(id);
@@ -9559,7 +9652,8 @@ var ReviewImportModal = class extends Modal {
     this.titleEl.setText(`Review comments in ${this.name}`);
     const found = rows.filter((x) => x.at).length;
     const dups = rows.filter((x) => x.dup).length;
-    contentEl.createEl("p", { text: `${rows.length} comment${rows.length === 1 ? "" : "s"} and suggested change${rows.length === 1 ? "" : "s"}; ${found} found in the cards` + (dups ? `, ${dups} already in the cards` : "") + ". Each goes after its passage in the card, which is set to revise. A change still made on the text as it was sent can be applied from its card later; one whose passage has changed since comes in as a comment. Nothing is written until you add them, and Ctrl+Z on the board undoes it." });
+    const done = rows.filter((x) => x.done).length;
+    contentEl.createEl("p", { text: `${rows.length} comment${rows.length === 1 ? "" : "s"} and suggested change${rows.length === 1 ? "" : "s"}; ${found} found in the cards` + (dups ? `, ${dups} already in the cards` : "") + (done ? `, ${done} resolved here before` : "") + ". Each goes after its passage in the card, which is set to revise. A change still made on the text as it was sent can be applied from its card later; one whose passage has changed since comes in as a comment. Nothing is written until you add them, and Ctrl+Z on the board undoes it." });
     const list = contentEl.createDiv({ cls: "dendrite-review-rows" });
     const active = view.active && view.byId.get(view.active);
     const count = () => rows.filter((x) => x.use).length;
@@ -9589,7 +9683,21 @@ var ReviewImportModal = class extends Modal {
         text: it.kind === "comment" ? it.text : !it.insert ? "Delete this." : it.quote ? `Replace with \u201C${it.insert.trim()}\u201D` : `Add \u201C${it.insert.trim()}\u201D`
       });
       const where = main.createDiv({ cls: "dendrite-review-where" });
-      if (row.dup) {
+      if (it.link) {
+        const a = main.createEl("a", {
+          cls: "dendrite-review-open",
+          text: "Open in Google Docs"
+        });
+        a.href = it.link;
+        a.onclick = (e) => {
+          e.preventDefault();
+          openExternal(it.link);
+        };
+      }
+      if (row.done) {
+        where.addClass("is-missing");
+        where.setText("Resolved here before: left unticked.");
+      } else if (row.dup) {
         where.addClass("is-missing");
         where.setText(`Already in the card, ${core.shortId(row.at.id)}: left unticked.`);
       } else if (row.at && row.at.how === "old") {

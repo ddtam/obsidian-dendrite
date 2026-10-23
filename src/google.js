@@ -395,10 +395,11 @@ function suggestionItems(doc, date = '') {
 
 /**
  * Open comments from the Drive API as review items: the comment, then
- * its replies, on the passage it was left on. Resolved and deleted ones
- * are left out.
+ * its replies, on the passage it was left on, with its id and a link to
+ * its thread in the doc `docId`. Resolved and deleted ones are left
+ * out.
  */
-function commentItems(comments) {
+function commentItems(comments, docId = '') {
     const out = [];
     for (const c of comments || []) {
         if (c.resolved || c.deleted) continue;
@@ -412,7 +413,9 @@ function commentItems(comments) {
                    text: (c.content || '') + replies.join(''),
                    quote: unescapeHtml(c.quotedFileContent &&
                                        c.quotedFileContent.value),
-                   before: '', after: '' });
+                   before: '', after: '',
+                   ...(c.id ? { gid: c.id, link: docId ?
+                       `${docUrl(docId)}?disco=${c.id}` : '' } : {}) });
     }
     return out;
 }
@@ -469,7 +472,7 @@ async function fetchReview({ docId, token, request, zlib,
         'fields=name,mimeType', token);
     const comments = await driveComments(request, docId, token);
     const resolved = comments.filter((c) => c.resolved).length;
-    const drive = commentItems(comments);
+    const drive = commentItems(comments, docId);
     if (meta.mimeType === GDOC) {
         const doc = await getJson(request, `${DOCS}${docId}?` +
             'suggestionsViewMode=SUGGESTIONS_INLINE', token);
@@ -491,11 +494,17 @@ async function fetchReview({ docId, token, request, zlib,
     const word = require('./review.js').readReview(
         Buffer.from(res.buffer), zlib);
     const flat = (t) => String(t || '').replace(/\s+/g, ' ').trim();
-    const inWord = new Set(word.filter((w) => w.kind === 'comment')
-        .map((w) => `${w.author}\u0000${flat(w.text)}`));
-    return { title: meta.name || '', resolved,
-             items: [...word, ...drive.filter((c) =>
-                 !inWord.has(`${c.author}\u0000${flat(c.text)}`))] };
+    // A comment both in the file and in Drive is the file's, with the
+    // Drive comment's id and link.
+    const inWord = new Map(word.filter((w) => w.kind === 'comment')
+        .map((w) => [`${w.author}\u0000${flat(w.text)}`, w]));
+    const extra = [];
+    for (const c of drive) {
+        const w = inWord.get(`${c.author}\u0000${flat(c.text)}`);
+        if (w) Object.assign(w, { gid: c.gid, link: c.link });
+        else extra.push(c);
+    }
+    return { title: meta.name || '', resolved, items: [...word, ...extra] };
 }
 
 module.exports = { SCOPE, PICKER_PORT, pickerOrigin, readClient,

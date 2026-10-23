@@ -171,16 +171,19 @@ test('suggested changes come out with what they take out and put in, ' +
 test('open comments come out with their replies and passage; resolved ' +
      'and deleted ones do not', () => {
     const items = g.commentItems([
-        { content: 'How many?', createdTime: '2026-10-24T09:00:00Z',
+        { id: 'AAA1', content: 'How many?',
+          createdTime: '2026-10-24T09:00:00Z',
           author: { displayName: 'Aly Karsan' },
           quotedFileContent: { value: 'patients&#39; marrow &amp; blood' },
           replies: [{ content: 'Will add.', author: { displayName: 'Derek' } },
                     { content: 'gone', deleted: true }] },
         { content: 'Done', resolved: true },
-        { content: 'Removed', deleted: true }]);
+        { content: 'Removed', deleted: true }], 'D1');
     assert.deepEqual(items, [{ kind: 'comment', author: 'Aly Karsan',
         date: '2026-10-24', text: 'How many? Reply from Derek: Will add.',
-        quote: 'patients\' marrow & blood', before: '', after: '' }]);
+        quote: 'patients\' marrow & blood', before: '', after: '',
+        gid: 'AAA1', link: 'https://docs.google.com/document/d/D1/edit' +
+            '?disco=AAA1' }]);
 });
 
 test('a doc\'s review is its comments, every page, then its suggested ' +
@@ -273,7 +276,8 @@ test('a Word file in Drive is downloaded and read as a returned Word ' +
                 file.byteOffset, file.byteOffset + file.byteLength) };
         }
         return { status: 200, json: { comments: [
-            { content: 'How many?', author: { displayName: 'Aly Karsan' },
+            { id: 'W1', content: 'How many?',
+              author: { displayName: 'Aly Karsan' },
               quotedFileContent: { value: 'paired' } },
             { content: 'Only in Drive.', author: { displayName: 'R' },
               quotedFileContent: { value: 'cohort' } }] } };
@@ -288,6 +292,9 @@ test('a Word file in Drive is downloaded and read as a returned Word ' +
                      [['comment', 'Aly Karsan', 'How many?'],
                       ['change', 'Aly Karsan', 'large'],
                       ['comment', 'R', 'Only in Drive.']]);
+    assert.equal(r.items[0].gid, 'W1',
+                 'the file\'s comment takes the Drive comment\'s link');
+    assert.match(r.items[0].link, /disco=W1$/);
     const pdf = async ({ url }) => (/\?fields=name/.test(url) ?
         { status: 200, json: { name: 'x.pdf',
                                mimeType: 'application/pdf' } } :

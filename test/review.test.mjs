@@ -348,3 +348,37 @@ test('a comment or change already in its card is known as one', () => {
     assert.ok(r.alreadyIn('Text.%%[!review] Claude, 2026-10-23: On ' +
         '“gone”: Lost.%%', c('Lost.')), 'one added with its passage quoted');
 });
+
+test('a comment\'s Google Docs link rides at the end of its text, and a ' +
+     'comment is known by the same keys before and after it is written',
+     () => {
+    const url = 'https://docs.google.com/document/d/D1/edit?disco=AAA1';
+    assert.deepEqual(r.noteLink(`How many? ${url}`),
+                     { text: 'How many?', url });
+    assert.deepEqual(r.noteLink('No link.'), { text: 'No link.', url: '' });
+    const item = { kind: 'comment', author: 'Aly Karsan', text: 'How  many?',
+                   gid: 'AAA1', link: url, quote: 'paired' };
+    const md = r.addItems('The paired samples.', [{ kind: 'review',
+        start: 4, end: 10, author: 'Aly Karsan', date: '2026-10-24',
+        text: `How many? ${url}` }]);
+    const [note] = r.reviewItems(md);
+    const keys = r.reviewKeys(item);
+    assert.ok(keys.includes('g:AAA1'));
+    assert.ok(r.reviewKeys(note).some((k) => keys.includes(k)),
+              'the note on the card answers to the item');
+    assert.ok(r.alreadyIn(md, item), 'with its link, still the same');
+    // A comment placed with its passage quoted is the same comment.
+    const quoted = r.reviewItems('Text.%%[!review] Aly Karsan, ' +
+        '2026-10-24: On “gone”, in an earlier version: How many?%%')[0];
+    assert.ok(r.reviewKeys(quoted).some((k) =>
+        r.reviewKeys({ ...item, gid: '' }).includes(k)));
+    // A change, by what it takes out and puts in.
+    const change = { kind: 'change', author: 'A', quote: 'large',
+                     insert: 'big' };
+    const sug = r.reviewItems(r.addItems('was large.', [{ kind: 'suggest',
+        start: 4, end: 9, author: 'A', date: '2026-10-24', text: 'big',
+        quote: 'large' }]))[0];
+    assert.deepEqual(r.reviewKeys(sug), r.reviewKeys(change));
+    assert.notDeepEqual(r.reviewKeys({ ...change, insert: 'huge' }),
+                        r.reviewKeys(change));
+});

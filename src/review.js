@@ -577,6 +577,46 @@ const clean = (s, edges = false) => {
     return edges ? t : t.trim();
 };
 
+// A Google Docs link at the end of a comment's text, to its thread.
+const LINK = /\s+(https:\/\/docs\.google\.com\/\S+)$/;
+
+/** A comment's text and the Google Docs link it ends with, if any. */
+function noteLink(text) {
+    const m = LINK.exec(String(text || ''));
+    return m ? { text: text.slice(0, m.index), url: m[1] } :
+        { text: String(text || ''), url: '' };
+}
+
+const flat = (t) => clean(t).replace(/\s+/g, ' ');
+
+/**
+ * The keys a comment or change is known by, the same for an item being
+ * imported and for the note it became in a card: its Google comment id
+ * where it has one, and its reviewer with what it says. A comment's
+ * text is taken without its link, or the quoted passage a comment
+ * placed away from its passage begins with.
+ */
+function reviewKeys(it) {
+    const author = clean(it.author) || 'Reviewer';
+    const keys = [];
+    const hash = (s) => docx.crc32(Buffer.from(s, 'utf8')).toString(16);
+    if (it.kind === 'change' || it.kind === 'suggest') {
+        const out = it.kind === 'change' ? it.quote : it.passage;
+        const put = it.kind === 'change' ? it.insert : it.text;
+        keys.push('s:' + hash(`${author}\u0000${flat(out)}\u0000` +
+                              `${flat(put)}`));
+        return keys;
+    }
+    const { text, url } = noteLink(it.text);
+    const gid = it.gid || (/[?&]disco=([\w-]+)/.exec(url || it.link || '') ||
+                           [])[1];
+    if (gid) keys.push(`g:${gid}`);
+    const bare = flat(text).replace(/^On “[^”]*”(?:, in an earlier version)?: /,
+                                    '');
+    keys.push('c:' + hash(`${author}\u0000${bare}`));
+    return keys;
+}
+
 /**
  * Whether an imported item, a comment or change, is already in a card's
  * markdown `md`: one by the same reviewer saying the same, as it would
@@ -584,16 +624,20 @@ const clean = (s, edges = false) => {
  */
 function alreadyIn(md, item) {
     const author = clean(item.author) || 'Reviewer';
+    const keys = reviewKeys(item);
     return reviewItems(md).some((x) => {
+        if (item.gid && reviewKeys(x).includes(`g:${item.gid}`)) {
+            return true;
+        }
         if (x.author !== author) return false;
         if (item.kind === 'change') {
             return x.kind === 'suggest' &&
                 x.text === clean(item.insert, true);
         }
-        const flat = (t) => clean(t).replace(/\s+/g, ' ');
         const text = flat(item.text);
-        const had = flat(x.text);
-        return had === text || had.endsWith(`: ${text}`);
+        const had = flat(noteLink(x.text).text);
+        return had === text || had.endsWith(`: ${text}`) ||
+            reviewKeys(x).some((k) => keys.includes(k));
     });
 }
 
@@ -750,7 +794,17 @@ function decorate(root, items, act) {
             meta.append(who, ` · ${shortDate(it.date)}`);
             const text = doc.createElement('div');
             text.className = 'dendrite-review-text';
-            text.textContent = it.kind !== 'suggest' ? it.text :
+            const { text: said, url } = noteLink(it.text);
+            if (url && it.kind !== 'suggest') {
+                const a = doc.createElement('a');
+                a.className = 'dendrite-review-link';
+                a.href = url;
+                a.textContent = '↗';
+                a.title = 'Open this comment in Google Docs';
+                a.addEventListener('click', (e) => e.stopPropagation());
+                meta.append(' ', a);
+            }
+            text.textContent = it.kind !== 'suggest' ? said :
                 !it.text.trim() ? 'Suggests deleting this.' :
                 it.passage ? `Suggests: ${it.text.trim()}` :
                 `Suggests adding: ${it.text.trim()}`;
@@ -778,6 +832,7 @@ function decorate(root, items, act) {
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    plainMap, normalise, locate, reviewItems, alreadyIn,
+                   noteLink, reviewKeys,
                    itemText,
                    addItems, removeItem,
                    stripReview, canHighlight, renderMarkdown, decorate,

@@ -12,6 +12,18 @@ const { DendriteView } = require('../src/main.js');
 const core = require('../src/core.js');
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+// A menu's item by title, looked for in its submenus too.
+const menuItem = (menu, title) => {
+    for (const i of menu.items || []) {
+        if (i.title === title || (title instanceof RegExp &&
+                                  title.test(i.title))) return i;
+        const inner = i.submenu && menuItem(i.submenu, title);
+        if (inner) return inner;
+    }
+    return null;
+};
+const submenuOf = (menu, title) =>
+    menu.items.find((i) => i.title === title).submenu;
 const INDEX = 'W/Grant/Grant.md';
 
 async function open(indexText, cards = {}) {
@@ -643,17 +655,17 @@ test('right-click opens the card menu at the pointer, delete included',
     assert.ok(card.hasClass('is-active'), 'but the card is highlighted');
     const menu = h.obsidian.lastMenu;
     assert.equal(menu.shown, 'mouse');
-    // The roles are a section of their own, and sections are separated
-    // once.
-    const t = menu.titles;
+    // The roles lead their own submenu, and sections are separated once.
+    const t = submenuOf(menu, 'Prints as').titles;
     const first = t.findIndex((x) => /^Prints automatically/.test(x));
     const last = t.indexOf('Left out of the manuscript');
-    assert.ok(first > 0 && last > first);
-    assert.equal(t[first - 1], '---', 'a separator before the roles');
-    assert.equal(t[last + 1], '---', 'and after them');
+    assert.ok(first === 0 && last > first);
+    assert.equal(t[last + 1], '---', 'a separator after them');
     assert.ok(t.slice(first, last + 1).every((x) => x !== '---'));
-    assert.ok(!t.some((x, k) => x === '---' && t[k + 1] === '---'),
-              'no doubled separators');
+    for (const list of [t, menu.titles]) {
+        assert.ok(!list.some((x, k) => x === '---' && list[k + 1] === '---'),
+                  'no doubled separators');
+    }
     const del = menu.items.find((i) => /^Delete/.test(i.title));
     assert.ok(del, 'the menu offers delete');
     await del.click();
@@ -2109,7 +2121,7 @@ test('a card set to table prints numbered, a link to it prints its ' +
     view.active = 'G-ttttt';
     view.applyActive();
     view.cardMenu(view.cardEls.get('G-ttttt'));
-    const menu = h.obsidian.lastMenu;
+    const menu = submenuOf(h.obsidian.lastMenu, 'Prints as');
     const t = menu.titles;
     const text = t.indexOf('Text');
     assert.ok(text > 0, 'the kinds are offered');
@@ -2140,7 +2152,7 @@ test('a card set to table prints numbered, a link to it prints its ' +
     delete nav.clipboard;
     // Back to text: no number, and the link prints as before.
     view.cardMenu(view.cardEls.get('G-ttttt'));
-    await h.obsidian.lastMenu.items.find((i) => i.title === 'Text').click();
+    await menuItem(h.obsidian.lastMenu, 'Text').click();
     await tick(20);
     assert.doesNotMatch(read(cardPath('G-ttttt')), /dendrite_kind/);
     await view.exportTo(null);
@@ -2573,8 +2585,8 @@ test('a card replaced by its child goes into a stack under it: hidden, ' +
                  'before: both print');
     await view.select('G-ccccc');
     view.cardMenu(view.cardEls.get('G-ccccc'), null);
-    const replace = h.obsidian.lastMenu.items.find((i) =>
-        i.title === 'Replace the parent card with this one');
+    const replace = menuItem(h.obsidian.lastMenu,
+                             'Replace the parent card with this one');
     assert.ok(replace, 'offered on a child card');
     await replace.click();
     await tick();
@@ -2634,8 +2646,7 @@ test('a new version of a card starts empty in its place, with the old one ' +
         'G-aaaaa': '# Aims\nOld.', 'G-ccccc': 'Child.', 'G-bbbbb': 'B.' });
     await view.select('G-aaaaa');
     view.cardMenu(view.cardEls.get('G-aaaaa'), null);
-    await h.obsidian.lastMenu.items.find((i) =>
-        i.title === 'New version of this card').click();
+    await menuItem(h.obsidian.lastMenu, 'New version of this card').click();
     await tick();
     const top = view.root.children[0];
     assert.notEqual(top.id, 'G-aaaaa');
@@ -2929,4 +2940,123 @@ test('the manuscript settings are in tabs, the header and footer as a ' +
         '.dendrite-ms-pane')].filter((p) =>
         !p.classList.contains('is-hidden')).map((p) => p.dataset.tab);
     assert.deepEqual(again, ['Header and footer']);
+});
+
+test('a pulled comment keeps its Google Docs link on the card, and one ' +
+     'resolved here comes unticked when pulled again', async () => {
+    const { view, read, text } = await open(
+        '---\ndendrite_prefix: G\ndendrite_gdoc: https://docs.google.com/' +
+        'document/d/D1/edit\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'The cohort is composed of paired samples.' });
+    const url = 'https://docs.google.com/document/d/D1/edit?disco=AAA1';
+    const pulled = () => ({ title: 'RAC', resolved: 0, items: [
+        { kind: 'comment', author: 'Aly Karsan', date: '2026-10-24',
+          text: 'How many?', quote: 'paired samples', before: '',
+          after: '', gid: 'AAA1', link: url }] });
+    view.plugin.gdocReview = async () => pulled();
+    const m = await view.pullGdoc();
+    assert.ok([...m.contentEl.querySelectorAll('a')].some((a) =>
+        a.textContent === 'Open in Google Docs' && a.href === url));
+    await m.contentEl.querySelector('.mod-cta').onclick();
+    assert.equal(text(cardPath('G-aaaaa')), 'The cohort is composed of ' +
+        `==paired samples==%%[!review] Aly Karsan, 2026-10-24: How many? ` +
+        `${url}%%.`);
+    view.invalidate('G-aaaaa');
+    await view.renderCard('G-aaaaa');
+    const note = view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-note');
+    assert.equal(note.querySelector('.dendrite-review-text').textContent,
+                 'How many?', 'the link is not shown as text');
+    assert.equal(note.querySelector('a.dendrite-review-link').href, url);
+    await view.reviewAction('G-aaaaa', 0, 'resolve');
+    assert.equal(text(cardPath('G-aaaaa')),
+                 'The cohort is composed of paired samples.');
+    assert.match(read(INDEX), /dendrite_review_done:[^]*g:AAA1/,
+                 'remembered on the index');
+    // Pulled again, the coauthor having edited the comment's text.
+    view.plugin.gdocReview = async () => {
+        const r = pulled();
+        r.items[0].text = 'How many samples?';
+        return r;
+    };
+    const again = await view.pullGdoc();
+    assert.equal(again.rows[0].done, true);
+    assert.equal(again.rows[0].use, false);
+    assert.match(again.contentEl.textContent, /Resolved here before/);
+    assert.match(again.contentEl.textContent, /1 resolved here before/);
+});
+
+test('the flow takes a card with old versions from the top of its stack',
+     async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'Text.' });
+    const card = view.cardEls.get('G-aaaaa');
+    // Styles are computed only for a card in a document, as on the board.
+    card.ownerDocument.body.appendChild(view.contentEl);
+    card.getBoundingClientRect = () => ({ left: 10, right: 210, top: 100,
+                                          bottom: 160 });
+    const box = { left: 0, top: 0 };
+    assert.equal(view.flowBox(card, box, 0).top, 100);
+    card.classList.add('has-stack');
+    card.style.marginTop = '18px';
+    assert.equal(view.flowBox(card, box, 0).top, 82, 'up by its stack');
+    assert.equal(view.flowBox(card, box, 0).bottom, 160);
+});
+
+test('the card menu: status first, then what it prints, its versions and ' +
+     'its place in the tree each in a submenu, export and the card\'s ' +
+     'note, and delete alone at the foot', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-ccccc|C]]\n', { 'G-aaaaa': '---\ndendrite_role: ' +
+        'prose\n---\nOld.', 'G-ccccc': 'New.' });
+    await view.promote('G-aaaaa', 'G-ccccc');
+    await view.select('G-ccccc');
+    view.cardMenu(view.cardEls.get('G-ccccc'), null);
+    const m = h.obsidian.lastMenu;
+    assert.deepEqual(m.titles.map((t) => t.replace(/Ctrl\+\d$/, '')
+        .trim()), ['Status: draft', 'Status: done', 'Status: revise',
+        '---', 'Prints as', 'Versions', 'Structure', '---',
+        'Export this branch', 'Card properties…', 'Copy reference',
+        'Open card note', '---',
+        'Delete card and its children (Ctrl+Backspace)']);
+    assert.deepEqual(submenuOf(m, 'Versions').titles, [
+        'New version of this card', 'Show old versions',
+        'Make an old version current, or delete one…']);
+    assert.deepEqual(submenuOf(m, 'Structure').titles, [
+        'New card above (Ctrl+↑)', 'Move up (Alt+↑)', 'Move down (Alt+↓)',
+        'Indent (Alt+→)', 'Outdent (Alt+←)', '---',
+        'Merge into the card above', 'Merge into the parent card']);
+    await menuItem(m, 'Show old versions').click();
+    assert.equal(view.fannedId, 'G-ccccc');
+    view.cardMenu(view.cardEls.get('G-ccccc'), null);
+    assert.ok(menuItem(h.obsidian.lastMenu, 'Hide old versions'));
+});
+
+test('replacing a card clears the old one\'s status and starts the new ' +
+     'one as draft, unless it already has one', async () => {
+    const { view, read } = await open(STACK_INDEX, {
+        'G-aaaaa': '---\ndendrite_role: prose\ndendrite_status: revise\n' +
+            '---\nOld.',
+        'G-ccccc': '---\ndendrite_status: done\n---\nNew.',
+        'G-bbbbb': '---\ndendrite_status: done\n---\nNext.' });
+    await view.promote('G-aaaaa', 'G-ccccc');
+    await tick(20);
+    assert.doesNotMatch(read(cardPath('G-aaaaa')), /dendrite_status/,
+                        'the old version prints nothing, so has none');
+    assert.match(read(cardPath('G-ccccc')), /dendrite_status: done/,
+                 'the replacement keeps its own');
+    await view.endEdit();
+    await view.promote('G-bbbbb');
+    await tick(20);
+    const fresh = view.root.children.find((n) =>
+        !['G-ccccc', 'G-bbbbb'].includes(n.id));
+    assert.match(read(cardPath(fresh.id)), /dendrite_status: draft/,
+                 'a new version starts as draft');
+    // Brought back from its stack, an old version starts as draft.
+    await view.endEdit();
+    await view.promote('G-ccccc', 'G-aaaaa');
+    await tick(20);
+    assert.match(read(cardPath('G-aaaaa')), /dendrite_status: draft/);
 });
