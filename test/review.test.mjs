@@ -243,3 +243,28 @@ test('only what a card prints is searched: a section its heading line, ' +
                          { id: 'head', text: '# Storage Details\n' }]);
     assert.equal(at.id, 'head');
 });
+
+test('a review file in JSON gives comments, each searched for only in ' +
+     'the card it names when it names one', () => {
+    const items = r.readReviewJson(JSON.stringify([
+        { card: 'bbbbb', quote: 'paired samples', text: 'How many?',
+          author: 'Claude', date: '2026-10-23' },
+        { quote: 'paired samples', text: 'Anywhere.' },
+        { card: 'G-aaaaa', quote: 'paired samples', text: 'Not here.' }]));
+    assert.deepEqual(items[0], { kind: 'comment', card: 'bbbbb',
+        quote: 'paired samples', before: '', after: '', text: 'How many?',
+        author: 'Claude', date: '2026-10-23' });
+    assert.equal(items[1].author, '');
+    assert.match(items[1].date, /^\d{4}-\d\d-\d\d$/, 'no date: today');
+    const cards = [{ id: 'G-aaaaa', text: 'Unrelated text here.' },
+                   { id: 'G-ccccc', text: 'The paired samples, again.' },
+                   { id: 'G-bbbbb', text: 'Longitudinally paired samples.' }];
+    assert.equal(r.locate(items[0], cards).id, 'G-bbbbb', 'short id');
+    assert.equal(r.locate(items[1], cards), null,
+                 'in two cards and naming neither: not placed');
+    assert.equal(r.locate(items[2], cards), null, 'not in the named card');
+    assert.deepEqual(r.readReviewJson('{"items": []}'), []);
+    assert.throws(() => r.readReviewJson('[{"quote": "x"}]'),
+                  /item 1 has no text/);
+    assert.throws(() => r.readReviewJson('{"a": 1}'), /a list of items/);
+});

@@ -237,6 +237,30 @@ function readReview(buf, zlib) {
     return items;
 }
 
+/**
+ * Review comments from a JSON file, a list or { items: [...] }, each
+ * { quote, text, author?, date?, card? }: `card` a card's id or its
+ * part after the prefix, to search only that card. With no date, today.
+ */
+function readReviewJson(text, today = new Date()) {
+    const data = JSON.parse(text);
+    const list = Array.isArray(data) ? data :
+        data && Array.isArray(data.items) ? data.items : null;
+    if (!list) throw new Error('not a list of items');
+    const str = (v) => (v == null ? '' : String(v));
+    return list.map((x, k) => {
+        if (!x || typeof x !== 'object' || !str(x.text).trim()) {
+            throw new Error(`item ${k + 1} has no text`);
+        }
+        const item = { kind: 'comment' };
+        if (x.card) item.card = str(x.card);
+        return Object.assign(item, { quote: str(x.quote),
+            before: str(x.before), after: str(x.after),
+            text: str(x.text), author: str(x.author),
+            date: str(x.date) || today.toISOString().slice(0, 10) });
+    });
+}
+
 // ---- The printed text of a card ----------------------------------------
 
 /**
@@ -435,6 +459,10 @@ const tail = (s, n) => s.slice(Math.max(0, s.length - n));
  * after the text before it.
  */
 function locate(item, cards) {
+    if (item.card) {
+        const k = item.card;
+        cards = cards.filter((c) => c.id === k || c.id.endsWith('-' + k));
+    }
     const prepared = cards.map((c) => {
         const plain = plainMap(c.text);
         const norm = normalise(plain.text);
@@ -728,7 +756,8 @@ function decorate(root, items, act) {
     }
 }
 
-module.exports = { readReview, readBody, readComments, plainMap, normalise,
-                   locate, reviewItems, itemText, addItems, removeItem,
+module.exports = { readReview, readReviewJson, readBody, readComments,
+                   plainMap, normalise, locate, reviewItems, itemText,
+                   addItems, removeItem,
                    stripReview, canHighlight, renderMarkdown, decorate,
                    shortDate };

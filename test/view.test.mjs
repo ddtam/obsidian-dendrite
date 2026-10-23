@@ -2362,3 +2362,29 @@ test('the print-only view shows the cards that print, each where it ' +
     assert.equal(view.cols.length, 3, 'every card again');
     assert.equal(view.cardEls.size, 7);
 });
+
+test('a JSON review list opens the same dialog, each comment found in the ' +
+     'card it names, and adding it is one undo step', async () => {
+    const A = 'The cohort is composed of paired samples.';
+    const B = 'Each patient gave paired samples.';
+    const { view, read, text } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': A, 'G-bbbbb': B });
+    const json = JSON.stringify([
+        { card: 'bbbbb', quote: 'paired samples', text: 'How many?',
+          author: 'Claude', date: '2026-10-23' },
+        { quote: 'paired samples', text: 'Which card?' }]);
+    const m = await view.reviewFrom('review.json', Buffer.from(json));
+    assert.match(m.contentEl.textContent, /2 comments .*; 1 found/);
+    assert.equal(m.rows[0].at.id, 'G-bbbbb');
+    assert.equal(m.rows[1].at, null, 'in two cards, naming neither');
+    await view.addReview(m.rows.filter((x) => x.use), null);
+    assert.equal(text(cardPath('G-bbbbb')), 'Each patient gave ' +
+        '==paired samples==%%[!review] Claude, 2026-10-23: How many?%%.');
+    assert.equal(text(cardPath('G-aaaaa')), A);
+    assert.match(read(cardPath('G-bbbbb')), /dendrite_status: revise/);
+    await view.doUndo();
+    assert.equal(text(cardPath('G-bbbbb')), B);
+    assert.equal(await view.reviewFrom('bad.json', Buffer.from('{')),
+                 null, 'unreadable: a notice, no dialog');
+});

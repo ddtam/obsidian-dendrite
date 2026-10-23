@@ -2552,6 +2552,27 @@ var require_review = __commonJS({
       items.sort((a, b) => a.at[0] - b.at[0] || a.at[1] - b.at[1]);
       return items;
     }
+    function readReviewJson(text, today = /* @__PURE__ */ new Date()) {
+      const data = JSON.parse(text);
+      const list = Array.isArray(data) ? data : data && Array.isArray(data.items) ? data.items : null;
+      if (!list) throw new Error("not a list of items");
+      const str = (v) => v == null ? "" : String(v);
+      return list.map((x, k) => {
+        if (!x || typeof x !== "object" || !str(x.text).trim()) {
+          throw new Error(`item ${k + 1} has no text`);
+        }
+        const item = { kind: "comment" };
+        if (x.card) item.card = str(x.card);
+        return Object.assign(item, {
+          quote: str(x.quote),
+          before: str(x.before),
+          after: str(x.after),
+          text: str(x.text),
+          author: str(x.author),
+          date: str(x.date) || today.toISOString().slice(0, 10)
+        });
+      });
+    }
     function plainMap(md) {
       let text = "";
       const map = [];
@@ -2725,6 +2746,10 @@ var require_review = __commonJS({
     }
     var tail = (s, n) => s.slice(Math.max(0, s.length - n));
     function locate(item, cards) {
+      if (item.card) {
+        const k = item.card;
+        cards = cards.filter((c) => c.id === k || c.id.endsWith("-" + k));
+      }
       const prepared = cards.map((c) => {
         const plain = plainMap(c.text);
         const norm = normalise(plain.text);
@@ -2958,6 +2983,7 @@ var require_review = __commonJS({
     }
     module2.exports = {
       readReview,
+      readReviewJson,
       readBody,
       readComments,
       plainMap,
@@ -6311,38 +6337,44 @@ var DendriteView = class extends ItemView {
     await this.markStatus(this.active, status);
   }
   /**
-   * Ask for a returned Word file, then show what it says and where in
-   * the cards, to choose which to add.
+   * Ask for a returned Word file, or a JSON list of review comments,
+   * then show what it says and where in the cards, to choose which to
+   * add.
    */
   importReview() {
     const input = this.pageDoc().createElement("input");
     input.type = "file";
-    input.accept = ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    input.accept = ".docx,.json,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/json";
     input.onchange = async () => {
       const file = input.files && input.files[0];
       if (!file) return;
-      let items;
-      try {
-        items = review.readReview(
-          require("buffer").Buffer.from(await file.arrayBuffer()),
-          require("zlib")
-        );
-      } catch (err) {
-        new Notice(`Dendrite: ${file.name} could not be read as a Word file (${err.message}).`);
-        return;
-      }
-      if (!items.length) {
-        new Notice(`Dendrite: ${file.name} has no comments or tracked changes.`);
-        return;
-      }
-      const cards = await this.reviewCards();
-      const rows = items.map((item) => {
-        const at = review.locate(item, cards);
-        return { item, at, use: !!at };
-      });
-      new ReviewImportModal(this, file.name, rows).open();
+      await this.reviewFrom(file.name, await file.arrayBuffer());
     };
     input.click();
+  }
+  /** Show the review in a file, `data` its bytes, to choose from. */
+  async reviewFrom(name, data) {
+    const buf = require("buffer").Buffer.from(data);
+    const json = /\.json$/i.test(name);
+    let items;
+    try {
+      items = json ? review.readReviewJson(buf.toString("utf8")) : review.readReview(buf, require("zlib"));
+    } catch (err) {
+      new Notice(`Dendrite: ${name} could not be read as ${json ? "a review list" : "a Word file"} (${err.message}).`);
+      return null;
+    }
+    if (!items.length) {
+      new Notice(`Dendrite: ${name} has no comments${json ? "" : " or tracked changes"}.`);
+      return null;
+    }
+    const cards = await this.reviewCards();
+    const rows = items.map((item) => {
+      const at = review.locate(item, cards);
+      return { item, at, use: !!at };
+    });
+    const modal = new ReviewImportModal(this, name, rows);
+    modal.open();
+    return modal;
   }
   /**
    * Every card's text, in reading order, for finding passages in: only
@@ -7322,7 +7354,7 @@ var DendriteView = class extends ItemView {
       m.addItem((i) => i.setTitle("Word").setIcon("file-output").onClick(() => this.exportTo(node, "docx")));
       if (!node) {
         m.addSeparator();
-        m.addItem((i) => i.setTitle("Import review from Word\u2026").setIcon("message-square").onClick(() => this.importReview()));
+        m.addItem((i) => i.setTitle("Import review\u2026").setIcon("message-square").onClick(() => this.importReview()));
       }
     }
     if (event) m.showAtMouseEvent(event);
@@ -8722,7 +8754,12 @@ module.exports = class DendritePlugin extends Plugin {
       (v) => v.nextFlagged(1, (i) => i.prints && i.own === "draft")
     );
     viewCommand("toggle-printed", "Show only the cards that print, or every card", false, (v) => v.togglePrintOnly());
-    viewCommand("import-review", "Import review comments from a returned Word file", false, (v) => v.importReview());
+    viewCommand(
+      "import-review",
+      "Import review comments from a returned Word file or a JSON list",
+      false,
+      (v) => v.importReview()
+    );
     viewCommand("add-types", "Add the type property to the index and every card", false, (v) => v.sweepTypes());
     viewCommand(
       "merge-into-above",

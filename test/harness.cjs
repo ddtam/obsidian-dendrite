@@ -52,6 +52,9 @@ function installHelpers(win) {
     P.hasClass = function (c) { return this.classList.contains(c); };
     P.toggleClass = function (c, on) { this.classList.toggle(c, !!on); };
     P.setText = function (t) { this.textContent = t; };
+    P.appendText = function (t) {
+        this.appendChild(this.ownerDocument.createTextNode(t));
+    };
     P.setAttr = function (k, v) { this.setAttribute(k, v); };
     P.getAttr = function (k) { return this.getAttribute(k); };
     P.scrollTo = function () {};
