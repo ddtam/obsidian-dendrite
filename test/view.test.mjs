@@ -1952,7 +1952,8 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                              b.getAttribute('aria-label')),
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
-                      'Undo', 'Redo', 'Preview', 'Printed', 'Export']);
+                      'Undo', 'Redo', 'Preview', 'Printed', 'Export',
+                      'Review']);
     // The mode comes after the buttons; the name is the pane's title.
     const kids = [...view.contentEl.querySelector('.dendrite-bar').children];
     assert.ok(kids.indexOf(view.modeEl) > kids.indexOf(bar[5]));
@@ -2699,8 +2700,12 @@ test('a manuscript linked to a Google Doc pulls its comments and ' +
     assert.equal(view.gdocUrl(),
                  'https://docs.google.com/document/d/DOC1/edit');
     view.exportMenu(null, { preventDefault() {} });
-    assert.ok(h.obsidian.lastMenu.items.some((i) =>
-        i.title === 'Pull review from Google Docs'));
+    assert.ok(!h.obsidian.lastMenu.items.some((i) =>
+        /review/i.test(i.title)), 'Export only exports');
+    view.reviewMenu({ preventDefault() {} });
+    assert.deepEqual(h.obsidian.lastMenu.items.map((i) => i.title), [
+        'Pull from Google Docs', 'Open the linked doc',
+        'Change the linked doc…', 'Import a Word or JSON file…']);
     const m = await view.pullGdoc();
     assert.equal(asked, view.gdocUrl());
     assert.match(m.titleEl.textContent, /RAC draft \(Google Docs\)/);
@@ -2852,4 +2857,76 @@ test('pasting the Google client in the settings unlocks signing in ' +
     assert.match(account.desc, /Not signed in/);
     named('Google OAuth client').controls[0]._onChange('');
     assert.equal(button.disabled, true, 'locked again when cleared');
+});
+
+test('the Review menu offers linking a doc when none is, and each review ' +
+     'waiting from a program', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'Text.' });
+    view.inbox = [{ id: 'r1', title: 'RAC review', received: '2026-10-24',
+                    items: [{ author: 'Claude' }, { author: 'Claude' }] }];
+    let opened = null;
+    view.openInbox = async (e) => { opened = e; };
+    view.reviewMenu({ preventDefault() {} });
+    const titles = h.obsidian.lastMenu.items.map((i) => i.title);
+    assert.deepEqual(titles, ['Link a Google Doc…',
+        'Import a Word or JSON file…', 'RAC review: 2 from Claude']);
+    await h.obsidian.lastMenu.items[2].click();
+    assert.equal(opened.id, 'r1');
+});
+
+test('the manuscript settings are in tabs, the header and footer as a ' +
+     'grid of their slots, and Save writes what changed in any tab',
+     async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\ndendrite_header_left: Aly Karsan\n---\n' +
+        '- [[G-aaaaa|A]]\n', { 'G-aaaaa': 'Text.' });
+    h.obsidian.settingsLog = [];
+    view.openManuscriptSettings();
+    const m = h.obsidian.lastModal;
+    const tabs = [...m.contentEl.querySelectorAll('.dendrite-ms-tab')]
+        .map((t) => t.textContent);
+    assert.deepEqual(tabs, ['Manuscript', 'Length', 'Page',
+                            'Header and footer', 'References', 'Review']);
+    const panes = [...m.contentEl.querySelectorAll('.dendrite-ms-pane')];
+    const shown = () => panes.filter((p) =>
+        !p.classList.contains('is-hidden')).map((p) => p.dataset.tab);
+    assert.deepEqual(shown(), ['Manuscript']);
+    const inTab = (t) => h.obsidian.settingsLog.filter((x) =>
+        x.container === panes.find((p) => p.dataset.tab === t))
+        .map((x) => x.name);
+    assert.deepEqual(inTab('Manuscript'), ['Title and prefix',
+        'Number sections by position', 'Top section heading level']);
+    assert.deepEqual(inTab('Length'), ['Total quota', 'Hard limit',
+        'Count spaces in characters',
+        'Words per page', 'Characters per word']);
+    assert.deepEqual(inTab('Page'), ['Font', 'Font size', 'Line spacing',
+        'Paper', 'Margin', 'Space above footnotes']);
+    assert.deepEqual(inTab('Header and footer'), [
+        'Header and footer in the margin', 'Page numbers']);
+    assert.deepEqual(inTab('References'), ['Citation style',
+        'Reference list heading', 'Word reference document',
+        'Pandoc defaults file']);
+    assert.deepEqual(inTab('Review'), ['Google Doc']);
+    // The header and footer slots, as on a page.
+    const grid = m.contentEl.querySelector('.dendrite-hf-grid');
+    const slots = [...grid.querySelectorAll('textarea')];
+    assert.equal(slots.length, 6);
+    assert.equal(slots[0].value, 'Aly Karsan', 'header left');
+    m.contentEl.querySelectorAll('.dendrite-ms-tab')[3].click();
+    assert.deepEqual(shown(), ['Header and footer']);
+    slots[5].value = '{page}';
+    slots[5].dispatchEvent(new slots[5].ownerDocument.defaultView
+        .Event('input'));
+    await [...m.contentEl.querySelectorAll('.dendrite-ms-foot button')]
+        .find((b) => b.textContent === 'Save').onclick();
+    assert.match(read(INDEX), /dendrite_footer_right: ["']?\{page\}/);
+    assert.match(read(INDEX), /dendrite_header_left: Aly Karsan/);
+    // It opens again where it was left.
+    view.openManuscriptSettings();
+    const again = [...h.obsidian.lastModal.contentEl.querySelectorAll(
+        '.dendrite-ms-pane')].filter((p) =>
+        !p.classList.contains('is-hidden')).map((p) => p.dataset.tab);
+    assert.deepEqual(again, ['Header and footer']);
 });

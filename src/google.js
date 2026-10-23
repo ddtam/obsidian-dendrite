@@ -199,6 +199,9 @@ function pickerPage(o) {
 </head><body>
 <p id="m">Opening Google's file picker. Click the manuscript's doc, then
 press Select, or double-click it.</p>
+<p style="color:#777">If nothing happens after Select, as in Firefox,
+copy this page's address into Chrome or Edge, signed in to the same
+Google account, and choose the doc there.</p>
 <script>
 const O = ${j(o)};
 function say(t) { document.getElementById('m').textContent = t; }
@@ -427,17 +430,14 @@ async function getJson(request, url, token) {
     return res.json;
 }
 
-/**
- * A doc's open comments and suggested changes as review items, and its
- * title: { title, items, resolved }.
- */
-async function fetchReview({ docId, token, request,
-                             today = new Date() }) {
-    const doc = await getJson(request, `${DOCS}${docId}?` +
-        'suggestionsViewMode=SUGGESTIONS_INLINE', token);
+const GDOC = 'application/vnd.google-apps.document';
+const DOCX = 'application/vnd.openxmlformats-officedocument.' +
+    'wordprocessingml.document';
+
+/** Every open and resolved comment Drive keeps on a file. */
+async function driveComments(request, docId, token) {
     const comments = [];
     let pageToken = '';
-    let resolved = 0;
     for (let k = 0; k < 50; k++) {
         const r = await getJson(request, `${DRIVE}${docId}/comments?` +
             form({ pageSize: 100, includeDeleted: false,
@@ -447,17 +447,55 @@ async function fetchReview({ docId, token, request,
                        'author(displayName)))' }) +
             (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` :
              ''), token);
-        for (const c of r.comments || []) {
-            if (c.resolved) resolved++;
-            comments.push(c);
-        }
+        comments.push(...(r.comments || []));
         if (!r.nextPageToken) break;
         pageToken = r.nextPageToken;
     }
-    return { title: doc.title || '',
-             items: [...commentItems(comments), ...suggestionItems(doc,
-                 today.toISOString().slice(0, 10))],
-             resolved };
+    return comments;
+}
+
+/**
+ * A linked file's open comments and suggested changes as review items,
+ * and its name: { title, items, resolved }. A Google Doc is read with
+ * the Docs API, which does not say who suggested a change. A Word file
+ * kept in Drive, which the Docs API cannot read, is downloaded and read
+ * as a returned Word file, its tracked changes with their authors, and
+ * Drive's own comments on it are added where the file does not already
+ * hold the same one.
+ */
+async function fetchReview({ docId, token, request, zlib,
+                             today = new Date() }) {
+    const meta = await getJson(request, `${DRIVE}${docId}?` +
+        'fields=name,mimeType', token);
+    const comments = await driveComments(request, docId, token);
+    const resolved = comments.filter((c) => c.resolved).length;
+    const drive = commentItems(comments);
+    if (meta.mimeType === GDOC) {
+        const doc = await getJson(request, `${DOCS}${docId}?` +
+            'suggestionsViewMode=SUGGESTIONS_INLINE', token);
+        return { title: meta.name || doc.title || '', resolved,
+                 items: [...drive, ...suggestionItems(doc,
+                     today.toISOString().slice(0, 10))] };
+    }
+    if (meta.mimeType !== DOCX) {
+        throw new Error(`${meta.name || 'the linked file'} is not a ` +
+                        'Google Doc or a Word file');
+    }
+    const res = await request({ url: `${DRIVE}${docId}?alt=media`,
+        headers: { Authorization: `Bearer ${token}` }, binary: true });
+    if (res.status !== 200 || !res.buffer) {
+        const e = new Error(`Google answered ${res.status} for the file`);
+        e.status = res.status;
+        throw e;
+    }
+    const word = require('./review.js').readReview(
+        Buffer.from(res.buffer), zlib);
+    const flat = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+    const inWord = new Set(word.filter((w) => w.kind === 'comment')
+        .map((w) => `${w.author}\u0000${flat(w.text)}`));
+    return { title: meta.name || '', resolved,
+             items: [...word, ...drive.filter((c) =>
+                 !inWord.has(`${c.author}\u0000${flat(c.text)}`))] };
 }
 
 module.exports = { SCOPE, PICKER_PORT, pickerOrigin, readClient,

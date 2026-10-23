@@ -1437,3 +1437,105 @@ button.dendrite-review-btn:hover {
     top: -9px;
     height: 4px;
 }
+
+/* Manuscript settings: tabs down the left, one section at a time, Save
+   and Cancel kept at the foot. */
+.modal.dendrite-ms-modal {
+    width: min(760px, 92vw);
+}
+.dendrite-ms-body {
+    display: flex;
+    gap: 16px;
+    min-height: 360px;
+    max-height: 62vh;
+}
+.dendrite-ms-tabs {
+    flex: 0 0 170px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-right: 1px solid var(--background-modifier-border);
+    padding-right: 10px;
+}
+.dendrite-ms-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: flex-start;
+    background: none;
+    box-shadow: none;
+    color: var(--text-muted);
+    text-align: left;
+}
+.dendrite-ms-tab.is-active {
+    background: var(--background-modifier-hover);
+    color: var(--text-normal);
+}
+.dendrite-ms-tab-icon {
+    display: inline-flex;
+}
+.dendrite-ms-panes {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    min-width: 0;
+}
+.dendrite-ms-pane.is-hidden {
+    display: none;
+}
+.dendrite-ms-intro {
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+    margin-top: 0;
+}
+.dendrite-ms-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 12px;
+    margin-top: 12px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+/* The header and footer slots drawn as on a page: a row of three at the
+   top, the page's text between, a row of three at the foot. */
+.dendrite-hf-grid {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    padding: 10px;
+    margin-bottom: 12px;
+    background: var(--background-secondary);
+}
+.dendrite-hf-row {
+    display: grid;
+    grid-template-columns: 52px repeat(3, 1fr);
+    gap: 6px;
+    align-items: start;
+}
+.dendrite-hf-label {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+    padding-top: 6px;
+}
+.dendrite-hf-slot {
+    width: 100%;
+    resize: vertical;
+    font-size: var(--font-ui-small);
+}
+.dendrite-hf-row.is-header .dendrite-hf-slot:nth-of-type(2),
+.dendrite-hf-row.is-footer .dendrite-hf-slot:nth-of-type(2) {
+    text-align: center;
+}
+.dendrite-hf-row .dendrite-hf-slot:last-child {
+    text-align: right;
+}
+.dendrite-hf-page {
+    margin: 8px 0 8px 58px;
+    height: 54px;
+    border: 1px dashed var(--background-modifier-border);
+    border-radius: 4px;
+    color: var(--text-faint);
+    font-size: var(--font-ui-smaller);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}

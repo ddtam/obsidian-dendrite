@@ -189,6 +189,10 @@ test('a doc\'s review is its comments, every page, then its suggested ' +
     const request = async ({ url, headers }) => {
         urls.push(url);
         assert.equal(headers.Authorization, 'Bearer T');
+        if (/files\/D\?fields=/.test(url)) {
+            return { status: 200, json: { name: 'RAC draft',
+                mimeType: 'application/vnd.google-apps.document' } };
+        }
         if (url.includes('docs.googleapis.com')) {
             return { status: 200, json: { title: 'RAC draft', body: {
                 content: [{ paragraph: { elements: [run('a '),
@@ -208,7 +212,8 @@ test('a doc\'s review is its comments, every page, then its suggested ' +
     assert.deepEqual(r.items.map((x) => [x.kind, x.text || x.insert]),
                      [['comment', 'One'], ['comment', 'Two'],
                       ['change', 'b']]);
-    assert.match(urls[0], /suggestionsViewMode=SUGGESTIONS_INLINE/);
+    assert.ok(urls.some((u) => /suggestionsViewMode=SUGGESTIONS_INLINE/
+        .test(u)));
     const missing = async () => ({ status: 404, json: { error: {
         message: 'File not found' } } });
     await assert.rejects(g.fetchReview({ docId: 'D', token: 'T',
@@ -225,4 +230,69 @@ test('a second try at the picker closes the first, which wanted the same ' +
         openUrl: (url) => { fetch(`${url}/picked?id=D2&name=N`); } });
     await assert.rejects(first, /replaced by a new try/);
     assert.deepEqual(await second, { id: 'D2', name: 'N' });
+});
+
+const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/' +
+    '2006/main"';
+const wrun = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+
+/** A .docx with one comment and one tracked change, as Word saves it. */
+function wordFile() {
+    const d = require('../src/docx.js');
+    const body = '<w:p>' + wrun('The cohort is ') +
+        '<w:commentRangeStart w:id="0"/>' + wrun('paired') +
+        '<w:commentRangeEnd w:id="0"/>' +
+        '<w:r><w:commentReference w:id="0"/></w:r>' + wrun(' and ') +
+        '<w:ins w:id="5" w:author="Aly Karsan" ' +
+        'w:date="2026-10-24T10:00:00Z">' + wrun('large') + '</w:ins>' +
+        wrun('.') + '</w:p>';
+    const comments = `<w:comments ${W}><w:comment w:id="0" ` +
+        'w:author="Aly Karsan" w:date="2026-10-24T09:00:00Z"><w:p>' +
+        wrun('How many?') + '</w:p></w:comment></w:comments>';
+    return d.writeZip([
+        { name: 'word/document.xml', data: Buffer.from(
+            `<w:document ${W}><w:body>${body}</w:body></w:document>`) },
+        { name: 'word/comments.xml', data: Buffer.from(comments) }],
+        require('zlib'));
+}
+
+test('a Word file in Drive is downloaded and read as a returned Word ' +
+     'file, with Drive comments not already in it', async () => {
+    const urls = [];
+    const file = wordFile();
+    const request = async ({ url, binary }) => {
+        urls.push(url);
+        if (/\?fields=name/.test(url)) {
+            return { status: 200, json: { name: 'RAC 2027.docx',
+                mimeType: 'application/vnd.openxmlformats-officedocument.' +
+                    'wordprocessingml.document' } };
+        }
+        if (/alt=media/.test(url)) {
+            assert.equal(binary, true);
+            return { status: 200, buffer: file.buffer.slice(
+                file.byteOffset, file.byteOffset + file.byteLength) };
+        }
+        return { status: 200, json: { comments: [
+            { content: 'How many?', author: { displayName: 'Aly Karsan' },
+              quotedFileContent: { value: 'paired' } },
+            { content: 'Only in Drive.', author: { displayName: 'R' },
+              quotedFileContent: { value: 'cohort' } }] } };
+    };
+    const r = await g.fetchReview({ docId: 'D', token: 'T', request,
+                                    zlib: require('zlib') });
+    assert.equal(r.title, 'RAC 2027.docx');
+    assert.ok(!urls.some((u) => u.includes('docs.googleapis.com')),
+              'the Docs API is not asked about a Word file');
+    assert.deepEqual(r.items.map((x) => [x.kind, x.author,
+                                         x.text || x.insert]),
+                     [['comment', 'Aly Karsan', 'How many?'],
+                      ['change', 'Aly Karsan', 'large'],
+                      ['comment', 'R', 'Only in Drive.']]);
+    const pdf = async ({ url }) => (/\?fields=name/.test(url) ?
+        { status: 200, json: { name: 'x.pdf',
+                               mimeType: 'application/pdf' } } :
+        { status: 200, json: { comments: [] } });
+    await assert.rejects(g.fetchReview({ docId: 'D', token: 'T',
+        request: pdf, zlib: require('zlib') }),
+        /x\.pdf is not a Google Doc or a Word file/);
 });

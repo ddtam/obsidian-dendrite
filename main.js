@@ -3219,6 +3219,9 @@ var require_google = __commonJS({
 </head><body>
 <p id="m">Opening Google's file picker. Click the manuscript's doc, then
 press Select, or double-click it.</p>
+<p style="color:#777">If nothing happens after Select, as in Firefox,
+copy this page's address into Chrome or Edge, signed in to the same
+Google account, and choose the doc there.</p>
 <script>
 const O = ${j(o)};
 function say(t) { document.getElementById('m').textContent = t; }
@@ -3437,36 +3440,68 @@ function onApi() {
       }
       return res.json;
     }
-    async function fetchReview({
-      docId,
-      token,
-      request,
-      today = /* @__PURE__ */ new Date()
-    }) {
-      const doc = await getJson(request, `${DOCS}${docId}?suggestionsViewMode=SUGGESTIONS_INLINE`, token);
+    var GDOC = "application/vnd.google-apps.document";
+    var DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    async function driveComments(request, docId, token) {
       const comments = [];
       let pageToken = "";
-      let resolved = 0;
       for (let k = 0; k < 50; k++) {
         const r = await getJson(request, `${DRIVE}${docId}/comments?` + form({
           pageSize: 100,
           includeDeleted: false,
           fields: "nextPageToken,comments(id,content,createdTime,resolved,deleted,author(displayName),quotedFileContent(value),replies(content,deleted,author(displayName)))"
         }) + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""), token);
-        for (const c of r.comments || []) {
-          if (c.resolved) resolved++;
-          comments.push(c);
-        }
+        comments.push(...r.comments || []);
         if (!r.nextPageToken) break;
         pageToken = r.nextPageToken;
       }
+      return comments;
+    }
+    async function fetchReview({
+      docId,
+      token,
+      request,
+      zlib,
+      today = /* @__PURE__ */ new Date()
+    }) {
+      const meta = await getJson(request, `${DRIVE}${docId}?fields=name,mimeType`, token);
+      const comments = await driveComments(request, docId, token);
+      const resolved = comments.filter((c) => c.resolved).length;
+      const drive = commentItems(comments);
+      if (meta.mimeType === GDOC) {
+        const doc = await getJson(request, `${DOCS}${docId}?suggestionsViewMode=SUGGESTIONS_INLINE`, token);
+        return {
+          title: meta.name || doc.title || "",
+          resolved,
+          items: [...drive, ...suggestionItems(
+            doc,
+            today.toISOString().slice(0, 10)
+          )]
+        };
+      }
+      if (meta.mimeType !== DOCX) {
+        throw new Error(`${meta.name || "the linked file"} is not a Google Doc or a Word file`);
+      }
+      const res = await request({
+        url: `${DRIVE}${docId}?alt=media`,
+        headers: { Authorization: `Bearer ${token}` },
+        binary: true
+      });
+      if (res.status !== 200 || !res.buffer) {
+        const e = new Error(`Google answered ${res.status} for the file`);
+        e.status = res.status;
+        throw e;
+      }
+      const word = require_review().readReview(
+        Buffer.from(res.buffer),
+        zlib
+      );
+      const flat = (t) => String(t || "").replace(/\s+/g, " ").trim();
+      const inWord = new Set(word.filter((w) => w.kind === "comment").map((w) => `${w.author}\0${flat(w.text)}`));
       return {
-        title: doc.title || "",
-        items: [...commentItems(comments), ...suggestionItems(
-          doc,
-          today.toISOString().slice(0, 10)
-        )],
-        resolved
+        title: meta.name || "",
+        resolved,
+        items: [...word, ...drive.filter((c) => !inWord.has(`${c.author}\0${flat(c.text)}`))]
       };
     }
     module2.exports = {
@@ -3912,6 +3947,7 @@ async function googleRequest(req) {
     contentType: req.contentType,
     throw: false
   });
+  if (req.binary) return { status: res.status, buffer: res.arrayBuffer };
   let json = null;
   try {
     json = res.json;
@@ -4395,7 +4431,7 @@ var DendriteView = class extends ItemView {
       "settings",
       "",
       "This manuscript's settings",
-      () => new ManuscriptModal(this).open()
+      () => this.openManuscriptSettings()
     );
     btn(
       "file-text",
@@ -4413,6 +4449,12 @@ var DendriteView = class extends ItemView {
       () => this.togglePrintOnly()
     ).toggleClass("is-on", this.printOnly);
     btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e));
+    btn(
+      "message-square",
+      "Review",
+      "Bring in review comments: from the linked Google Doc, a returned Word file, or programs",
+      (e) => this.reviewMenu(e)
+    );
     this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
     this.showMode();
     this.totalEl = bar.createDiv({ cls: "dendrite-total" });
@@ -7304,6 +7346,37 @@ var DendriteView = class extends ItemView {
     const text = (cards.find((c) => c.id === id) || { text: "" }).text.trimEnd();
     return { id, start: text.length, end: text.length };
   }
+  /**
+   * Where review comments come in from: the linked Google Doc, a file,
+   * and reviews programs sent that wait to be added.
+   */
+  reviewMenu(event) {
+    const { Menu } = require("obsidian");
+    const m = new Menu();
+    const linked = this.gdocUrl();
+    if (linked) {
+      m.addItem((i) => i.setTitle("Pull from Google Docs").setIcon("download").onClick(() => this.pullGdoc()));
+    }
+    if (Platform.isDesktopApp) {
+      if (linked) {
+        m.addItem((i) => i.setTitle("Open the linked doc").setIcon("external-link").onClick(() => openExternal(linked)));
+      }
+      m.addItem((i) => i.setTitle(linked ? "Change the linked doc\u2026" : "Link a Google Doc\u2026").setIcon("link").onClick(() => this.plugin.linkGdoc(this.file)));
+    }
+    m.addSeparator();
+    m.addItem((i) => i.setTitle("Import a Word or JSON file\u2026").setIcon("file-input").onClick(() => this.importReview()));
+    if (this.inbox.length) {
+      m.addSeparator();
+      for (const entry of this.inbox) {
+        m.addItem((i) => i.setTitle(`${entry.title}: ${entry.items.length} from ` + reviewAuthors(entry.items)).setIcon("inbox").onClick(() => this.openInbox(entry)));
+      }
+    }
+    if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
+    return m;
+  }
+  openManuscriptSettings() {
+    new ManuscriptModal(this).open();
+  }
   /** Submitted reviews for this manuscript, waiting on the bar. */
   refreshInbox() {
     const q = this.plugin.reviewQueue ? this.plugin.reviewQueue() : [];
@@ -8389,13 +8462,6 @@ var DendriteView = class extends ItemView {
     if (Platform.isDesktopApp) {
       m.addItem((i) => i.setTitle("PDF").setIcon("file-output").onClick(() => this.exportTo(node, "pdf")));
       m.addItem((i) => i.setTitle("Word").setIcon("file-output").onClick(() => this.exportTo(node, "docx")));
-      if (!node) {
-        m.addSeparator();
-        m.addItem((i) => i.setTitle("Import review\u2026").setIcon("message-square").onClick(() => this.importReview()));
-        if (this.gdocUrl()) {
-          m.addItem((i) => i.setTitle("Pull review from Google Docs").setIcon("message-square").onClick(() => this.pullGdoc()));
-        }
-      }
     }
     if (event) m.showAtMouseEvent(event);
   }
@@ -8967,25 +9033,177 @@ function quotaSetting(container, name, desc, current, required, draft) {
     emit();
   }));
 }
-var ManuscriptModal = class extends Modal {
+var ManuscriptModal = class _ManuscriptModal extends Modal {
   constructor(view) {
     super(view.app);
     this.view = view;
   }
+  /**
+   * The manuscript's settings in tabs, one shown at a time, all written
+   * together by Save. It opens on the tab last used.
+   */
   onOpen() {
     const { contentEl } = this;
     const view = this.view;
     const ms = view.manuscript();
+    const st = ms.style;
     const draft = {};
+    this.modalEl.addClass("dendrite-ms-modal");
     this.titleEl.setText(`${view.file.basename}: settings`);
-    new Setting(contentEl).setName("Title and prefix").setDesc(`The index is ${view.file.basename}, and card IDs start ${ms.prefix}. Renaming changes both, with every card note and the folder.`).addButton((b) => b.setButtonText("Rename\u2026").onClick(() => {
+    const body = contentEl.createDiv({ cls: "dendrite-ms-body" });
+    const tabs = body.createDiv({ cls: "dendrite-ms-tabs" });
+    const panes = body.createDiv({ cls: "dendrite-ms-panes" });
+    const sections = [];
+    const show = (name) => {
+      for (const sec of sections) {
+        sec.tab.toggleClass("is-active", sec.name === name);
+        sec.pane.toggleClass("is-hidden", sec.name !== name);
+      }
+      _ManuscriptModal.lastTab = name;
+    };
+    const section = (name, icon, intro) => {
+      const tab = tabs.createEl("button", { cls: "dendrite-ms-tab" });
+      setIcon(tab.createSpan({ cls: "dendrite-ms-tab-icon" }), icon);
+      tab.createSpan({ text: name });
+      tab.onclick = () => show(name);
+      const pane = panes.createDiv({ cls: "dendrite-ms-pane" });
+      pane.dataset.tab = name;
+      if (intro) pane.createEl("p", {
+        cls: "dendrite-ms-intro",
+        text: intro
+      });
+      sections.push({ name, tab, pane });
+      return pane;
+    };
+    const text = (el2, name, desc, value, key, placeholder) => new Setting(el2).setName(name).setDesc(desc).addText((t) => t.setPlaceholder(placeholder || "").setValue(value === null || value === void 0 ? "" : String(value)).onChange((v) => {
+      draft[key] = v.trim() || null;
+    }));
+    let el = section("Manuscript", "book-open");
+    new Setting(el).setName("Title and prefix").setDesc(`The index is ${view.file.basename}, and card IDs start ${ms.prefix}. Renaming changes both, with every card note and the folder.`).addButton((b) => b.setButtonText("Rename\u2026").onClick(() => {
       this.close();
       new RenameModal(view).open();
     }));
+    new Setting(el).setName("Number sections by position").setDesc("Write headings without numbers; sections are numbered from where they sit, and renumber when moved.").addToggle((tg) => tg.setValue(ms.number).onChange((v) => {
+      draft.dendrite_number_sections = v;
+    }));
+    new Setting(el).setName("Top section heading level").setDesc("Export writes top-level sections at this level.").addDropdown((d) => {
+      for (let i = 1; i <= 4; i++) d.addOption(String(i), "H" + i);
+      d.setValue(String(ms.headingTop)).onChange((v) => {
+        draft.dendrite_heading_top = Number(v);
+      });
+    });
+    el = section("Length", "ruler", "The whole manuscript's quota, shown in the top bar against what it uses and what its sections allocate, and how words, characters and pages are counted.");
+    quotaSetting(el, "Total quota", "In words, characters or pages; fractions allowed.", ms.limit, ms.limitRequired, draft);
+    new Setting(el).setName("Count spaces in characters").setDesc("Funding portals differ; check the call.").addToggle((tg) => tg.setValue(ms.countSpaces).onChange((v) => {
+      draft.dendrite_count_spaces = v;
+    }));
+    new Setting(el).setName("Words per page").setDesc(ms.wordsPerPageMeasured ? "Measured from the last PDF of the whole manuscript, and measured again at each one. A number typed here is used until then." : "For page estimates and page quotas, until a PDF of the whole manuscript is exported, which measures it.").addText((t) => t.setValue(String(ms.wordsPerPage)).onChange((v) => {
+      draft.dendrite_words_per_page = Number(v) > 0 ? Number(v) : null;
+      draft.dendrite_measured_words_per_page = null;
+    }));
+    new Setting(el).setName("Characters per word").setDesc("Only for comparing quotas set in characters with quotas in words or pages, an estimate.").addText((t) => t.setValue(String(ms.charsPerWord)).onChange((v) => {
+      draft.dendrite_chars_per_word = Number(v) > 0 ? Number(v) : null;
+    }));
+    el = section("Page", "file", "How PDF and Word export set the page and its text. Word export takes these through its reference document, unless one is set under References.");
+    text(
+      el,
+      "Font",
+      "Any font installed on this computer. Empty: Latin Modern, LaTeX's own.",
+      st.font,
+      "dendrite_font",
+      "Arial"
+    );
+    text(el, "Font size", "In points: 8, 9, 10, 11, 12, 14, 17 or 20. Empty: 10.", st.fontSize, "dendrite_font_size", "10");
+    text(el, "Line spacing", "1 is single, 1.5 one and a half. Empty: single.", st.lineSpacing, "dendrite_line_spacing", "1");
+    new Setting(el).setName("Paper").addDropdown((d) => d.addOption("letter", "US Letter").addOption("a4", "A4").setValue(st.paper || "letter").onChange((v) => {
+      draft.dendrite_paper = v === "letter" ? null : v;
+    }));
+    text(el, "Margin", "On every side, such as 2cm or 1in. Empty: 2.5cm.", st.margin, "dendrite_margin", "2.5cm");
+    text(
+      el,
+      "Space above footnotes",
+      "For PDF, between the last line of text and the footnote rule, such as 14pt or 0.5cm; a bare number is in points. Empty: one line of text.",
+      st.footnoteGap,
+      "dendrite_footnote_gap",
+      ""
+    );
+    el = section("Header and footer", "panel-top", "For PDF, on every page in the text's font and size. Each slot takes several lines, **bold**, *italic*, {page} and {pages}. A footer set replaces the page number at the foot; so does {page} anywhere.");
+    const grid = el.createDiv({ cls: "dendrite-hf-grid" });
+    for (const which of ["header", "footer"]) {
+      const row = grid.createDiv({ cls: `dendrite-hf-row is-${which}` });
+      row.createDiv({
+        cls: "dendrite-hf-label",
+        text: which === "header" ? "Header" : "Footer"
+      });
+      for (const [k, name] of [
+        ["left", "Left"],
+        ["center", "Centre"],
+        ["right", "Right"]
+      ]) {
+        const key = `dendrite_${which}_${k}`;
+        const now = st[which] && st[which][k];
+        const ta = row.createEl(
+          "textarea",
+          { cls: "dendrite-hf-slot" }
+        );
+        ta.value = now || "";
+        ta.placeholder = name;
+        ta.rows = 2;
+        ta.addEventListener("input", () => {
+          draft[key] = ta.value.trim() || null;
+        });
+      }
+      if (which === "header") {
+        grid.createDiv({
+          cls: "dendrite-hf-page",
+          text: "the page's text"
+        });
+      }
+    }
+    new Setting(el).setName("Header and footer in the margin").setDesc("Print them in the page margin, so the text keeps its whole area, where the format allows it. Off, the margin is measured to them and nothing is printed in it. A small margin may not hold several lines.").addToggle((tg) => tg.setValue(st.headerInMargin).onChange((v) => {
+      draft.dendrite_header_in_margin = v || null;
+    }));
+    new Setting(el).setName("Page numbers").setDesc("At the foot of each page, numbered consecutively, when no footer is set.").addToggle((tg) => tg.setValue(st.pageNumbers).onChange((v) => {
+      draft.dendrite_page_numbers = v ? null : false;
+    }));
+    el = section("References", "quote", "Citations come from Zotero at export; these set how they and the rest of the document look. Paths are from the vault root.");
+    text(el, "Citation style", "A CSL style file in the vault, for PDF and Word export. Empty: Pandoc's default, Chicago author-date.", ms.csl, "dendrite_csl", "styles/nature.csl");
+    text(
+      el,
+      "Reference list heading",
+      "Over the list of references, for a citation style that prints one. Empty: References.",
+      st.referencesTitle || null,
+      "dendrite_references_title",
+      "References"
+    );
+    const ref = text(
+      el,
+      "Word reference document",
+      "A .docx whose styles Word export copies, fonts and sizes included. Set its styles in Word.",
+      st.referenceDocx,
+      "dendrite_reference_docx",
+      "styles/reference.docx"
+    );
     if (Platform.isDesktopApp) {
-      const linked = view.gdocUrl();
-      const fm = view.app.metadataCache.getFileCache(view.file)?.frontmatter || {};
-      const gdoc = new Setting(contentEl).setName("Google Doc").setDesc(linked ? `Linked to ${fm.dendrite_gdoc_title || linked}. Its comments and suggested changes come in with Pull review from Google Docs, in Export.` : "The doc coauthors review, chosen in Google's file picker, which gives Dendrite that doc only.").addButton((b) => b.setButtonText(linked ? "Change\u2026" : "Link a Google Doc\u2026").onClick(async () => {
+      ref.addButton((b) => b.setButtonText("Make one").setTooltip("Writes Pandoc's own beside the index, to open in Word, restyle and save").onClick(async () => {
+        const rel = await view.makeReferenceDocx();
+        if (rel) draft.dendrite_reference_docx = rel;
+      }));
+    }
+    text(
+      el,
+      "Pandoc defaults file",
+      "For anything else a call asks, a Pandoc defaults file in the vault. The settings in these tabs win over it.",
+      st.defaults,
+      "dendrite_pandoc_defaults",
+      "styles/grant.yaml"
+    );
+    el = section("Review", "message-square", "Comments and suggested changes come in from Review on the bar, only when you ask, and nothing is written to a card until you add them.");
+    const linked = view.gdocUrl();
+    const fm = view.app.metadataCache.getFileCache(view.file)?.frontmatter || {};
+    const gdoc = new Setting(el).setName("Google Doc").setDesc(!Platform.isDesktopApp ? "Linked from Obsidian on a computer." : linked ? `Linked to ${fm.dendrite_gdoc_title || linked}.` : "The doc or Word file in Drive that coauthors review, chosen in Google's file picker, which gives Dendrite that file only.");
+    if (Platform.isDesktopApp) {
+      gdoc.addButton((b) => b.setButtonText(linked ? "Change\u2026" : "Link a Google Doc\u2026").onClick(async () => {
         this.close();
         await view.plugin.linkGdoc(view.file);
       }));
@@ -8999,118 +9217,17 @@ var ManuscriptModal = class extends Modal {
         }));
       }
     }
-    quotaSetting(
-      contentEl,
-      "Total quota",
-      "For the whole manuscript, shown in the top bar against what it uses and what its sections allocate.",
-      ms.limit,
-      ms.limitRequired,
-      draft
-    );
-    new Setting(contentEl).setName("Count spaces in characters").setDesc("Funding portals differ; check the call.").addToggle((tg) => tg.setValue(ms.countSpaces).onChange((v) => {
-      draft.dendrite_count_spaces = v;
-    }));
-    new Setting(contentEl).setName("Words per page").setDesc(ms.wordsPerPageMeasured ? "Measured from the last PDF of the whole manuscript, and measured again at each one. A number typed here is used until then." : "For page estimates and page quotas, until a PDF of the whole manuscript is exported, which measures it.").addText((t) => t.setValue(String(ms.wordsPerPage)).onChange((v) => {
-      draft.dendrite_words_per_page = Number(v) > 0 ? Number(v) : null;
-      draft.dendrite_measured_words_per_page = null;
-    }));
-    new Setting(contentEl).setName("Characters per word").setDesc("Only for comparing quotas set in characters with quotas in words or pages, an estimate.").addText((t) => t.setValue(String(ms.charsPerWord)).onChange((v) => {
-      draft.dendrite_chars_per_word = Number(v) > 0 ? Number(v) : null;
-    }));
-    new Setting(contentEl).setName("Number sections by position").setDesc("Write headings without numbers; sections are numbered from where they sit, and renumber when moved.").addToggle((tg) => tg.setValue(ms.number).onChange((v) => {
-      draft.dendrite_number_sections = v;
-    }));
-    new Setting(contentEl).setName("Citation style").setDesc("A CSL style file in the vault, as a path from the vault root, for PDF and Word export. Empty: Pandoc's default, Chicago author-date.").addText((t) => t.setPlaceholder("styles/nature.csl").setValue(ms.csl || "").onChange((v) => {
-      draft.dendrite_csl = v.trim() || null;
-    }));
-    const st = ms.style;
-    new Setting(contentEl).setName("PDF and Word").setHeading();
-    const text = (name, desc, value, key, placeholder) => new Setting(contentEl).setName(name).setDesc(desc).addText((t) => t.setPlaceholder(placeholder || "").setValue(value === null || value === void 0 ? "" : String(value)).onChange((v) => {
-      draft[key] = v.trim() || null;
-    }));
-    text(
-      "Font",
-      "For PDF, any font installed on this computer. Empty: Latin Modern, LaTeX's own.",
-      st.font,
-      "dendrite_font",
-      "Arial"
-    );
-    text("Font size", "In points, for PDF. 8, 9, 10, 11, 12, 14, 17 or 20. Empty: 10.", st.fontSize, "dendrite_font_size", "10");
-    text("Margin", "For PDF, on every side, such as 2cm or 1in. Empty: 2.5cm.", st.margin, "dendrite_margin", "2.5cm");
-    new Setting(contentEl).setName("Paper").setDesc("For PDF.").addDropdown((d) => d.addOption("letter", "US Letter").addOption("a4", "A4").setValue(st.paper || "letter").onChange((v) => {
-      draft.dendrite_paper = v === "letter" ? null : v;
-    }));
-    text(
-      "Line spacing",
-      "For PDF: 1 is single, 1.5 one and a half. Empty: single.",
-      st.lineSpacing,
-      "dendrite_line_spacing",
-      "1"
-    );
-    text(
-      "Space above footnotes",
-      "For PDF, between the last line of text and the footnote rule, such as 14pt or 0.5cm; a bare number is in points. Empty: one line of text.",
-      st.footnoteGap,
-      "dendrite_footnote_gap",
-      ""
-    );
-    new Setting(contentEl).setName("Header and footer").setHeading().setDesc("For PDF, on every page in the text's font and size. Each slot takes several lines, **bold**, *italic*, {page} and {pages}. A footer set replaces the page number at the foot; so does {page} anywhere.");
-    for (const which of ["header", "footer"]) {
-      for (const [k, name] of [
-        ["left", "left"],
-        ["center", "centre"],
-        ["right", "right"]
-      ]) {
-        const key = `dendrite_${which}_${k}`;
-        const now = st[which] && st[which][k];
-        new Setting(contentEl).setName(`${which[0].toUpperCase()}${which.slice(1)}, ` + name).addTextArea((t) => t.setValue(now || "").onChange((v) => {
-          draft[key] = v.trim() || null;
-        }));
-      }
-    }
-    new Setting(contentEl).setName("Header and footer in the margin").setDesc("Print them in the page margin, so the text keeps its whole area, where the format allows it. Off, the margin is measured to them and nothing is printed in it. A small margin may not hold several lines.").addToggle((tg) => tg.setValue(st.headerInMargin).onChange((v) => {
-      draft.dendrite_header_in_margin = v || null;
-    }));
-    new Setting(contentEl).setName("Page numbers").setDesc("For PDF, at the foot of each page, numbered consecutively.").addToggle((tg) => tg.setValue(st.pageNumbers).onChange((v) => {
-      draft.dendrite_page_numbers = v ? null : false;
-    }));
-    text(
-      "Reference list heading",
-      "Over the list of references, for a citation style that prints one. Empty: References.",
-      st.referencesTitle || null,
-      "dendrite_references_title",
-      "References"
-    );
-    text(
-      "Pandoc defaults file",
-      "For anything else a call asks, a Pandoc defaults file in the vault, as a path from the vault root. The settings above win over it.",
-      st.defaults,
-      "dendrite_pandoc_defaults",
-      "styles/grant.yaml"
-    );
-    text(
-      "Word reference document",
-      "A .docx whose styles Word export copies, fonts and sizes included, as a path from the vault root. Set its styles in Word.",
-      st.referenceDocx,
-      "dendrite_reference_docx",
-      "styles/reference.docx"
-    );
-    if (Platform.isDesktopApp) {
-      new Setting(contentEl).setDesc("No reference document yet? This writes Pandoc's own beside the index, to open in Word, restyle and save.").addButton((b) => b.setButtonText("Make reference.docx").onClick(async () => {
-        const rel = await view.makeReferenceDocx();
-        if (rel) draft.dendrite_reference_docx = rel;
-      }));
-    }
-    new Setting(contentEl).setName("Top section heading level").setDesc("Export writes top-level sections at this level.").addDropdown((d) => {
-      for (let i = 1; i <= 4; i++) d.addOption(String(i), "H" + i);
-      d.setValue(String(ms.headingTop)).onChange((v) => {
-        draft.dendrite_heading_top = Number(v);
-      });
+    show(sections.some((x) => x.name === _ManuscriptModal.lastTab) ? _ManuscriptModal.lastTab : "Manuscript");
+    const foot = contentEl.createDiv({ cls: "dendrite-ms-foot" });
+    foot.createEl("button", { text: "Cancel" }).onclick = () => this.close();
+    const save = foot.createEl("button", {
+      cls: "mod-cta",
+      text: "Save"
     });
-    new Setting(contentEl).addButton((b) => b.setButtonText("Save").setCta().onClick(async () => {
+    save.onclick = async () => {
       await writeProps(view.app, view.file, draft);
       this.close();
-    }));
+    };
   }
   onClose() {
     this.contentEl.empty();
@@ -10330,7 +10447,12 @@ module.exports = class DendritePlugin extends Plugin {
     if (!docId) throw new Error("the linked doc's URL has no doc id");
     const token = await this.googleAccess();
     if (!token) return null;
-    return google.fetchReview({ docId, token, request: googleRequest });
+    return google.fetchReview({
+      docId,
+      token,
+      request: googleRequest,
+      zlib: require("zlib")
+    });
   }
   async settleReview(id, state) {
     const r = this.reviewQueue().find((x) => x.id === id);
