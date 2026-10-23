@@ -3852,7 +3852,7 @@ var ROLE_ITEMS = [
   ["notes", "Left out of the manuscript", "eye-off", "4"]
 ];
 var KIND_ITEMS = [
-  [null, "Text", "text"],
+  [null, "Text", "type"],
   ["table", "Table: numbered, caption above", "table"],
   ["figure", "Figure: numbered, caption below", "image"]
 ];
@@ -4007,6 +4007,49 @@ function openExternal(url) {
     window.open(url);
   }
 }
+function dendriteMenu(icons = true) {
+  const { Menu } = require("obsidian");
+  return styleMenu(new Menu(), icons);
+}
+function styleMenu(m, icons) {
+  if (m.dom && m.dom.addClass) m.dom.addClass("dendrite-menu");
+  if (!icons && typeof m.setNoIcon === "function") m.setNoIcon();
+  m.dendriteIcons = icons;
+  return m;
+}
+function barSwitch(bar, title, views, now, pick) {
+  const seg = bar.createDiv({ cls: "dendrite-seg" });
+  seg.setAttr("aria-label", title);
+  for (const [value, label, tip] of views) {
+    const b = seg.createEl(
+      "button",
+      { cls: "dendrite-bar-btn dendrite-seg-btn", text: label }
+    );
+    b.setAttr("aria-label", tip);
+    b.toggleClass("is-on", now === value);
+    b.onclick = () => {
+      if (value === now) return;
+      now = value;
+      for (const x of seg.children) {
+        x.toggleClass("is-on", x === b);
+      }
+      pick(value);
+    };
+  }
+  return seg;
+}
+function barButton(bar, icon, label, title, fn, menu = false) {
+  const b = bar.createEl("button", { cls: "dendrite-bar-btn" });
+  setIcon(b.createSpan({ cls: "dendrite-bar-icon" }), icon);
+  if (label) b.createSpan({ text: label });
+  if (menu) {
+    b.addClass("is-menu");
+    setIcon(b.createSpan({ cls: "dendrite-bar-caret" }), "chevron-down");
+  }
+  b.setAttr("aria-label", title);
+  b.onclick = fn;
+  return b;
+}
 function reviewAuthors(items) {
   return [...new Set(items.map((x) => x.author || "Reviewer"))].join(", ");
 }
@@ -4153,6 +4196,12 @@ var DendriteView = class extends ItemView {
       "click",
       (e) => this.onClick(e)
     );
+    if (this.app.workspace.on) {
+      this.registerEvent(this.app.workspace.on(
+        "layout-change",
+        () => this.showPreviewOn()
+      ));
+    }
     this.registerDomEvent(
       this.contentEl,
       "keydown",
@@ -4463,14 +4512,7 @@ var DendriteView = class extends ItemView {
   }
   renderBar(el) {
     const bar = el.createDiv({ cls: "dendrite-bar" });
-    const btn = (icon, label, title, fn) => {
-      const b = bar.createEl("button", { cls: "dendrite-bar-btn" });
-      setIcon(b.createSpan({ cls: "dendrite-bar-icon" }), icon);
-      if (label) b.createSpan({ text: label });
-      b.setAttr("aria-label", title);
-      b.onclick = fn;
-      return b;
-    };
+    const btn = (icon, label, title, fn, menu) => barButton(bar, icon, label, title, fn, menu);
     btn(
       "settings",
       "",
@@ -4485,19 +4527,35 @@ var DendriteView = class extends ItemView {
     ).addClass("dendrite-bar-gap");
     btn("undo-2", "Undo", "Undo the last change to the tree: moves, new and deleted cards, roles and statuses (Ctrl+Z). A card's text is undone inside the card.", () => this.doUndo());
     btn("redo-2", "Redo", "Redo what was undone (Ctrl+Shift+Z or Ctrl+Y)", () => this.doRedo()).addClass("dendrite-bar-gap");
-    btn("scroll-text", "Preview", "Show what export would print, beside the board", () => this.plugin.openPreview(this.file));
+    this.previewBtn = btn(
+      "scroll-text",
+      "Preview",
+      "Show what export would print beside the board, or close it",
+      async () => {
+        await this.plugin.togglePreview(this.file);
+        this.showPreviewOn();
+      }
+    );
+    this.showPreviewOn();
+    barSwitch(
+      bar,
+      "Which cards the board shows",
+      [
+        [false, "All", "Show every card"],
+        [true, "Printed", "Show only the cards that print, each where it prints, headings by their heading line alone"]
+      ],
+      this.printOnly,
+      (on) => {
+        if (this.printOnly !== on) this.togglePrintOnly();
+      }
+    );
+    btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e), true).addClass("dendrite-bar-gap-before");
     btn(
-      "printer",
-      "Printed",
-      "Show only the cards that print, each where it prints, headings by their heading line alone",
-      () => this.togglePrintOnly()
-    ).toggleClass("is-on", this.printOnly);
-    btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e));
-    btn(
-      "message-square",
+      "inbox",
       "Review",
       "Bring in review comments: from the linked Google Doc, a returned Word file, or programs",
-      (e) => this.reviewMenu(e)
+      (e) => this.reviewMenu(e),
+      true
     );
     this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
     this.showMode();
@@ -5069,29 +5127,27 @@ var DendriteView = class extends ItemView {
     if (node && node.children.length) this.addBranchItems(m, id);
   }
   /**
-   * Roles and statuses for a card and everything below it, in a submenu
-   * where Obsidian has them, else as items of their own.
+   * Roles for a card and everything below it, in a submenu where
+   * Obsidian has them, else as items of their own. Statuses for the
+   * cards below are with the card's own, at the top of its menu.
    */
   addBranchItems(m, id) {
     let sub = null;
     m.addSeparator();
     m.addItem((i) => {
-      i.setTitle("Whole branch").setIcon("list-tree");
+      i.setTitle("Whole branch");
       if (typeof i.setSubmenu === "function") sub = i.setSubmenu();
     });
+    if (sub) styleMenu(sub, true);
     const into = sub || m;
     const lead = sub ? "" : "Whole branch: ";
     for (const [value, title, icon] of [[null, "Prints automatically", "wand"], ...ROLE_ITEMS]) {
       into.addItem((i) => i.setTitle(lead + title).setIcon(icon).onClick(() => this.setBranch(id, "role", value)));
     }
-    into.addSeparator();
-    for (const [value, title, icon] of STATUS_ITEMS) {
-      into.addItem((i) => i.setTitle(lead + title).setIcon(icon).onClick(() => this.setBranch(id, "status", value)));
-    }
   }
   /**
    * Set a role on a card and every card below it, or a status on every
-   * card there that prints its text, as one step to undo.
+   * card below it that prints its text, as one step to undo.
    */
   async setBranch(id, what, value) {
     const node = this.byId.get(id);
@@ -5099,7 +5155,8 @@ var DendriteView = class extends ItemView {
     const roleOf = (x) => this.printRoleOf(x);
     const key = what === "role" ? "dendrite_role" : "dendrite_status";
     const restores = [];
-    for (const c of [node, ...core.descendants(node)]) {
+    const cards = what === "status" ? core.descendants(node) : [node, ...core.descendants(node)];
+    for (const c of cards) {
       const f = this.cardFile(c.id);
       if (!f) continue;
       if (what === "status" && core.roleFor(c, roleOf) !== "prose") {
@@ -5127,7 +5184,8 @@ var DendriteView = class extends ItemView {
       });
     }
     const name = what === "role" ? BRANCH_ROLE_NAMES[value || ""] : value;
-    new Notice(n ? `Dendrite: ${n} card${n === 1 ? "" : "s"} in the branch set to ${name}.` : `Dendrite: the branch is already ${name}.`);
+    const where = what === "role" ? "in the branch" : "below";
+    new Notice(n ? `Dendrite: ${n} card${n === 1 ? "" : "s"} ${where} set to ${name}.` : what === "role" ? `Dendrite: the branch is already ${name}.` : `Dendrite: the cards below are already ${name}.`);
   }
   /**
    * A menu item's title with its key as a chip at the right. The chip
@@ -5139,35 +5197,45 @@ var DendriteView = class extends ItemView {
     const row = label.appendChild(doc.createElement("span"));
     row.className = "dendrite-menu-row";
     row.appendChild(doc.createElement("span")).textContent = title;
-    const chip = row.appendChild(doc.createElement("kbd"));
+    const chip = row.appendChild(doc.createElement("span"));
     chip.className = "dendrite-menu-key";
     chip.dataset.key = key;
+    for (const part of key.split("+")) {
+      const k = chip.appendChild(doc.createElement("kbd"));
+      k.className = "dendrite-kbd";
+      k.dataset.k = part;
+    }
     return label;
   }
   /** The role choices alone, from a card's corner icon. */
   roleMenu(id, anchor) {
-    const { Menu } = require("obsidian");
-    const m = new Menu();
+    const m = dendriteMenu();
     this.addRoleItems(m, id);
     const r = anchor.getBoundingClientRect();
     m.showAtPosition({ x: r.left, y: r.bottom }, this.pageDoc());
   }
   cardMenu(anchor, event) {
-    const { Menu } = require("obsidian");
-    const m = new Menu();
+    const m = dendriteMenu();
     const id = this.active;
     const node = this.byId.get(id);
-    const submenu = (title, icon) => {
+    const submenu = (title, icons = true) => {
       let sub = null;
       m.addItem((i) => {
-        i.setTitle(title).setIcon(icon);
+        i.setTitle(title);
         if (typeof i.setSubmenu === "function") sub = i.setSubmenu();
       });
+      if (sub) styleMenu(sub, icons);
       const lead = sub ? "" : `${title}: `;
       const into = sub || m;
-      return { into, item: (t, ic, fn) => into.addItem((i) => i.setTitle(typeof t === "string" ? lead + t : t).setIcon(ic).onClick(fn)) };
+      return { into, item: (t, ic, fn, key) => into.addItem((i) => {
+        i.setTitle(key ? this.menuLabel(lead + t, key) : lead + t).onClick(fn);
+        if (ic) i.setIcon(ic);
+      }) };
     };
-    const item = (title, icon, fn) => m.addItem((i) => i.setTitle(title).setIcon(icon).onClick(fn));
+    const item = (title, icon, fn) => m.addItem((i) => {
+      i.setTitle(title).onClick(fn);
+      if (icon) i.setIcon(icon);
+    });
     const info = this.statusInfo && this.statusInfo.get(id);
     if (info && info.prints) {
       for (const [value, title, icon, key] of STATUS_ITEMS) {
@@ -5178,6 +5246,19 @@ var DendriteView = class extends ItemView {
             tickBeforeKey(i);
           }
         });
+      }
+      if (node && this.kidsOf(node).length) {
+        let sub = null;
+        m.addItem((i) => {
+          i.setTitle("Cards below");
+          if (typeof i.setSubmenu === "function") {
+            sub = i.setSubmenu();
+          }
+        });
+        if (sub) styleMenu(sub, true);
+        for (const [value, title, icon] of STATUS_ITEMS) {
+          (sub || m).addItem((i) => i.setTitle(sub ? title : title.replace("Status", "Cards below")).setIcon(icon).onClick(() => this.setBranch(id, "status", value)));
+        }
       }
       m.addSeparator();
     } else if (info && info.own === "unsplit") {
@@ -5198,58 +5279,63 @@ var DendriteView = class extends ItemView {
       }
       m.addSeparator();
     }
-    this.addRoleItems(submenu("Prints as", "printer").into, id);
-    const versions = submenu("Versions", "history");
+    this.addRoleItems(submenu("Prints as").into, id);
+    const versions = submenu("Versions", false);
     versions.item(
       "New version of this card",
-      "file-plus-2",
+      null,
       () => this.promote(id)
     );
     if (node && node.parent && node.parent.id) {
       const up = node.parent.id;
       versions.item(
         "Replace the parent card with this one",
-        "replace",
+        null,
         () => this.promote(up, id)
       );
     }
     if (this.stackOf(id).length) {
       versions.item(
         this.fannedId === id ? "Hide old versions" : "Show old versions",
-        "panel-right-open",
+        null,
         () => this.toggleFan(id)
       );
       versions.item(
         "Make an old version current, or delete one\u2026",
-        "list-ordered",
+        null,
         () => this.openStack(id)
       );
     }
-    const structure = submenu("Structure", "move");
+    const structure = submenu("Structure");
     structure.item(
-      "New card above (Ctrl+\u2191)",
-      "arrow-up-to-line",
-      () => this.insert("above")
+      "New card above",
+      null,
+      () => this.insert("above"),
+      "Ctrl+\u2191"
     );
     structure.item(
-      "Move up (Alt+\u2191)",
-      "arrow-up",
-      () => this.structural("up")
+      "Move up",
+      null,
+      () => this.structural("up"),
+      "Alt+\u2191"
     );
     structure.item(
-      "Move down (Alt+\u2193)",
-      "arrow-down",
-      () => this.structural("down")
+      "Move down",
+      null,
+      () => this.structural("down"),
+      "Alt+\u2193"
     );
     structure.item(
-      "Indent (Alt+\u2192)",
-      "indent",
-      () => this.structural("indent")
+      "Indent",
+      null,
+      () => this.structural("indent"),
+      "Alt+\u2192"
     );
     structure.item(
-      "Outdent (Alt+\u2190)",
-      "outdent",
-      () => this.structural("outdent")
+      "Outdent",
+      null,
+      () => this.structural("outdent"),
+      "Alt+\u2190"
     );
     structure.into.addSeparator();
     structure.item(
@@ -5259,17 +5345,17 @@ var DendriteView = class extends ItemView {
     );
     structure.item(
       "Merge into the parent card",
-      "arrow-left-to-line",
+      "git-merge",
       () => this.merge("parent")
     );
     m.addSeparator();
-    const exp = submenu("Export this branch", "file-output");
+    const exp = submenu("Export this branch", false);
     const formats = [["Markdown", "md"]];
     if (Platform.isDesktopApp) {
       formats.push(["PDF", "pdf"], ["Word", "docx"]);
     }
     for (const [title, fmt] of formats) {
-      exp.item(title, "file-output", () => this.exportTo(node, fmt));
+      exp.item(title, null, () => this.exportTo(node, fmt));
     }
     item(
       "Card properties\u2026",
@@ -5277,16 +5363,15 @@ var DendriteView = class extends ItemView {
       () => new CardModal(this, id).open()
     );
     item("Copy reference", "link", () => this.copyRef(id));
-    item("Open card note", "file", () => {
+    item("Open card note", null, () => {
       const f = this.cardFile(id);
       if (f) this.plugin.openAsMarkdown(f);
     });
     m.addSeparator();
-    item(
-      "Delete card and its children (Ctrl+Backspace)",
-      "trash-2",
-      () => this.deleteActive()
-    );
+    m.addItem((i) => i.setTitle(this.menuLabel(
+      "Delete card and its children",
+      "Ctrl+Backspace"
+    )).setIcon("trash-2").onClick(() => this.deleteActive()));
     if (event) {
       m.showAtMouseEvent(event);
       return;
@@ -7443,24 +7528,23 @@ var DendriteView = class extends ItemView {
    * and reviews programs sent that wait to be added.
    */
   reviewMenu(event) {
-    const { Menu } = require("obsidian");
-    const m = new Menu();
+    const m = dendriteMenu(false);
     const linked = this.gdocUrl();
     if (linked) {
-      m.addItem((i) => i.setTitle("Pull from Google Docs").setIcon("download").onClick(() => this.pullGdoc()));
+      m.addItem((i) => i.setTitle("Pull from Google Docs").onClick(() => this.pullGdoc()));
     }
     if (Platform.isDesktopApp) {
       if (linked) {
-        m.addItem((i) => i.setTitle("Open the linked doc").setIcon("external-link").onClick(() => openExternal(linked)));
+        m.addItem((i) => i.setTitle("Open the linked doc").onClick(() => openExternal(linked)));
       }
-      m.addItem((i) => i.setTitle(linked ? "Change the linked doc\u2026" : "Link a Google Doc\u2026").setIcon("link").onClick(() => this.plugin.linkGdoc(this.file)));
+      m.addItem((i) => i.setTitle(linked ? "Change the linked doc\u2026" : "Link a Google Doc\u2026").onClick(() => this.plugin.linkGdoc(this.file)));
     }
     m.addSeparator();
-    m.addItem((i) => i.setTitle("Import a Word or JSON file\u2026").setIcon("file-input").onClick(() => this.importReview()));
+    m.addItem((i) => i.setTitle("Import a Word or JSON file\u2026").onClick(() => this.importReview()));
     if (this.inbox.length) {
       m.addSeparator();
       for (const entry of this.inbox) {
-        m.addItem((i) => i.setTitle(`${entry.title}: ${entry.items.length} from ` + reviewAuthors(entry.items)).setIcon("inbox").onClick(() => this.openInbox(entry)));
+        m.addItem((i) => i.setTitle(`${entry.title}: ${entry.items.length} from ` + reviewAuthors(entry.items)).onClick(() => this.openInbox(entry)));
       }
     }
     if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
@@ -7468,6 +7552,15 @@ var DendriteView = class extends ItemView {
   }
   openManuscriptSettings() {
     new ManuscriptModal(this).open();
+  }
+  /** Light the Preview button while this manuscript's preview is open. */
+  showPreviewOn() {
+    if (this.previewBtn && this.plugin.previewOpen) {
+      this.previewBtn.toggleClass(
+        "is-on",
+        this.plugin.previewOpen(this.file)
+      );
+    }
   }
   /** Submitted reviews for this manuscript, waiting on the bar. */
   refreshInbox() {
@@ -8549,12 +8642,11 @@ var DendriteView = class extends ItemView {
   // ---- export ----------------------------------------------------------
   /** Export, the whole manuscript or a branch, as chosen from a menu. */
   exportMenu(node, event) {
-    const { Menu } = require("obsidian");
-    const m = new Menu();
-    m.addItem((i) => i.setTitle("Markdown").setIcon("file-text").onClick(() => this.exportTo(node, "md")));
+    const m = dendriteMenu(false);
+    m.addItem((i) => i.setTitle("Markdown").onClick(() => this.exportTo(node, "md")));
     if (Platform.isDesktopApp) {
-      m.addItem((i) => i.setTitle("PDF").setIcon("file-output").onClick(() => this.exportTo(node, "pdf")));
-      m.addItem((i) => i.setTitle("Word").setIcon("file-output").onClick(() => this.exportTo(node, "docx")));
+      m.addItem((i) => i.setTitle("PDF").onClick(() => this.exportTo(node, "pdf")));
+      m.addItem((i) => i.setTitle("Word").onClick(() => this.exportTo(node, "docx")));
     }
     if (event) m.showAtMouseEvent(event);
   }
@@ -8728,6 +8820,9 @@ var DendritePreview = class extends ItemView {
     this.file = null;
     this.showLeft = false;
     this.notesAt = "section";
+    this.showComments = false;
+    this.reviewList = [];
+    this.reviewAt = -1;
     this.blocks = /* @__PURE__ */ new Map();
     this.segs = /* @__PURE__ */ new Map();
     this.bodies = /* @__PURE__ */ new Map();
@@ -8746,12 +8841,14 @@ var DendritePreview = class extends ItemView {
     return {
       file: this.file ? this.file.path : null,
       showLeft: this.showLeft,
-      notesAt: this.notesAt
+      notesAt: this.notesAt,
+      showComments: this.showComments
     };
   }
   async setState(state, result) {
     const f = state && state.file && this.app.vault.getAbstractFileByPath(state.file);
     this.showLeft = !!(state && state.showLeft);
+    this.showComments = !!(state && state.showComments);
     this.notesAt = NOTES_AT[state && state.notesAt] ? state.notesAt : "section";
     if (f instanceof TFile) {
       this.file = f;
@@ -8803,34 +8900,71 @@ var DendritePreview = class extends ItemView {
     el.empty();
     this.blocks.clear();
     const bar = el.createDiv({ cls: "dendrite-bar" });
-    bar.createDiv({
-      cls: "dendrite-title",
-      text: this.file ? this.file.basename : ""
-    });
-    const toggle = bar.createEl("label", { cls: "dendrite-bar-btn" });
-    const box = toggle.createEl("input", { type: "checkbox" });
-    box.checked = this.showLeft;
-    toggle.createSpan({ text: "Show left out" });
-    toggle.setAttr("aria-label", "Also show, dimmed, the text that does not print: notes and comments");
-    box.addEventListener("change", () => {
-      this.showLeft = box.checked;
-      this.app.workspace.requestSaveLayout();
-      this.refresh();
-    });
-    const notesAt = bar.createEl(
-      "select",
-      { cls: "dropdown dendrite-bar-select" }
+    barSwitch(
+      bar,
+      "Which text the preview shows",
+      [
+        [true, "All", "Also show, dimmed, the text that does not print: notes and comments"],
+        [false, "Printed", "Show only the text that prints"]
+      ],
+      this.showLeft,
+      (v) => {
+        this.showLeft = v;
+        this.app.workspace.requestSaveLayout();
+        this.refresh();
+      }
     );
-    notesAt.setAttr("aria-label", "Where footnotes are shown");
-    for (const [v, label] of Object.entries(NOTES_AT)) {
-      notesAt.createEl("option", { value: v, text: label });
-    }
-    notesAt.value = this.notesAt;
-    notesAt.addEventListener("change", () => {
-      this.notesAt = notesAt.value;
-      this.app.workspace.requestSaveLayout();
-      this.refresh();
-    });
+    const comments = barButton(
+      bar,
+      "message-square",
+      "Comments",
+      "Show review comments and suggested changes beside the text, as Word and Google Docs do, to go through them one by one",
+      () => {
+        this.showComments = !this.showComments;
+        comments.toggleClass("is-on", this.showComments);
+        this.reviewAt = -1;
+        this.app.workspace.requestSaveLayout();
+        this.refresh();
+      }
+    );
+    comments.toggleClass("is-on", this.showComments);
+    this.navEl = bar.createDiv({ cls: "dendrite-pcomments-nav" });
+    const navBtn = (icon, label, d) => barButton(
+      this.navEl,
+      icon,
+      "",
+      label,
+      () => this.stepComment(d)
+    );
+    navBtn("chevron-left", "Previous comment", -1);
+    this.posEl = this.navEl.createSpan(
+      { cls: "dendrite-pcomments-pos" }
+    );
+    navBtn("chevron-right", "Next comment", 1);
+    const notes = barButton(
+      bar,
+      "list-end",
+      "Footnotes",
+      "Where footnotes are shown",
+      (e) => {
+        const m = dendriteMenu(false);
+        for (const [v, label] of Object.entries(NOTES_AT)) {
+          m.addItem((i) => {
+            i.setTitle(label).onClick(() => {
+              this.notesAt = v;
+              this.app.workspace.requestSaveLayout();
+              this.refresh();
+            });
+            if (typeof i.setChecked === "function") {
+              i.setChecked(this.notesAt === v);
+            }
+          });
+        }
+        if (e && m.showAtMouseEvent) m.showAtMouseEvent(e);
+      },
+      true
+    );
+    notes.addClass("dendrite-bar-gap-before");
     this.doc = el.createDiv({ cls: "dendrite-preview-doc markdown-preview-view markdown-rendered" });
   }
   scheduleRefresh() {
@@ -8886,7 +9020,8 @@ var DendritePreview = class extends ItemView {
       core.renumberFootnotes(
         core.exportSegments(root.children, (id) => {
           const b = this.bodies.get(id);
-          return b ? b.body : "";
+          if (!b) return "";
+          return this.showComments ? review.renderMarkdown(b.body) : b.body;
         }, headingTop, numbers, roleOf, { kindOf })
       ).segments,
       this.notesAt
@@ -8903,6 +9038,136 @@ var DendritePreview = class extends ItemView {
       }
     }
     this.renderSegments(segs);
+    this.listComments(segs);
+  }
+  /**
+   * Every review comment the document prints, in reading order: those
+   * whose number is in a printed card's text. A comment in a part of a
+   * card that does not print, as under a heading-only card's heading,
+   * is left out, as the document leaves it.
+   */
+  listComments(segs) {
+    const list = [];
+    if (this.showComments) {
+      for (const sg of segs) {
+        if (!sg.text || sg.gathered) continue;
+        const body = (this.bodies.get(sg.id) || {}).body || "";
+        const items = review.reviewItems(body);
+        const shown = new Set([...sg.text.matchAll(
+          /<sup class="dendrite-review-n[^"]*">(\d+)<\/sup>/g
+        )].map((m) => Number(m[1]) - 1));
+        items.forEach((item, n) => {
+          if (shown.has(n)) list.push({ id: sg.id, n, item });
+        });
+      }
+    }
+    const was = this.reviewList[this.reviewAt];
+    const key = (x) => `${x.id}\0${review.reviewKeys(x.item)[0]}`;
+    this.reviewList = list;
+    let moved = false;
+    if (was) {
+      const k = list.findIndex((x) => key(x) === key(was));
+      if (k >= 0) this.reviewAt = k;
+      else moved = true;
+    }
+    if (this.reviewAt >= list.length) this.reviewAt = list.length - 1;
+    this.doc.toggleClass("has-comments", this.showComments);
+    this.navEl.toggleClass("is-hidden", !this.showComments);
+    this.showPos();
+    if (moved && this.reviewAt >= 0) this.goComment();
+  }
+  showPos() {
+    const n = this.reviewList.length;
+    this.posEl.setText(!n ? "No comments" : this.reviewAt < 0 ? `${n} comment${n === 1 ? "" : "s"}` : `${this.reviewAt + 1} of ${n}`);
+    for (const b of this.doc.querySelectorAll(".dendrite-pbubble")) {
+      const cur = this.reviewList[this.reviewAt];
+      b.toggleClass("is-current", !!cur && b.dataset.id === cur.id && Number(b.dataset.n) === cur.n);
+    }
+  }
+  /**
+   * Go to the next comment, or the one before, round from the end:
+   * its card is drawn if it was not yet, its bubble brought into view,
+   * and the card selected on the board.
+   */
+  async stepComment(d) {
+    const list = this.reviewList;
+    if (!list.length) return;
+    this.reviewAt = this.reviewAt < 0 ? d > 0 ? 0 : list.length - 1 : (this.reviewAt + d + list.length) % list.length;
+    await this.goComment();
+  }
+  /** Bring the comment gone to into view, and select its card. */
+  async goComment() {
+    const cur = this.reviewList[this.reviewAt];
+    if (!cur) return;
+    const b = this.blocks.get(cur.id);
+    if (b && b.el.hasClass("is-pending")) await this.renderBlock(cur.id);
+    this.showPos();
+    const bubble = b && b.el.querySelector(
+      `.dendrite-pbubble[data-n="${cur.n}"]`
+    );
+    if (bubble && bubble.scrollIntoView) {
+      bubble.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+    if (this.file) this.plugin.focusCard(this.file, cur.id, false);
+  }
+  /**
+   * A card's review comments as bubbles in the margin, each level with
+   * its number in the text where it can be measured, and pushed down
+   * below the one before it.
+   */
+  drawBubbles(id, b) {
+    const body = (this.bodies.get(id) || {}).body || "";
+    const items = review.reviewItems(body);
+    const mine = this.reviewList.filter((x) => x.id === id);
+    if (!mine.length) return;
+    b.el.addClass("has-bubbles");
+    const box = b.el.createDiv({ cls: "dendrite-pbubbles" });
+    const nums = [...b.el.querySelectorAll("sup.dendrite-review-n")];
+    let below = 0;
+    for (const { n } of mine) {
+      const it = items[n];
+      const el = box.createDiv({ cls: "dendrite-pbubble" + (it.kind === "suggest" ? " is-suggest" : "") });
+      el.dataset.id = id;
+      el.dataset.n = String(n);
+      const meta = el.createDiv({ cls: "dendrite-review-meta" });
+      meta.createEl("b", { text: it.author || "Reviewer" });
+      meta.appendText(` \xB7 ${review.shortDate(it.date)}`);
+      const { text, url } = review.noteLink(it.text);
+      if (url && it.kind !== "suggest") {
+        meta.appendText(" ");
+        const a = meta.createEl("a", {
+          cls: "dendrite-review-link",
+          text: "\u2197"
+        });
+        a.href = url;
+        a.title = "Open this comment in Google Docs";
+      }
+      el.createDiv({
+        cls: "dendrite-pbubble-text",
+        text: it.kind !== "suggest" ? text : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`
+      });
+      const row = el.createDiv({ cls: "dendrite-pbubble-btns" });
+      for (const [what, label] of it.kind === "suggest" ? [["apply", "Apply\u2026"], ["dismiss", "Dismiss"]] : [["resolve", "Resolve"]]) {
+        const btn = row.createEl("button", { text: label });
+        btn.onclick = async (e) => {
+          if (e && e.stopPropagation) e.stopPropagation();
+          if (this.plugin.reviewFromPreview) {
+            await this.plugin.reviewFromPreview(
+              this.file,
+              id,
+              n,
+              what
+            );
+          }
+        };
+      }
+      const sup = nums.find((x) => x.textContent === String(n + 1));
+      const top = Math.max(sup ? sup.offsetTop : 0, below);
+      el.style.top = `${top}px`;
+      below = top + el.offsetHeight + 6;
+    }
+    if (below > b.el.offsetHeight) b.el.style.minHeight = `${below}px`;
+    this.showPos();
   }
   renderSegments(segs) {
     this.segs = new Map(segs.map((s) => [s.id, s]));
@@ -8914,7 +9179,7 @@ var DendritePreview = class extends ItemView {
       }
     }
     for (const s of segs) {
-      const key = s.text + "\0" + core.footnoteBlock(s.cardNotes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "");
+      const key = (this.showComments ? "c\0" : "") + s.text + "\0" + core.footnoteBlock(s.cardNotes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "");
       let b = this.blocks.get(s.id);
       if (!b) {
         const el = createDiv({ cls: "dendrite-pblock" });
@@ -8991,6 +9256,7 @@ var DendritePreview = class extends ItemView {
         b.comp
       );
     }
+    if (this.showComments && s.text) this.drawBubbles(id, b);
   }
   /**
    * A gathered list of footnotes, rendered by Obsidian as a card's own
@@ -10401,6 +10667,18 @@ module.exports = class DendritePlugin extends Plugin {
       title: r.title
     } } : { status: 404, json: { error: "no such review" } };
   }
+  /**
+   * Act on a review comment from the preview, as from its card on the
+   * board: the board for the manuscript is opened if it is not.
+   */
+  async reviewFromPreview(indexFile, id, n, what) {
+    let view = this.openViews().find((v) => v.file === indexFile);
+    if (!view) {
+      await this.focusCard(indexFile, id, false);
+      view = this.openViews().find((v) => v.file === indexFile);
+    }
+    if (view) await view.reviewAction(id, n, what);
+  }
   // ---- Google Docs ---------------------------------------------------
   /**
    * The OAuth client, as pasted in the settings or else from its file,
@@ -10806,8 +11084,20 @@ module.exports = class DendritePlugin extends Plugin {
     return leaf;
   }
   /** The preview for a manuscript, opened beside the board or reused. */
+  previewLeaf(file) {
+    return this.app.workspace.getLeavesOfType(PREVIEW).find((l) => l.view.file === file) || null;
+  }
+  previewOpen(file) {
+    return !!this.previewLeaf(file);
+  }
+  /** Open a manuscript's preview beside its board, or close it. */
+  async togglePreview(file) {
+    const open = this.previewLeaf(file);
+    if (open) open.detach();
+    else await this.openPreview(file);
+  }
   async openPreview(file) {
-    const open = this.app.workspace.getLeavesOfType(PREVIEW).find((l) => l.view.file === file);
+    const open = this.previewLeaf(file);
     if (open) {
       this.app.workspace.revealLeaf(open);
       return;

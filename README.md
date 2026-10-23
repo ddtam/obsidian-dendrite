@@ -221,7 +221,7 @@ A card's status shows at its top right, beside the role icon, in a band at the t
 
 Colours come from the [Pretty Properties](https://github.com/anareaty/pretty-properties) plugin, if it gives `dendrite_status` values a colour, so the Properties panel and the board agree.
 
-To set a role or status on a card and everything below it, use **Whole branch** under **Prints as** in its menu; a status there reaches only cards that print their text. A card that takes its status from the cards below it, such as a heading, has **Cards below: draft**, **done** and **revise** in its own menu for the same. A whole branch has no key, since it is a sweeping change. The whole change is one undo, and so is a status set on one card, by key, menu, **+** or **−**.
+To set a role on a card and everything below it, use **Whole branch** under **Prints as** in its menu. Statuses for the cards below a card are at the top of its menu, beside its own: a card that takes its status from the cards below it, such as a heading, has **Cards below: draft**, **done** and **revise**, and a card that prints its own text and has cards below has a **Cards below** fold-out after its own statuses. Either reaches only the cards below that print their text, never the card itself. A whole branch has no key, since it is a sweeping change. The whole change is one undo, and so is a status set on one card, by key, menu, **+** or **−**.
 
 ## Sync across devices
 
@@ -235,11 +235,13 @@ Dendrite writes a note only for something done on its board: a key, a menu, a dr
 
 ## Revising what prints
 
-**Printed** in the bar shows only the cards that print, each where it prints: a card left out goes with its branch, a scaffolding card's children take its place under its parent, and a card that prints its heading alone shows only its heading. Each column is then a heading level of the printed document. Cards are edited, and statuses set, as usual; the structure is not changed here, since cards sit where they print rather than where they are in the index, so moving, adding, deleting, merging and dragging wait until **Printed** is clicked again. Find searches the cards shown. The command **Show only the cards that print, or every card** does the same, and the board remembers the choice.
+**All | Printed** in the bar switches between every card and only the cards that print, the view shown lit. **Printed** shows only the cards that print, each where it prints: a card left out goes with its branch, a scaffolding card's children take its place under its parent, and a card that prints its heading alone shows only its heading. Each column is then a heading level of the printed document. Cards are edited, and statuses set, as usual; the structure is not changed here, since cards sit where they print rather than where they are in the index, so moving, adding, deleting, merging and dragging wait until **Printed** is clicked again. Find searches the cards shown. The command **Show only the cards that print, or every card** does the same, and the board remembers the choice.
 
 ## Preview
 
-**Preview** in the bar opens the manuscript as export would print it, beside the board, updating as cards save. Each card's part is its own block: click one to select that card on the board, double-click to edit it, and the board's active card is highlighted in the preview. **Show left out** also shows, dimmed, the text that does not print, so you can check what your roles leave out. Editing stays in the cards, since the printed text is transformed (headings levelled and numbered, notes and comments dropped).
+**Preview** in the bar opens the manuscript as export would print it, beside the board, updating as cards save, and closes it again; the button is lit while the preview is open. The preview's own bar has **Left out**, which shows the text that does not print, dimmed, **Footnotes**, where they are gathered, and **Comments**. In both bars a button ending in a caret opens a menu, and one without switches a view on or off and is lit while on. Each card's part is its own block: click one to select that card on the board, double-click to edit it, and the board's active card is highlighted in the preview. **Show left out** also shows, dimmed, the text that does not print, so you can check what your roles leave out. Editing stays in the cards, since the printed text is transformed (headings levelled and numbered, notes and comments dropped).
+
+**Comments** in the preview's bar shows review comments and suggested changes as Word and Google Docs do: each commented passage tinted and numbered in the text, a suggested change's old text struck through beside its new, and the comments as bubbles in a margin to the right, each level with its number. Only what prints is shown, so a comment under a heading-only card's heading is not. Each bubble has **Resolve**, or **Apply…** and **Dismiss** for a suggestion, which act on the card as its own buttons on the board do, opening the board if it is not open, and a ↗ to a Google Docs comment's thread. **‹** and **›** go through the comments one by one in reading order, round from the last to the first, bringing each into view and selecting its card on the board; resolving the one gone to goes on to the next, so a review is worked through with **Resolve** alone.
 
 ## Export
 
@@ -296,6 +298,9 @@ npm install
 npm test          # core and view tests against an in-memory vault
 npm run build     # bundles src/ into main.js
 ```
+
+
+Icons follow the rules of Nikita Prokopov's [critique of icons in every menu item](https://tonsky.me/blog/tahoe-icons): an icon means one thing everywhere, the same action having the same icon on the bar, in menus and on a card, and two that look alike never mean different things; a row has an icon only where it earns one, by being frequent, matching what the card shows, or warning, so a fold-out, a heading for its group, has none; and since Obsidian gives a row without an icon no room for one, Dendrite's menus keep that room on every row, so labels line up, while a menu with no icons keeps none. A bar button that opens a menu ends in a caret, and a choice between two views is a switch with the one shown lit. `test/view.test.mjs` fails when an icon is used for two meanings, a fold-out has an icon, or a menu's icons and its room for them disagree.
 
 ## Acknowledgements
 

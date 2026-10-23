@@ -383,7 +383,7 @@ const obsidian = {
                     this.titleContent = typeof x === 'string' ? null : x;
                     return this;
                 },
-                setIcon() { return this; },
+                setIcon(x) { this.icon = x; return this; },
                 onClick(f) { this.click = f; return this; },
                 // A submenu, kept off lastMenu, which names the menu shown.
                 setSubmenu() {
@@ -420,7 +420,8 @@ const obsidian = {
         register(mods, key, fn) { this.keys.push({ mods, key, fn }); }
     },
     Keymap: { isModEvent: () => false },
-    setIcon() {},
+    // The icon is kept on the element, for checking which is where.
+    setIcon(el, x) { if (el && el.dataset) el.dataset.icon = x; },
     normalizePath: (s) => s.replace(/\/+/g, '/').replace(/^\/|\/$/g, ''),
 };
 

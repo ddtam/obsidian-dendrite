@@ -907,10 +907,13 @@ test('the preview prints by role, follows edits, and links to the board',
                                'The aims prose.'],
                      'headings numbered, notes and comments left out');
     // Show left out: the notes appear, dimmed, in their own element.
-    const box = view.contentEl.querySelector('input[type=checkbox]');
-    box.checked = true;
-    box.dispatchEvent(new h.window.Event('change'));
+    const allBtn = [...view.contentEl.querySelectorAll('.dendrite-seg-btn')]
+        .find((b) => b.textContent === 'All');
+    allBtn.onclick();
     await tick(20);
+    assert.ok(allBtn.hasClass('is-on'));
+    assert.ok(!view.contentEl.querySelector('.dendrite-title'),
+              'the bar does not repeat the manuscript\'s name');
     const left = [...view.contentEl.querySelectorAll('.dendrite-left-out')]
         .map((e) => e.textContent);
     assert.deepEqual(left, ['My notes on what to do.', 'Planning.', 'check']);
@@ -960,16 +963,18 @@ test('the preview gathers footnotes under each section or at the end',
     assert.match(view.blocks.get('G-ddddd').el.textContent,
                  /^Aims text\.\[\^1\]/, 'an inline note is numbered');
     assert.ok(view.blocks.get('G-ddddd').el.hasClass('is-notes-gathered'));
-    const select = view.contentEl.querySelector('select');
-    select.value = 'end';
-    select.dispatchEvent(new h.window.Event('change'));
-    await tick(20);
+    const notesAt = async (label) => {
+        [...view.contentEl.querySelectorAll('.dendrite-bar-btn')]
+            .find((b) => b.textContent === 'Footnotes').onclick();
+        await h.obsidian.lastMenu.items.find((i) => i.title === label)
+            .click();
+        await tick(20);
+    };
+    await notesAt('Footnotes collected at the end');
     assert.deepEqual(notes(), ['[^1]: [@k]\n[^2]: Second\n    goes on.\n' +
                                '[^3]: Third.']);
     assert.equal(view.getState().notesAt, 'end');
-    select.value = 'card';
-    select.dispatchEvent(new h.window.Event('change'));
-    await tick(20);
+    await notesAt('Footnotes under each card');
     assert.deepEqual(notes(), [], 'under each card: nothing gathered');
     const b = view.blocks.get('G-ddddd').el;
     assert.equal(b.textContent.trim(), 'Aims text.[^1]\n\n[^1]: [@k]',
@@ -1869,9 +1874,12 @@ test('a whole branch is set from the menu only, as one undo; Alt with a ' +
     assert.deepEqual(whole.submenu.items.map((i) => i.title), [
         'Prints automatically', 'Prints its heading only',
         'Prints its full text', 'Scaffolding: prints its children only',
-        'Left out of the manuscript', 'Status: draft', 'Status: done',
-        'Status: revise']);
-    await whole.submenu.items[6].click();
+        'Left out of the manuscript'], 'roles only');
+    // Statuses for the cards below are at the top of the card's menu.
+    view.active = 'G-aaaaa';
+    view.cardMenu(view.cardEls.get('G-aaaaa'));
+    await h.obsidian.lastMenu.items.find((i) =>
+        i.title === 'Cards below: done').click();
     await tick(30);
     assert.deepEqual(branch.map((id) => prop(id, 'status')),
                      [undefined, undefined, 'done', 'done'],
@@ -1964,8 +1972,8 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                              b.getAttribute('aria-label')),
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
-                      'Undo', 'Redo', 'Preview', 'Printed', 'Export',
-                      'Review']);
+                      'Undo', 'Redo', 'Preview', 'All', 'Printed',
+                      'Export', 'Review']);
     // The mode comes after the buttons; the name is the pane's title.
     const kids = [...view.contentEl.querySelector('.dendrite-bar').children];
     assert.ok(kids.indexOf(view.modeEl) > kids.indexOf(bar[5]));
@@ -3015,19 +3023,24 @@ test('the card menu: status first, then what it prints, its versions and ' +
     await view.select('G-ccccc');
     view.cardMenu(view.cardEls.get('G-ccccc'), null);
     const m = h.obsidian.lastMenu;
-    assert.deepEqual(m.titles.map((t) => t.replace(/Ctrl\+\d$/, '')
-        .trim()), ['Status: draft', 'Status: done', 'Status: revise',
-        '---', 'Prints as', 'Versions', 'Structure', '---',
-        'Export this branch', 'Card properties…', 'Copy reference',
-        'Open card note', '---',
-        'Delete card and its children (Ctrl+Backspace)']);
+    assert.deepEqual(m.titles, ['Status: draft', 'Status: done',
+        'Status: revise', '---', 'Prints as', 'Versions', 'Structure',
+        '---', 'Export this branch', 'Card properties…', 'Copy reference',
+        'Open card note', '---', 'Delete card and its children']);
+    const del = m.items.find((i) => /^Delete/.test(i.title));
+    assert.deepEqual([...del.titleContent.querySelectorAll('kbd')]
+        .map((k) => k.dataset.k), ['Ctrl', 'Backspace'],
+                     'each key a keycap');
     assert.deepEqual(submenuOf(m, 'Versions').titles, [
         'New version of this card', 'Show old versions',
         'Make an old version current, or delete one…']);
-    assert.deepEqual(submenuOf(m, 'Structure').titles, [
-        'New card above (Ctrl+↑)', 'Move up (Alt+↑)', 'Move down (Alt+↓)',
-        'Indent (Alt+→)', 'Outdent (Alt+←)', '---',
-        'Merge into the card above', 'Merge into the parent card']);
+    const st = submenuOf(m, 'Structure');
+    assert.deepEqual(st.titles, ['New card above', 'Move up', 'Move down',
+        'Indent', 'Outdent', '---', 'Merge into the card above',
+        'Merge into the parent card']);
+    assert.deepEqual(st.items.map((i) => i.icon || ''),
+                     ['', '', '', '', '', 'merge', 'git-merge'],
+                     'the keys show the arrows; the merges are marked');
     await menuItem(m, 'Show old versions').click();
     assert.equal(view.fannedId, 'G-ccccc');
     view.cardMenu(view.cardEls.get('G-ccccc'), null);
@@ -3059,4 +3072,230 @@ test('replacing a card clears the old one\'s status and starts the new ' +
     await view.promote('G-ccccc', 'G-aaaaa');
     await tick(20);
     assert.match(read(cardPath('G-aaaaa')), /dendrite_status: draft/);
+});
+
+test('the preview can show review comments as bubbles beside the text, ' +
+     'step through them in reading order, and act on them', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|p]]\n- [[G-ccccc|q]]\n');
+    const card = (id, text) => app.vault.create(cardPath(id), text);
+    const url = 'https://docs.google.com/document/d/D/edit?disco=A1';
+    await card('G-aaaaa', '# Aims\nPlanning ==notes==%%[!review] R, ' +
+               '2026-10-24: Not printed.%%');
+    await card('G-bbbbb', 'The ==cohort==%%[!review] Aly Karsan, ' +
+               `2026-10-24: How many? ${url}%% is ==large==` +
+               '%%[!suggest] Aly Karsan, 2026-10-24: big%%.');
+    await card('G-ccccc', 'Plan ==here==%%[!review] Claude, ' +
+               '2026-10-23: Say when.%%');
+    const focused = [];
+    const acted = [];
+    const plugin = { settings: { headingTop: 1 },
+        focusCard: (f, id, edit) => focused.push(id),
+        reviewFromPreview: async (f, id, n, what) =>
+            acted.push([id, n, what]) };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX });
+    await tick(20);
+    const bubbles = () => [...view.contentEl.querySelectorAll(
+        '.dendrite-pbubble')];
+    assert.equal(bubbles().length, 0, 'off at first');
+    const toggle = [...view.contentEl.querySelectorAll('.dendrite-bar-btn')]
+        .find((b) => b.textContent === 'Comments');
+    toggle.onclick();
+    await tick(30);
+    assert.ok(toggle.hasClass('is-on'));
+    assert.equal(view.getState().showComments, true);
+    // Only what prints: the heading card's notes are not in the document.
+    assert.deepEqual(bubbles().map((b) => b.querySelector(
+        '.dendrite-pbubble-text').textContent),
+        ['How many?', 'Suggests: big', 'Say when.']);
+    const first = bubbles()[0];
+    assert.match(first.textContent, /Aly Karsan/);
+    assert.equal(first.querySelector('a').href, url);
+    assert.ok(view.doc.hasClass('has-comments'));
+    const label = () => view.contentEl.querySelector(
+        '.dendrite-pcomments-pos').textContent;
+    assert.equal(label(), '3 comments');
+    const nav = (t) => [...view.contentEl.querySelectorAll(
+        '.dendrite-pcomments-nav button')].find((b) =>
+        b.getAttribute('aria-label') === t);
+    await nav('Next comment').onclick();
+    assert.equal(label(), '1 of 3');
+    assert.deepEqual(focused, ['G-bbbbb'], 'its card is selected');
+    assert.ok(bubbles()[0].hasClass('is-current'));
+    await nav('Next comment').onclick();
+    await nav('Next comment').onclick();
+    assert.equal(label(), '3 of 3');
+    assert.ok(bubbles()[2].hasClass('is-current'));
+    await nav('Next comment').onclick();
+    assert.equal(label(), '1 of 3', 'round to the first');
+    await nav('Previous comment').onclick();
+    assert.equal(label(), '3 of 3');
+    // Acting on a bubble acts on its card's comment, on the board.
+    await [...bubbles()[1].querySelectorAll('button')]
+        .find((b) => b.textContent === 'Dismiss').onclick();
+    await [...bubbles()[2].querySelectorAll('button')]
+        .find((b) => b.textContent === 'Resolve').onclick();
+    assert.deepEqual(acted, [['G-bbbbb', 1, 'dismiss'],
+                             ['G-ccccc', 0, 'resolve']]);
+    // The current comment resolved, the next one is gone to: in view,
+    // its card selected, and the count where it was.
+    await nav('Next comment').onclick();
+    assert.equal(label(), '1 of 3');
+    focused.length = 0;
+    await app.vault.modify(app.vault.getAbstractFileByPath(
+        cardPath('G-bbbbb')), 'The cohort is ==large==%%[!suggest] Aly ' +
+        'Karsan, 2026-10-24: big%%.');
+    await view.refresh();
+    await tick(30);
+    assert.equal(label(), '1 of 2');
+    assert.ok(bubbles()[0].hasClass('is-current'));
+    assert.match(bubbles()[0].textContent, /Suggests: big/);
+    assert.deepEqual(focused, ['G-bbbbb']);
+    await nav('Next comment').onclick();
+    assert.equal(label(), '2 of 2', 'on to the one after, none skipped');
+    toggle.onclick();
+    await tick(30);
+    assert.equal(bubbles().length, 0);
+    assert.ok(!view.doc.hasClass('has-comments'));
+});
+
+test('the board\'s Preview button opens the preview and closes it again, ' +
+     'lit while it is open', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'Text.' });
+    let shown = false;
+    view.plugin.previewOpen = () => shown;
+    view.plugin.togglePreview = async () => { shown = !shown; };
+    view.render();
+    const btn = [...view.contentEl.querySelectorAll('.dendrite-bar-btn')]
+        .find((b) => b.textContent === 'Preview');
+    assert.ok(!btn.hasClass('is-on'));
+    await btn.onclick();
+    assert.ok(btn.hasClass('is-on'));
+    await btn.onclick();
+    assert.ok(!btn.hasClass('is-on'));
+});
+
+test('bar buttons that open a menu carry a caret; ones that switch a view ' +
+     'do not', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'Text.' });
+    const caret = (t) => !![...view.contentEl.querySelectorAll(
+        '.dendrite-bar-btn')].find((b) => b.textContent === t)
+        .querySelector('.dendrite-bar-caret');
+    assert.deepEqual(['Export', 'Review', 'All', 'Printed', 'Preview']
+        .map(caret), [true, true, false, false, false]);
+});
+
+test('icons: one meaning each across the bars and menus, and a menu has ' +
+     'one on every item or on none', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\ndendrite_gdoc: https://docs.google.com/' +
+        'document/d/D/edit\n---\n- [[G-aaaaa|A]]\n    - [[G-ccccc|C]]\n' +
+        '    - [[G-ddddd|D]]\n', { 'G-aaaaa': '---\ndendrite_role: prose\n' +
+        '---\nOld.', 'G-ccccc': 'New.', 'G-ddddd': 'D.' });
+    await view.promote('G-aaaaa', 'G-ccccc');
+    await view.select('G-ccccc');
+    // Every icon, with what it is on.
+    const uses = [];
+    const menus = [];
+    const walk = (menu, where) => {
+        menus.push([where, menu]);
+        for (const i of menu.items || []) {
+            if (i.icon) uses.push([i.icon, i.title.replace(/ \(.*\)$/, '')]);
+            if (i.submenu) walk(i.submenu, `${where} › ${i.title}`);
+        }
+    };
+    view.cardMenu(view.cardEls.get('G-ccccc'), null);
+    walk(h.obsidian.lastMenu, 'card');
+    walk(view.reviewMenu(null), 'review');
+    view.exportMenu(null, null);
+    walk(h.obsidian.lastMenu, 'export');
+    for (const b of view.contentEl.querySelectorAll('.dendrite-bar-btn')) {
+        const icon = b.querySelector('[data-icon]');
+        if (icon) uses.push([icon.dataset.icon,
+                             b.getAttribute('aria-label').split(/[,:.]/)[0]]);
+    }
+    // A fold-out is a heading for its group: no icon. A menu with no
+    // icons at all keeps no room for them; one with some keeps room on
+    // every row, so its labels line up.
+    for (const [where, menu] of menus) {
+        for (const i of menu.items || []) {
+            assert.ok(!(i.submenu && i.icon),
+                      `${where} › ${i.title} folds out and has an icon`);
+        }
+        const n = (menu.items || []).filter((i) => i.icon).length;
+        if (menu.items && menu.items.length) {
+            assert.equal(menu.dendriteIcons, n > 0,
+                `${where}: ${n} icons, but made with icons ` +
+                `${menu.dendriteIcons}`);
+        }
+    }
+    // The same icon only for the same thing.
+    const same = [
+        ['Move down', 'Move this card down'],
+        ['Card properties…', 'This card\'s label and limit'],
+        ['Export this branch', 'Export the manuscript'],
+    ];
+    const meaning = (t) => (same.find((g) => g.some((x) =>
+        t.startsWith(x))) || [t])[0];
+    const byIcon = new Map();
+    for (const [icon, title] of uses) {
+        if (!byIcon.has(icon)) byIcon.set(icon, new Set());
+        byIcon.get(icon).add(meaning(title));
+    }
+    for (const [icon, titles] of byIcon) {
+        assert.equal(titles.size, 1,
+                     `${icon} means more than one thing: ${[...titles]}`);
+    }
+});
+
+test('which cards the board shows is a switch between All and Printed, ' +
+     'the view shown lit', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'Text.' });
+    const seg = () => [...view.contentEl.querySelectorAll(
+        '.dendrite-seg .dendrite-seg-btn')];
+    const lit = () => seg().filter((b) => b.hasClass('is-on'))
+        .map((b) => b.textContent);
+    assert.deepEqual(seg().map((b) => b.textContent), ['All', 'Printed']);
+    assert.deepEqual(lit(), ['All']);
+    seg()[0].onclick();
+    assert.equal(view.printOnly, false, 'the view shown: nothing changes');
+    seg()[1].onclick();
+    assert.equal(view.printOnly, true);
+    assert.deepEqual(lit(), ['Printed']);
+    seg()[0].onclick();
+    assert.equal(view.printOnly, false);
+    assert.deepEqual(lit(), ['All']);
+});
+
+test('a card that prints and has cards below sets theirs from a Cards ' +
+     'below fold-out after its own statuses', async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-bbbbb|B]]\n', { 'G-aaaaa': '---\ndendrite_role: ' +
+        'prose\n---\nA text.', 'G-bbbbb': 'B text.' });
+    await view.select('G-aaaaa');
+    await view.updateStatuses();
+    view.cardMenu(view.cardEls.get('G-aaaaa'), null);
+    const m = h.obsidian.lastMenu;
+    assert.deepEqual(m.titles.slice(0, 5), ['Status: draft', 'Status: done',
+        'Status: revise', 'Cards below', '---']);
+    const below = submenuOf(m, 'Cards below');
+    assert.deepEqual(below.titles, ['Status: draft', 'Status: done',
+                                    'Status: revise']);
+    await below.items[2].click();
+    await tick(30);
+    assert.match(read(cardPath('G-bbbbb')), /dendrite_status: revise/);
+    assert.doesNotMatch(read(cardPath('G-aaaaa')), /revise/,
+                        'its own is its own');
 });

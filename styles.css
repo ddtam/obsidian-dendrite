@@ -14,6 +14,10 @@
     align-items: center;
     gap: 6px;
     padding: 6px 12px;
+    /* The board's and the preview's bars the same height: the preview's
+       as it was, when it held a dropdown. */
+    min-height: calc(var(--input-height, 30px) + 12px);
+    box-sizing: border-box;
     border-bottom: 1px solid var(--background-modifier-border);
     flex: 0 0 auto;
 }
@@ -1226,8 +1230,28 @@
     margin-left: 0;
 }
 
-.dendrite-menu-key::after {
-    content: attr(data-key);
+/* Each key of a shortcut as a keycap. */
+.dendrite-menu-key {
+    display: inline-flex;
+    gap: 2px;
+}
+.dendrite-kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.5em;
+    padding: 0 4px;
+    font-family: var(--font-interface);
+    font-size: var(--font-ui-smaller);
+    line-height: 1.5;
+    color: var(--text-muted);
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+}
+.dendrite-kbd::after {
+    content: attr(data-k);
 }
 
 /* Review comments from a returned Word file. A comment is in the accent
@@ -1239,31 +1263,36 @@
     --dendrite-review: var(--interactive-accent);
     --dendrite-suggest: var(--dendrite-revise, var(--color-orange));
 }
-.dendrite-md mark.dendrite-review-mark {
+.dendrite-md mark.dendrite-review-mark,
+.dendrite-preview-doc mark.dendrite-review-mark {
     background: color-mix(in srgb, var(--dendrite-review) 22%,
                           transparent);
     color: inherit;
     border-radius: 2px;
     padding: 0 1px;
 }
-.dendrite-md .dendrite-review-old {
+.dendrite-md .dendrite-review-old,
+.dendrite-preview-doc .dendrite-review-old {
     color: var(--text-faint);
     text-decoration: line-through;
 }
-.dendrite-md .dendrite-review-new {
+.dendrite-md .dendrite-review-new,
+.dendrite-preview-doc .dendrite-review-new {
     background: color-mix(in srgb, var(--dendrite-suggest) 22%,
                           transparent);
     border-radius: 2px;
     padding: 0 1px;
     margin-left: 3px;
 }
-.dendrite-md sup.dendrite-review-n {
+.dendrite-md sup.dendrite-review-n,
+.dendrite-preview-doc sup.dendrite-review-n {
     font-size: 0.65em;
     margin-left: 2px;
     font-weight: 600;
     color: var(--dendrite-review);
 }
-.dendrite-md sup.dendrite-review-n.is-suggest {
+.dendrite-md sup.dendrite-review-n.is-suggest,
+.dendrite-preview-doc sup.dendrite-review-n.is-suggest {
     color: var(--dendrite-suggest);
 }
 .dendrite-review-notes {
@@ -1552,4 +1581,102 @@ button.dendrite-review-btn:hover {
     display: flex;
     align-items: center;
     justify-content: center;
+}
+
+/* Review comments in the preview: the text keeps its width, and the
+   comments sit in a margin to its right, each level with its number,
+   as Word and Google Docs show them. */
+.dendrite-preview-doc.has-comments {
+    padding-right: 300px;
+}
+.dendrite-pblock.has-bubbles {
+    position: relative;
+}
+.dendrite-pbubbles {
+    position: absolute;
+    top: 0;
+    right: -290px;
+    width: 270px;
+}
+.dendrite-pbubble {
+    position: absolute;
+    left: 0;
+    right: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 3px solid var(--text-accent);
+    border-radius: 6px;
+    background: var(--background-primary);
+    font-size: var(--font-ui-small);
+    line-height: 1.4;
+}
+.dendrite-pbubble.is-suggest {
+    border-left-color: var(--dendrite-revise, var(--color-orange));
+}
+.dendrite-pbubble.is-current {
+    box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+.dendrite-pbubble-text {
+    margin: 2px 0 4px;
+}
+.dendrite-pbubble-btns {
+    display: flex;
+    gap: 4px;
+    justify-content: flex-end;
+}
+.dendrite-pbubble-btns button {
+    font-size: var(--font-ui-smaller);
+    padding: 2px 8px;
+    height: auto;
+}
+.dendrite-pcomments-nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+.dendrite-pcomments-nav.is-hidden {
+    display: none;
+}
+.dendrite-pcomments-pos {
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+    min-width: 6em;
+    text-align: center;
+}
+
+/* A bar button that opens a menu: a small caret after its label. */
+.dendrite-bar-caret {
+    display: inline-flex;
+    margin-left: -1px;
+    opacity: 0.7;
+}
+.dendrite-bar-caret svg {
+    width: 12px;
+    height: 12px;
+}
+
+/* The menus set apart from the toggles before them. */
+.dendrite-bar-gap-before {
+    margin-left: 10px;
+}
+
+/* A switch between two views: its halves joined, the one shown lit. */
+.dendrite-seg {
+    display: inline-flex;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    overflow: hidden;
+}
+.dendrite-seg .dendrite-seg-btn {
+    border-radius: 0;
+    padding: 2px 10px;
+}
+.dendrite-seg .dendrite-seg-btn + .dendrite-seg-btn {
+    border-left: 1px solid var(--background-modifier-border);
+}
+
+/* Dendrite's menus keep an icon's room on every row, so a row without
+   an icon lines up with those that have one. */
+.menu.dendrite-menu:not(.mod-no-icon) .menu-item-icon {
+    min-width: var(--icon-size, 18px);
 }
