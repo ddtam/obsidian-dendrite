@@ -245,6 +245,22 @@ function dendriteMenu(icons = true) {
     return styleMenu(new Menu(), icons);
 }
 
+/**
+ * A review comment's menu, `items` [action, label, warning], each calling
+ * `act(action)`; a warning, a deletion, in the theme's warning colour.
+ */
+function showCommentMenu(items, event, act) {
+    const m = dendriteMenu(false);
+    for (const [what, label, warn] of items) {
+        m.addItem((i) => {
+            i.setTitle(label).onClick(() => act(what));
+            if (warn && typeof i.setWarning === 'function') i.setWarning(true);
+        });
+    }
+    if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
+    return m;
+}
+
 function styleMenu(m, icons) {
     if (m.dom && m.dom.addClass) m.dom.addClass('dendrite-menu');
     if (!icons && typeof m.setNoIcon === 'function') m.setNoIcon();
@@ -1016,7 +1032,8 @@ class DendriteView extends ItemView {
                 f.path, comp);
             if (notes.length) {
                 review.decorate(out, notes,
-                                (n, what) => this.reviewAction(id, n, what));
+                    (n, what) => this.reviewAction(id, n, what),
+                    (n, e) => this.commentMenu(id, n, e));
             }
         } else if (!kind) {
             out.createDiv({ cls: 'dendrite-placeholder',
@@ -1690,9 +1707,13 @@ class DendriteView extends ItemView {
             if (f) this.plugin.openAsMarkdown(f);
         });
         m.addSeparator();
-        m.addItem((i) => i.setTitle(this.menuLabel(
-            'Delete card and its children', 'Ctrl+Backspace'))
-            .setIcon('trash-2').onClick(() => this.deleteActive()));
+        m.addItem((i) => {
+            i.setTitle(this.menuLabel('Delete card and its children',
+                                      'Ctrl+Backspace'))
+                .setIcon('trash-2').onClick(() => this.deleteActive());
+            // A deletion, in the theme's warning colour.
+            if (typeof i.setWarning === 'function') i.setWarning(true);
+        });
         if (event) {
             m.showAtMouseEvent(event);
             return;
@@ -1957,8 +1978,11 @@ class DendriteView extends ItemView {
             .setIcon('folder-plus')
             .onClick(() => new GroupModal(this).open()));
         m.addSeparator();
-        m.addItem((i) => i.setTitle(`Delete ${n} cards and their children`)
-            .setIcon('trash-2').onClick(() => this.deletePicked()));
+        m.addItem((i) => {
+            i.setTitle(`Delete ${n} cards and their children`)
+                .setIcon('trash-2').onClick(() => this.deletePicked());
+            if (typeof i.setWarning === 'function') i.setWarning(true);
+        });
         if (event) {
             m.showAtMouseEvent(event);
             return;
@@ -3418,7 +3442,8 @@ class DendriteView extends ItemView {
             comp);
         if (notes.length) {
             review.decorate(out, notes,
-                            (n, what) => this.reviewAction(id, n, what));
+                (n, what) => this.reviewAction(id, n, what),
+                (n, e) => this.commentMenu(id, n, e));
         }
     }
 
@@ -4774,6 +4799,19 @@ class DendriteView extends ItemView {
      * out and leaves the passage; apply shows the card with the change
      * first. One step to undo either way.
      */
+    /** A review comment's right-click menu, Delete from Dendrite in it. */
+    commentMenu(id, n, event) {
+        const f = this.cardFile(id);
+        if (!f) return;
+        this.app.vault.cachedRead(f).then((data) => {
+            const it = review.reviewItems(core.splitFrontmatter(data)
+                .body)[n];
+            if (!it) return;
+            showCommentMenu(review.commentMenu(it), event,
+                            (what) => this.reviewAction(id, n, what));
+        });
+    }
+
     async reviewAction(id, n, what) {
         const f = this.cardFile(id);
         if (!f) return;
@@ -6296,9 +6334,17 @@ class DendritePreview extends ItemView {
                     it.passage ? `Suggests: ${it.text.trim()}` :
                     `Suggests adding: ${it.text.trim()}` });
             const row = el.createDiv({ cls: 'dendrite-pbubble-btns' });
+            el.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                showCommentMenu(review.commentMenu(it), e, (what) => {
+                    if (this.plugin.reviewFromPreview) {
+                        this.plugin.reviewFromPreview(this.file, id, n, what);
+                    }
+                });
+            });
             for (const [what, label, tip] of review.commentActions(it)) {
-                const btn = row.createEl('button', { text: label,
-                    cls: what === 'delete' ? 'is-quiet' : '' });
+                const btn = row.createEl('button', { text: label });
                 if (tip) btn.title = tip;
                 btn.onclick = async (e) => {
                     if (e && e.stopPropagation) e.stopPropagation();

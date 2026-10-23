@@ -207,8 +207,16 @@ test('on the board a comment\'s passage is marked and numbered, with a ' +
     assert.equal(notes[1].querySelector('.dendrite-review-text').textContent,
                  'Suggests: new');
     for (const b of root.querySelectorAll('button')) b.click();
-    assert.deepEqual(acts, [[0, 'resolve'], [0, 'delete'], [1, 'apply'],
-                            [1, 'dismiss'], [2, 'resolve'], [2, 'delete']]);
+    assert.deepEqual(acts, [[0, 'resolve'], [1, 'apply'], [1, 'dismiss'],
+                            [2, 'resolve']]);
+    // Right-click on a comment: its own menu, through `act`.
+    const menus = [];
+    root.innerHTML = html.split('\n\n').map((x) => `<p>${x}</p>`).join('');
+    r.decorate(root, r.reviewItems(md), () => {},
+               (n, e) => menus.push(n));
+    root.querySelectorAll('.dendrite-review-note')[2].dispatchEvent(
+        new doc.defaultView.MouseEvent('contextmenu', { bubbles: true }));
+    assert.deepEqual(menus, [2]);
 });
 
 test('a suggested insertion keeps its spaces, and applying it puts it ' +

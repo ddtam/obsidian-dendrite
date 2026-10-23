@@ -3035,6 +3035,8 @@ test('the card menu: status first, then what it prints, its versions and ' +
     assert.deepEqual([...del.titleContent.querySelectorAll('kbd')]
         .map((k) => k.dataset.k), ['Ctrl', 'Backspace'],
                      'each key a keycap');
+    assert.ok(m.items.find((i) => /^Delete card/.test(i.title)).warning,
+              'deleting a card, in the warning colour');
     assert.deepEqual(submenuOf(m, 'Versions').titles, [
         'New version of this card', 'Show old versions',
         'Make an old version current, or delete one…']);
@@ -3676,14 +3678,24 @@ test('a comment deleted here leaves the card and is not remembered, so a ' +
         { 'G-aaaaa': 'The ==cohort==%%[!review] Joshua Bridgers, ' +
           '2026-10-22: Wrong card?%% and ==size==%%[!review] Joshua ' +
           'Bridgers, 2026-10-22: How many?%%.' });
-    // Both on the card's comment, Delete as well as Resolve.
+    // Resolve the one button; Delete from the comment's right-click menu.
     view.invalidate('G-aaaaa');
     await view.renderCard('G-aaaaa');
     const note = view.cardEls.get('G-aaaaa')
         .querySelector('.dendrite-review-note');
     assert.deepEqual([...note.querySelectorAll('button')]
-        .map((b) => b.textContent), ['Resolve', 'Delete']);
-    await view.reviewAction('G-aaaaa', 0, 'delete');
+        .map((b) => b.textContent), ['Resolve']);
+    h.obsidian.lastMenu = null;
+    note.dispatchEvent(new h.window.MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true }));
+    await tick(10);
+    const cm = h.obsidian.lastMenu;
+    assert.ok(cm, 'a menu of its own');
+    assert.deepEqual(cm.titles, ['Resolve', 'Delete from Dendrite']);
+    assert.deepEqual(cm.items.map((i) => !!i.warning), [false, true],
+                     'a deletion, in the warning colour');
+    await cm.items[1].click();
+    await tick(10);
     assert.equal(text(cardPath('G-aaaaa')), 'The cohort and ==size==' +
         '%%[!review] Joshua Bridgers, 2026-10-22: How many?%%.');
     assert.doesNotMatch(read(INDEX), /dendrite_review_done/,

@@ -395,6 +395,7 @@ const obsidian = {
                     return this;
                 },
                 setIcon(x) { this.icon = x; return this; },
+                setWarning(x) { this.warning = !!x; return this; },
                 onClick(f) { this.click = f; return this; },
                 // A submenu, kept off lastMenu, which names the menu shown.
                 setSubmenu() {

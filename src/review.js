@@ -783,18 +783,26 @@ function renderMarkdown(md) {
 }
 
 /**
- * What can be done with a review item, as [action, label, tooltip]: a
- * suggestion applied or dismissed; a comment resolved, dealt with and
- * remembered so a pull does not bring it back, or deleted, taken out of
- * the card only, as one misplaced, which a pull offers again.
+ * A review item's buttons, as [action, label, tooltip]: a suggestion
+ * applied or dismissed; a comment resolved, dealt with and remembered so
+ * a pull does not bring it back.
  */
 function commentActions(it) {
     return it.kind === 'suggest' ?
         [['apply', 'Apply…', ''], ['dismiss', 'Dismiss', '']] :
         [['resolve', 'Resolve', 'Dealt with: taken out, and not brought ' +
-          'back by a pull'],
-         ['delete', 'Delete', 'Taken out of Dendrite only, as misplaced; ' +
-          'a pull offers it again']];
+          'back by a pull']];
+}
+
+/**
+ * A review item's right-click menu, as [action, label, warning]: what
+ * its buttons do, and Delete from Dendrite, which takes it out of the
+ * card only, as one misplaced, not remembered, so a pull offers it
+ * again; a deletion, so shown as a warning.
+ */
+function commentMenu(it) {
+    return [...commentActions(it).map(([what, label]) =>
+        [what, label, false]), ['delete', 'Delete from Dendrite', true]];
 }
 
 /**
@@ -803,7 +811,7 @@ function commentActions(it) {
  * the comment's index and 'resolve' or, for a suggestion, 'apply' or
  * 'dismiss'.
  */
-function decorate(root, items, act) {
+function decorate(root, items, act, onMenu = null) {
     const nums = [...root.querySelectorAll('sup.dendrite-review-n')];
     const doc = root.ownerDocument;
     const blocks = new Map();
@@ -857,10 +865,17 @@ function decorate(root, items, act) {
             main.append(meta, text);
             note.append(n, main);
             const buttons = commentActions(it);
+            // Its menu on a right-click, its own, not the card's.
+            if (onMenu) {
+                note.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onMenu(i, e);
+                });
+            }
             for (const [what, label, tip] of buttons) {
                 const btn = doc.createElement('button');
-                btn.className = 'dendrite-review-btn' +
-                    (what === 'delete' ? ' is-quiet' : '');
+                btn.className = 'dendrite-review-btn';
                 btn.textContent = label;
                 if (tip) btn.title = tip;
                 btn.addEventListener('click', (e) => {
@@ -879,7 +894,7 @@ function decorate(root, items, act) {
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    plainMap, normalise, locate, reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
-                   commentActions,
+                   commentActions, commentMenu,
                    itemText,
                    addItems, removeItem,
                    stripReview, canHighlight, renderMarkdown, decorate,
