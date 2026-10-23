@@ -931,18 +931,32 @@ class DendriteView extends ItemView {
         this.anim = this.pageWin().requestAnimationFrame(step);
     }
 
-    /** Keep the board's horizontal scroll where it is for a moment. */
+    /**
+     * Keep the board's horizontal scroll where it is for a moment. The
+     * handler that scrolls it copies a second time once the board has
+     * moved, so a copy during a hold extends that hold rather than
+     * holding the board where it was moved to.
+     */
     holdBoardScroll() {
         const board = this.board;
-        const x = board.scrollLeft;
-        const hold = (e) => {
-            if (e.target === board && board.scrollLeft !== x) {
-                board.scrollLeft = x;
-            }
-        };
-        board.addEventListener('scroll', hold);
-        this.pageWin().setTimeout(
-            () => board.removeEventListener('scroll', hold), 300);
+        const win = this.pageWin();
+        if (this.boardHold && this.boardHold.board === board) {
+            win.clearTimeout(this.boardHold.timer);
+        } else {
+            const x = board.scrollLeft;
+            const hold = (e) => {
+                if (e.target === board && board.scrollLeft !== x) {
+                    board.scrollLeft = x;
+                }
+            };
+            board.addEventListener('scroll', hold);
+            this.boardHold = { board, hold };
+        }
+        const held = this.boardHold;
+        held.timer = win.setTimeout(() => {
+            board.removeEventListener('scroll', held.hold);
+            if (this.boardHold === held) this.boardHold = null;
+        }, 300);
     }
 
     /** The wheel scrolls the column under it, flow redrawn the same frame. */

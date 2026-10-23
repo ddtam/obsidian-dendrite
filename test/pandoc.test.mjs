@@ -389,3 +389,77 @@ test('a table\'s and a figure\'s captions become Pandoc\'s own, so ' +
     // Pandoc loads longtable only for a document with a table.
     assert.match(pre, /\\ifdefined\\LTcapwidth\\setlength\{\\LTcapwidth\}/);
 });
+
+test('a PDF\'s tables are single spaced inside, with rows set apart, ' +
+     'and the table filter runs after citations are resolved', () => {
+    const pre = p.preamble({ lineSpacing: 1.5 });
+    assert.match(pre, /\\usepackage\{longtable,booktabs,array,calc,/,
+                 'loaded for a table that reaches LaTeX raw');
+    assert.match(pre, /\\AtBeginEnvironment\{longtable\}\{\\ifdefined/);
+    assert.match(pre, /\\setstretch\{1\}/);
+    const args = p.pandocArgs({ input: 'in.md', output: 'out.pdf',
+                                format: 'pdf', bibliography: 'b.json',
+                                tables: 't.lua',
+                                style: { margin: '2.5cm', fontSize: 10 } });
+    const at = (x) => args.findIndex((a) => a.startsWith(x));
+    assert.ok(at('--lua-filter=t.lua') > at('--citeproc'));
+    assert.ok(args.includes('dendrite-chars=94'), 'letter, 2.5cm, 10pt');
+    assert.equal(p.lineChars({ margin: '1in', fontSize: 12, paper: 'a4' }),
+                 75);
+    const docx = p.pandocArgs({ input: 'in.md', output: 'out.docx',
+                                format: 'docx', tables: 't.lua' });
+    assert.ok(docx.includes('--lua-filter=t.lua'), 'Word too, for rules');
+});
+
+test('the table filter draws a rule for a row of dashes, widens a ' +
+     'column to its longest word, and keeps a short table on one page',
+     (t) => {
+    const { spawnSync } = require('child_process');
+    if (spawnSync('pandoc', ['--version']).status !== 0) {
+        t.skip('pandoc is not installed');
+        return;
+    }
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dendrite-'));
+    const lua = path.join(dir, 'tables.lua');
+    fs.writeFileSync(lua, p.TABLES_LUA);
+    const md = '| Data | Patients | Libraries |\n' +
+        '| ----------------------------- | -------- | ' +
+        '------------------------------------------------------------ |\n' +
+        '| --- | --- | --- |\n' +
+        '| WGS CRAMs | 175 | 534 (175 normal, 175 pre-, 175 post) |\n' +
+        '| RNA CRAMs | - | 318 |\n' +
+        '| ------- | | |\n' +
+        '| **Total** | | 852 |\n';
+    const run = (to) => spawnSync('pandoc', [
+        '--from', 'markdown', '-t', to, `--lua-filter=${lua}`,
+        '-M', 'dendrite-chars=94', '-o', path.join(dir, 'out.' + to)],
+        { input: md, encoding: 'utf8' });
+    const r = run('latex');
+    const w = run('docx');
+    const tex = fs.readFileSync(path.join(dir, 'out.latex'), 'utf8');
+    const xml = spawnSync('unzip', ['-p', path.join(dir, 'out.docx'),
+                                    'word/document.xml'],
+                          { encoding: 'utf8' }).stdout;
+    fs.rmSync(dir, { recursive: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(w.status, 0, w.stderr);
+    assert.equal((tex.match(/\\midrule/g) || []).length, 2,
+                 'under the header, and the row of dashes; the one ' +
+                 'straight under the header is dropped');
+    assert.match(tex, /RNA CRAMs & - & 318 \\\\\*\n\\midrule\n\\textbf/,
+                 'one dash is a value; seven are a rule');
+    assert.match(tex, /WGS CRAMs & 175 & .* \\\\\*\n/, 'no break after');
+    assert.match(tex, /\\raggedright\n\\dendriteheadstrut\nPatients/);
+    const widths = [...tex.matchAll(/\\real\{([\d.]+)\}/g)]
+        .map((m) => Number(m[1]));
+    // 'Patients' at 1.2 letters each, plus one, of 94 less three gaps.
+    assert.ok(widths[1] >= (8 * 1.2 + 1) / (94 - 7.5) - 1e-4,
+              `Patients wide enough: ${widths}`);
+    if (xml) {
+        assert.match(xml, /w:lastRow="1"/, 'Word: the total row');
+        assert.ok(!/>-------</.test(xml), 'Word: no row of dashes');
+    }
+});

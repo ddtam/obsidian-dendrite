@@ -207,7 +207,182 @@ function preamble(st) {
              'justification=raggedright,singlelinecheck=false}',
              '\\ifdefined\\LTcapwidth' +
              '\\setlength{\\LTcapwidth}{\\textwidth}\\fi');
+    // A table kept on one page reaches LaTeX as raw LaTeX, so Pandoc no
+    // longer loads its table packages itself. Inside a table, lines are
+    // single spaced and rows set further apart, so a wrapped cell reads
+    // as one row whatever the text's line spacing.
+    out.push('\\usepackage{longtable,booktabs,array,calc,etoolbox}',
+             '\\AtBeginEnvironment{longtable}{' +
+             '\\ifdefined\\setstretch\\setstretch{1}\\fi' +
+             '\\renewcommand{\\arraystretch}{1.6}}',
+             '\\newcommand{\\dendriteheadstrut}{' +
+             '\\vrule width0pt height\\arraystretch\\ht\\strutbox\\relax}');
     return out.join('\n') + '\n';
+}
+
+/**
+ * A Lua filter for exported tables. A row of three or more dashes is a
+ * rule across the table, and in Word a rule before the last row makes it
+ * the total row. A
+ * column is never narrower than its longest word, estimated from
+ * `dendrite-chars`, the characters a line holds; the others give up the
+ * width. Each table's LaTeX is written here, so citations must already
+ * be resolved when it runs: a header that wraps starts with a row's
+ * height, and a table of up to KEEP_ROWS rows ends each row with \\*, so
+ * it is not broken across pages.
+ */
+const TABLES_LUA = String.raw`local chars = 90
+local KEEP_ROWS = 30
+
+local function cellText(c) return pandoc.utils.stringify(c.contents) end
+
+local function longestWord(s)
+  local m = 0
+  for w in s:gmatch('%S+') do m = math.max(m, utf8.len(w) or #w) end
+  return m
+end
+
+local function rowsOf(t)
+  local all = {}
+  for _, r in ipairs(t.head.rows) do table.insert(all, r) end
+  for _, b in ipairs(t.bodies) do
+    for _, r in ipairs(b.body) do table.insert(all, r) end
+  end
+  for _, r in ipairs(t.foot.rows) do table.insert(all, r) end
+  return all
+end
+
+local function widen(t)
+  local n = #t.colspecs
+  if n == 0 or not t.colspecs[1][2] then return end
+  local word = {}
+  for i = 1, n do word[i] = 1 end
+  for _, r in ipairs(rowsOf(t)) do
+    local i = 1
+    for _, c in ipairs(r.cells) do
+      if word[i] then
+        word[i] = math.max(word[i], longestWord(cellText(c)))
+      end
+      i = i + c.col_span
+    end
+  end
+  -- Widths are fractions of the line less the gaps between columns.
+  local avail = chars - n * 2.5
+  local min, sum = {}, 0
+  for i = 1, n do
+    min[i] = math.min(1, (word[i] * 1.2 + 1) / avail)
+    sum = sum + min[i]
+  end
+  if sum >= 1 then return end
+  local w, give, take = {}, 0, 0
+  for i = 1, n do
+    w[i] = t.colspecs[i][2]
+    if w[i] < min[i] then
+      give = give + min[i] - w[i]
+      w[i] = min[i]
+    else
+      take = take + w[i] - min[i]
+    end
+  end
+  if give == 0 or take == 0 then return end
+  for i = 1, n do
+    if w[i] > min[i] then
+      w[i] = w[i] - give * (w[i] - min[i]) / take
+    end
+    t.colspecs[i] = { t.colspecs[i][1], w[i] }
+  end
+end
+
+-- A row of three or more dashes, '| --- | --- |', is a rule across the
+-- table. Pandoc reads --- as an em dash, -- as an en dash.
+local function isRule(r)
+  local any = false
+  for _, c in ipairs(r.cells) do
+    local s = cellText(c)
+    if s ~= '' then
+      local d = (s:gsub('\u{2014}', '---'):gsub('\u{2013}', '--'))
+      if not d:match('^:?%-+:?$') then return false end
+      if #(d:gsub(':', '')) >= 3 then any = true end
+    end
+  end
+  return any
+end
+
+local RULE = '\\dendriterule'
+
+-- In LaTeX a rule row becomes \midrule; in Word, which draws no rule
+-- between rows, one before the last row makes that row the table's
+-- total row. A rule under the header or after the last row is dropped,
+-- since a rule is drawn there already.
+local function rules(t, latex)
+  for _, b in ipairs(t.bodies) do
+    local out = pandoc.List()
+    local ruled = nil
+    for k, r in ipairs(b.body) do
+      if not isRule(r) then
+        out:insert(r)
+      elseif #out > 0 and k < #b.body then
+        if latex then
+          for n, c in ipairs(r.cells) do
+            c.contents = n == 1 and
+              { pandoc.Plain({ pandoc.RawInline('latex', RULE) }) } or {}
+          end
+          out:insert(r)
+        else
+          ruled = #out
+        end
+      end
+    end
+    if ruled and ruled == #out - 1 and #t.foot.rows == 0 then
+      t.foot.rows:insert(out:remove(#out))
+    end
+    b.body = out
+  end
+end
+
+local HEAD = '\\begin{minipage}[b]{\\linewidth}\\raggedright\n'
+
+local function write(t)
+  if not pandoc.write then return t end
+  local tex = pandoc.write(pandoc.Pandoc({ t }), 'latex')
+  -- A header cell is set bottom-aligned in a box, so a header of two
+  -- lines rises to the rule above it; its first line is given a row's.
+  tex = tex:gsub(HEAD:gsub('%p', '%%%0'), '%0\\dendriteheadstrut\n')
+  local rows = 0
+  for _, b in ipairs(t.bodies) do rows = rows + #b.body end
+  if rows <= KEEP_ROWS then tex = tex:gsub(' \\\\\n', ' \\\\*\n') end
+  tex = tex:gsub(RULE:gsub('%p', '%%%0') .. '[^\n]*\n', '\\midrule\n')
+  return pandoc.RawBlock('latex', tex)
+end
+
+return {
+  { Meta = function(m)
+      local c = m['dendrite-chars']
+      if c then chars = tonumber(pandoc.utils.stringify(c)) or chars end
+    end },
+  { Table = function(t)
+      local latex = FORMAT:match('latex') ~= nil
+      widen(t)
+      rules(t, latex)
+      if latex then return write(t) end
+      return t
+    end },
+}
+`;
+
+const PAPER_PT = { letter: 612, a4: 595.3 };
+const UNIT_PT = { pt: 1, mm: 2.8453, cm: 28.453, in: 72.27 };
+
+/**
+ * About how many characters a PDF's line holds: the text width over half
+ * an em, a proportional font's average letter. A margin not given as one
+ * length is taken as 2.5cm.
+ */
+function lineChars(st) {
+    const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec(st.margin || '');
+    const margin = m ? Number(m[1]) * UNIT_PT[m[2]] : 2.5 * UNIT_PT.cm;
+    const width = PAPER_PT[st.paper] || PAPER_PT.letter;
+    return Math.round((width - 2 * margin) / ((st.fontSize || 10) / 2));
 }
 
 /**
@@ -276,6 +451,12 @@ function pandocArgs(o) {
         }
     }
     if (o.resourcePath) args.push('--resource-path', o.resourcePath);
+    // After --citeproc, so citations are resolved before a table is
+    // written as LaTeX.
+    if (o.tables) {
+        args.push(`--lua-filter=${o.tables}`,
+                  '-M', `dendrite-chars=${lineChars(st)}`);
+    }
     return args;
 }
 
@@ -347,16 +528,21 @@ async function exportDocument(o, deps) {
         }
     }
     let header = null;
+    let tables = null;
     if (o.format === 'pdf') {
         text += BODY_END;
         header = deps.join(dir, `dendrite-${Date.now()}-header.tex`);
         await deps.writeFile(header, preamble(o.style || {}));
     }
+    if (o.format === 'pdf' || o.format === 'docx') {
+        tables = deps.join(dir, `dendrite-${Date.now()}-tables.lua`);
+        await deps.writeFile(tables, TABLES_LUA);
+    }
     await deps.writeFile(input, text);
     const args = pandocArgs({ input, output: o.output, format: o.format,
                               engine: o.engine, bibliography, csl: o.csl,
                               resourcePath: o.resourcePath, header,
-                              style: o.style });
+                              tables, style: o.style });
     try {
         await deps.run(o.pandoc || 'pandoc', args);
     } catch (err) {
@@ -364,6 +550,7 @@ async function exportDocument(o, deps) {
     } finally {
         deps.remove(input);
         if (header) deps.remove(header);
+        if (tables) deps.remove(tables);
         if (bibliography && bibliography !== o.fallbackBib) {
             deps.remove(bibliography);
         }
@@ -440,6 +627,6 @@ function condaBins(names, home) {
 }
 
 module.exports = { citekeys, pandocCaptions, pandocError, searchPath,
-                   condaBins, toPandoc,
+                   condaBins, toPandoc, TABLES_LUA, lineChars,
                    fetchBib, pandocArgs, exportDocument, pdfPages,
                    measuredRate, footnoteGap, preamble, BODY_END };

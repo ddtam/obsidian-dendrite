@@ -1632,6 +1632,21 @@ test('a copy does not leave the board scrolled sideways', async () => {
     board.scrollLeft = 300;
     board.dispatchEvent(new h.window.Event('scroll'));
     assert.equal(board.scrollLeft, 300, 'a later scroll is left alone');
+    // Seen again on 2026-10-22: the hidden textarea's handler copies a
+    // second time, after the board has already moved. The second copy
+    // must not hold the board where it was moved to.
+    await tick(400);
+    board.scrollLeft = 1009;
+    card.dispatchEvent(new h.window.Event('copy', { bubbles: true }));
+    board.scrollLeft = 0;
+    card.dispatchEvent(new h.window.Event('copy', { bubbles: true }));
+    board.dispatchEvent(new h.window.Event('scroll'));
+    assert.equal(board.scrollLeft, 1009, 'held where the first copy was');
+    board.scrollLeft = 0;
+    board.dispatchEvent(new h.window.Event('scroll'));
+    assert.equal(board.scrollLeft, 1009, 'and still there');
+    await tick(400);
+    assert.equal(board.scrollLeft, 1009, 'after both holds end');
     view.contentEl.remove();
 });
 
