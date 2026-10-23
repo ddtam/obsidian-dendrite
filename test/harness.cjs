@@ -325,11 +325,24 @@ const obsidian = {
             obsidian.settingsLog.push(this);
             return this;
         }
-        setDesc() { return this; }
+        setDesc(d) { this.desc = d; return this; }
         setHeading() { this.heading = true; return this; }
+        // A control that keeps what is set on it, its handlers included,
+        // and takes any other call.
         stub() {
-            const s = new Proxy({}, { get: (o, k) => (k === 'then' ?
-                undefined : () => s) });
+            const rec = {};
+            const s = new Proxy(rec, { get: (o, k) => {
+                if (k === 'then') return undefined;
+                if (k in o) return o[k];
+                return (v) => {
+                    if (k === 'onChange' || k === 'onClick') o[`_${k}`] = v;
+                    else if (k === 'setDisabled') o.disabled = !!v;
+                    else if (k === 'setButtonText') o.text = v;
+                    else if (k === 'setValue') o.value = v;
+                    return s;
+                };
+            } });
+            (this.controls = this.controls || []).push(s);
             return s;
         }
         addText(f) { f(this.stub()); return this; }

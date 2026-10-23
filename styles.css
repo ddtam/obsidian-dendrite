@@ -1352,3 +1352,56 @@ button.dendrite-review-btn:hover {
     overflow-y: auto;
     color: var(--text-muted);
 }
+
+/* A card's old versions fanned out in the column to its right, over
+   that column's cards, scrolled up and down; read only and set apart. */
+.dendrite-fan {
+    position: absolute;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    box-shadow: var(--shadow-s);
+    padding: 6px;
+}
+.dendrite-fan-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-muted);
+    font-size: 0.85em;
+    padding: 0 4px 6px;
+}
+.dendrite-fan-head > span {
+    flex: 1 1 auto;
+}
+.dendrite-fan-btn {
+    padding: 2px 6px;
+}
+.dendrite-fan-row {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    min-height: 0;
+}
+.dendrite-version {
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    border: 1px dashed var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-secondary);
+}
+.dendrite-version-head {
+    color: var(--text-faint);
+    font-size: 0.85em;
+    margin-bottom: 4px;
+}
+.dendrite-version-body {
+    opacity: 0.85;
+}
+.dendrite-status-chip.is-stack.is-on {
+    color: var(--text-accent);
+}

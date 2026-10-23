@@ -2597,7 +2597,7 @@ test('a card replaced by its child goes into a stack under it: hidden, ' +
         .find((s) => /versions/.test(s.textContent));
     assert.equal(chip && chip.textContent, '2 versions');
     // Brought back from the stack.
-    chip.onclick({ stopPropagation() {} });
+    view.openStack('G-ccccc');
     const m = h.obsidian.lastModal;
     await m.ready;
     assert.match(m.contentEl.textContent, /Old paragraph/);
@@ -2748,4 +2748,93 @@ test('the Google client and Picker key can be pasted into the settings, ' +
         delete process.env.DENDRITE_REVIEW_API_FILE;
         fs.rmSync(dir, { recursive: true });
     }
+});
+
+test('a card\'s old versions fan out in the column to its right, read ' +
+     'only with their review comments, which can be resolved there, and ' +
+     'fold away',
+     async () => {
+    const OLD = 'The ==old claim==%%[!review] Aly Karsan, 2026-10-23: ' +
+        'Evidence?%% stands.';
+    const { view, text } = await open(STACK_INDEX, {
+        'G-aaaaa': '---\ndendrite_role: prose\n---\n' + OLD,
+        'G-ccccc': 'New paragraph.', 'G-bbbbb': 'Next.' });
+    await view.promote('G-aaaaa', 'G-ccccc');
+    const chip = () => [...view.cardEls.get('G-ccccc')
+        .querySelectorAll('.dendrite-status-chip')]
+        .find((s) => /versions/.test(s.textContent));
+    const fanned = () => [...view.board.parentElement.querySelectorAll(
+        '.dendrite-fan .dendrite-fan-row > .dendrite-version')];
+    assert.equal(fanned().length, 0);
+    await chip().onclick({ stopPropagation() {} });
+    await tick();
+    assert.equal(fanned().length, 1, 'fanned out');
+    const v = fanned()[0];
+    assert.equal(v.dataset.id, 'G-aaaaa');
+    assert.match(v.textContent, /Replaced \d{4}-/);
+    assert.match(v.textContent, /old claim/);
+    assert.equal(v.querySelectorAll('.dendrite-review-note').length, 1,
+                 'its comment is drawn');
+    assert.ok(!view.cardEls.has('G-aaaaa'), 'not a card on the board');
+    await view.reviewAction('G-aaaaa', 0, 'resolve');
+    await tick();
+    assert.equal(text(cardPath('G-aaaaa')), 'The old claim stands.');
+    assert.equal(fanned().length, 1, 'still fanned after resolving');
+    assert.equal(fanned()[0].querySelectorAll('.dendrite-review-note')
+        .length, 0);
+    await view.doUndo();
+    assert.equal(text(cardPath('G-aaaaa')), OLD, 'resolving undoes');
+    await chip().onclick({ stopPropagation() {} });
+    await tick();
+    assert.equal(fanned().length, 0, 'folded away');
+});
+
+test('a review comment on wording only in an old version goes on the ' +
+     'current card, quoted; one already in the stack comes unticked',
+     async () => {
+    const { view, text } = await open(STACK_INDEX, {
+        'G-aaaaa': '---\ndendrite_role: prose\n---\nThe old claim ' +
+            '==stands==%%[!review] Aly Karsan, 2026-10-23: Why?%%.',
+        'G-ccccc': 'New paragraph.', 'G-bbbbb': 'Next.' });
+    await view.promote('G-aaaaa', 'G-ccccc');
+    const m = await view.reviewModal('Docs', [
+        { kind: 'comment', author: 'Aly Karsan', date: '2026-10-24',
+          text: 'Too strong.', quote: 'old claim', before: '', after: '' },
+        { kind: 'comment', author: 'Aly Karsan', date: '2026-10-23',
+          text: 'Why?', quote: 'stands', before: '', after: '' }]);
+    assert.equal(m.rows[0].at.id, 'G-ccccc');
+    assert.equal(m.rows[0].at.how, 'old');
+    assert.equal(m.rows[0].use, true);
+    assert.match(m.contentEl.textContent, /an earlier version/);
+    assert.equal(m.rows[1].dup, true, 'already on the old version');
+    assert.equal(m.rows[1].use, false);
+    await m.contentEl.querySelector('.mod-cta').onclick();
+    assert.equal(text(cardPath('G-ccccc')), 'New paragraph.%%[!review] ' +
+        'Aly Karsan, 2026-10-24: On “old claim”, in an earlier version: ' +
+        'Too strong.%%');
+    assert.match(text(cardPath('G-aaaaa')), /^The old claim ==stands==/,
+                 'the old version is left as it was');
+});
+
+test('pasting the Google client in the settings unlocks signing in ' +
+     'without reopening them', () => {
+    const { DendriteSettings } = require('../src/main.js');
+    h.obsidian.settingsLog = [];
+    const settings = { googleClientJson: '', googlePickerKey: '' };
+    const plugin = { settings, saveSettings() {}, googleToken: () => null,
+        googleClient: () => (settings.googleClientJson ?
+            { clientId: 'x' } : null) };
+    const tab = new DendriteSettings({}, plugin);
+    tab.display();
+    const named = (n) => h.obsidian.settingsLog.find((x) => x.name === n);
+    const account = named('Google account');
+    const button = account.controls[0];
+    assert.equal(button.disabled, true);
+    assert.match(account.desc, /Paste the OAuth client above first/);
+    named('Google OAuth client').controls[0]._onChange(
+        '{"installed": {"client_id": "1-x"}}');
+    assert.equal(button.disabled, false, 'unlocked');
+    assert.match(account.desc, /Not signed in/);
+    named('Google OAuth client').controls[0]._onChange('');
+    assert.equal(button.disabled, true, 'locked again when cleared');
 });

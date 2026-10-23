@@ -301,6 +301,11 @@ class DendriteView extends ItemView {
         this.renameTimer = null;
         this.copiesTimer = null;
         this.inbox = [];
+        // The card whose old versions are fanned out to its right.
+        this.fannedId = null;
+        this.fanEl = null;
+        this.fanReady = Promise.resolve();
+        this.fanComps = [];
         this.history = plugin.history || new History();
         this.scope = new Scope(this.app.scope);
         this.registerKeys();
@@ -428,6 +433,7 @@ class DendriteView extends ItemView {
     async onClose() {
         clearTimeout(this.renameTimer);
         clearTimeout(this.copiesTimer);
+        for (const c of this.fanComps.splice(0)) c.unload();
         this.cancelDrag();
         this.hideQuotaTip();
         this.closeQuotaEditor();
@@ -739,6 +745,7 @@ class DendriteView extends ItemView {
             }
             inner.createDiv({ cls: 'dendrite-spacer' });
         });
+        this.fanReady = this.renderFan(stage);
         this.applyActive(false);
         // The cards were rebuilt: anything floating over the old ones goes.
         this.announceScroll();
@@ -1008,6 +1015,7 @@ class DendriteView extends ItemView {
     drawFlow() {
         const svg = this.flowSvg;
         if (!svg || !this.board) return;
+        this.placeFan();
         while (svg.firstChild) svg.firstChild.remove();
         for (const g of this.board.querySelectorAll('.is-flow')) {
             g.classList.remove('is-flow');
@@ -2719,6 +2727,102 @@ class DendriteView extends ItemView {
         new StackModal(this, id).open();
     }
 
+    /**
+     * Fan a card's old versions out to its right, or fold them away; one
+     * card's at a time.
+     */
+    toggleFan(id) {
+        this.fannedId = this.fannedId === id ? null : id;
+        this.render();
+        return this.fanReady;
+    }
+
+    /**
+     * The fanned card's old versions in a column floating over the next
+     * column to its right, newest first beside the card, scrolled through
+     * up and down: the columns to its left stay in view.
+     */
+    async renderFan(stage) {
+        for (const c of this.fanComps.splice(0)) c.unload();
+        this.fanEl = null;
+        const id = this.fannedId;
+        const stack = id && !this.printOnly && this.cardEls.has(id) ?
+            this.stackOf(id) : [];
+        if (!stack.length) {
+            this.fannedId = null;
+            return;
+        }
+        const fan = stage.createDiv({ cls: 'dendrite-fan' });
+        this.fanEl = fan;
+        const head = fan.createDiv({ cls: 'dendrite-fan-head' });
+        head.createSpan({ text: `${stack.length} old ` +
+            `version${stack.length === 1 ? '' : 's'}, newest first` });
+        const b = head.createEl('button', { cls: 'dendrite-fan-btn' });
+        setIcon(b, 'x');
+        b.setAttr('aria-label', 'Fold the old versions away');
+        b.onclick = () => this.toggleFan(id);
+        const row = fan.createDiv({ cls: 'dendrite-fan-row' });
+        this.placeFan();
+        await Promise.all(stack.map((old) =>
+            this.renderVersion(row, old.id)));
+        this.placeFan();
+    }
+
+    /**
+     * Keep the fan in the column right of its card, its top level with
+     * the card's, as the columns move.
+     */
+    placeFan() {
+        const fan = this.fanEl;
+        const card = fan && this.cardEls.get(this.fannedId);
+        if (!fan || !card || !fan.parentElement) return;
+        const stage = fan.parentElement.getBoundingClientRect();
+        const r = card.getBoundingClientRect();
+        const col = card.closest('.dendrite-col');
+        const gap = col ? col.getBoundingClientRect().right - r.right : 12;
+        const top = Math.min(Math.max(8, r.top - stage.top),
+                             Math.max(8, stage.height - 160));
+        fan.style.left = `${r.right - stage.left + 2 * gap}px`;
+        fan.style.top = `${top}px`;
+        fan.style.width = `${r.width}px`;
+        fan.style.maxHeight = `${Math.max(160, stage.height - top - 8)}px`;
+    }
+
+    /**
+     * An old version in the fan: read only, with its review comments,
+     * which can be resolved from it. Not a card on the board, so it is
+     * never selected or edited.
+     */
+    async renderVersion(group, id) {
+        const el = group.createDiv({ cls: 'dendrite-version' });
+        el.dataset.id = id;
+        el.createDiv({ cls: 'dendrite-version-head',
+            text: `Replaced ${this.cardProps(id).dendrite_superseded}, ` +
+                `card ${core.shortId(id)}` });
+        const body = el.createDiv({ cls: 'dendrite-version-body' });
+        const f = this.cardFile(id);
+        if (!f) return;
+        const text = core.splitFrontmatter(
+            await this.app.vault.read(f)).body;
+        const comp = new Component();
+        comp.load();
+        this.fanComps.push(comp);
+        const out = body.createDiv({ cls: 'dendrite-md markdown-rendered' });
+        const notes = review.reviewItems(text);
+        if (!text.trim()) {
+            out.createDiv({ cls: 'dendrite-placeholder',
+                            text: 'Empty card' });
+            return;
+        }
+        await MarkdownRenderer.render(this.app,
+            notes.length ? review.renderMarkdown(text) : text, out, f.path,
+            comp);
+        if (notes.length) {
+            review.decorate(out, notes,
+                            (n, what) => this.reviewAction(id, n, what));
+        }
+    }
+
     async deleteActive() {
         const node = this.active && this.byId.get(this.active);
         if (!node || this.refuseWhileArriving() ||
@@ -3732,6 +3836,21 @@ class DendriteView extends ItemView {
                                 r.items);
     }
 
+    /** Every old version kept in a stack, with its whole text. */
+    async oldVersionCards() {
+        const bodies = await this.loadBodies();
+        return core.allNodes(this.root).filter((n) =>
+            this.isSuperseded(n.id) && bodies.has(n.id))
+            .map((n) => ({ id: n.id, text: bodies.get(n.id) }));
+    }
+
+    /** The end of a card's printed text, as where a comment goes. */
+    endOf(id, cards) {
+        const text = (cards.find((c) => c.id === id) || { text: '' })
+            .text.trimEnd();
+        return { id, start: text.length, end: text.length };
+    }
+
     /** Submitted reviews for this manuscript, waiting on the bar. */
     refreshInbox() {
         const q = this.plugin.reviewQueue ? this.plugin.reviewQueue() : [];
@@ -3785,20 +3904,40 @@ class DendriteView extends ItemView {
      */
     async reviewModal(name, items, inbox = null) {
         const cards = await this.reviewCards();
+        const old = await this.oldVersionCards();
         const bodies = new Map();
+        const body = async (id) => {
+            if (!bodies.has(id)) {
+                const f = this.cardFile(id);
+                bodies.set(id, f ? core.splitFrontmatter(
+                    await this.app.vault.read(f)).body : '');
+            }
+            return bodies.get(id);
+        };
         const rows = [];
         for (const item of items) {
-            const at = review.locate(item, cards);
-            // Already in its card, as from the same review sent twice:
-            // shown, but not added again unless ticked.
+            let at = review.locate(item, cards);
+            // Wording now only in an old version: the comment goes on the
+            // card that replaced it, where it is answered.
+            if (!at) {
+                const o = review.locate(item, old);
+                const top = o && this.byId.get(o.id) &&
+                    this.byId.get(o.id).parent;
+                if (top && top.id) {
+                    at = Object.assign(this.endOf(top.id, cards),
+                                       { how: 'old', from: o.id });
+                }
+            }
+            // Already in its card or the card's old versions, as from the
+            // same review sent twice: shown, but not added again unless
+            // ticked.
             let dup = false;
             if (at) {
-                if (!bodies.has(at.id)) {
-                    const f = this.cardFile(at.id);
-                    bodies.set(at.id, f ? core.splitFrontmatter(
-                        await this.app.vault.read(f)).body : '');
+                const texts = [await body(at.id)];
+                for (const v of this.stackOf(at.id)) {
+                    texts.push(await body(v.id));
                 }
-                dup = review.alreadyIn(bodies.get(at.id), item);
+                dup = review.alreadyIn(texts.join('\n\n'), item);
             }
             rows.push({ item, at, dup, use: !!at && !dup });
         }
@@ -3839,17 +3978,22 @@ class DendriteView extends ItemView {
             // Only one never found goes on the selected card; one found
             // before but not now has gone with its text.
             if (!at && !row.at && fallback) {
-                const text = (cards.find((c) => c.id === fallback.id) ||
-                              { text: '' }).text.trimEnd();
-                at = { id: fallback.id, start: text.length,
-                       end: text.length, how: 'none' };
+                at = Object.assign(this.endOf(fallback.id, cards),
+                                   { how: 'none' });
+            }
+            if (!at && row.at && row.at.how === 'old' &&
+                this.byId.has(row.at.id)) {
+                at = Object.assign(this.endOf(row.at.id, cards),
+                                   { how: 'old' });
             }
             if (!at) {
                 missed++;
                 continue;
             }
-            const quoted = at.how === 'none' && item.quote ?
-                `On “${item.quote}”: ` : '';
+            const quoted = !item.quote ? '' :
+                at.how === 'none' ? `On “${item.quote}”: ` :
+                at.how === 'old' ?
+                    `On “${item.quote}”, in an earlier version: ` : '';
             if (item.kind === 'comment') {
                 add = { kind: 'review', text: quoted + item.text };
             } else if (at.how === 'exact') {
@@ -3862,8 +4006,8 @@ class DendriteView extends ItemView {
                     `Suggested adding “${item.insert.trim()}”`) +
                     '. The text has changed here since it was sent.' };
             }
-            Object.assign(add, { start: at.how === 'none' ? at.end :
-                                     at.start,
+            Object.assign(add, { start: at.how === 'none' ||
+                                     at.how === 'old' ? at.end : at.start,
                                  end: at.end, author: item.author,
                                  date: item.date });
             if (!byId.has(at.id)) byId.set(at.id, []);
@@ -3914,6 +4058,11 @@ class DendriteView extends ItemView {
                              ifBody: core.splitFrontmatter(out).body }] });
             this.invalidate(id);
             await this.renderCard(id);
+            // An old version fanned out is drawn with the board.
+            if (!this.cardEls.has(id)) {
+                this.render();
+                await this.fanReady;
+            }
         };
         if (what === 'apply') {
             const after = review.removeItem(body, n, true);
@@ -4002,11 +4151,14 @@ class DendriteView extends ItemView {
             const stack = this.stackOf(id).length;
             if (stack) {
                 const s = show('stack', `${stack + 1} versions`);
-                s.setAttr('aria-label', 'Earlier versions of this card, ' +
-                          'kept and not printed. Click to see them');
+                s.toggleClass('is-on', this.fannedId === id);
+                s.setAttr('aria-label', this.fannedId === id ?
+                          'Click to fold the old versions away' :
+                          'Earlier versions of this card, kept and not ' +
+                          'printed. Click to fan them out to its right');
                 s.onclick = (e) => {
                     e.stopPropagation();
-                    this.openStack(id);
+                    return this.toggleFan(id);
                 };
             }
             if (core.isFlag(info.own)) card.addClass('is-flagged');
@@ -6016,6 +6168,13 @@ class ReviewImportModal extends Modal {
                 where.addClass('is-missing');
                 where.setText(`Already in the card, ` +
                     `${core.shortId(row.at.id)}: left unticked.`);
+            } else if (row.at && row.at.how === 'old') {
+                const node = view.byId.get(row.at.id);
+                where.setText(`→ card ${core.shortId(row.at.id)}` +
+                    (node && node.label ? ` (${node.label})` : '') +
+                    ', found in an earlier version of it, card ' +
+                    `${core.shortId(row.at.from)}: goes at the end of the ` +
+                    'current one, with the passage quoted.');
             } else if (row.at) {
                 const node = view.byId.get(row.at.id);
                 where.setText(`→ card ${core.shortId(row.at.id)}` +
@@ -6495,6 +6654,7 @@ class DendriteSettings extends PluginSettingTab {
                 .onChange((v) => {
                     s.googleClientJson = v.trim();
                     save();
+                    showAccount();
                 }));
         new Setting(containerEl).setName('Google Picker API key')
             .setDesc('An API key restricted to the Google Picker API, for ' +
@@ -6504,21 +6664,35 @@ class DendriteSettings extends PluginSettingTab {
                     s.googlePickerKey = v.trim();
                     save();
                 }));
-        const signedIn = !!this.plugin.googleToken();
-        const hasClient = !!this.plugin.googleClient();
-        new Setting(containerEl).setName('Google account')
-            .setDesc(!hasClient ? 'Paste the OAuth client above first.' :
+        // Drawn again as the client is pasted, so signing in unlocks
+        // without the settings being reopened.
+        let accountBtn = null;
+        const account = new Setting(containerEl).setName('Google account')
+            .addButton((b) => {
+                accountBtn = b;
+                b.onClick(async () => {
+                    if (this.plugin.googleToken()) {
+                        await this.plugin.googleSignOut();
+                    } else {
+                        await this.plugin.googleSignIn();
+                    }
+                    this.display();
+                });
+            });
+        const showAccount = () => {
+            const signedIn = !!this.plugin.googleToken();
+            const client = this.plugin.googleClient();
+            account.setDesc(!client ? (s.googleClientJson ?
+                'The pasted text is not an OAuth client\'s JSON.' :
+                'Paste the OAuth client above first.') :
                 signedIn ? 'Signed in. Dendrite reaches only the docs ' +
                     'you link to a manuscript.' :
-                    'Not signed in. Signing in opens your browser.')
-            .addButton((b) => b.setButtonText(signedIn ? 'Sign out' :
-                                              'Sign in with Google')
-                .setDisabled(!hasClient || !Platform.isDesktopApp)
-                .onClick(async () => {
-                    if (signedIn) await this.plugin.googleSignOut();
-                    else await this.plugin.googleSignIn();
-                    this.display();
-                }));
+                    'Not signed in. Signing in opens your browser.');
+            accountBtn.setButtonText(signedIn ? 'Sign out' :
+                                     'Sign in with Google')
+                .setDisabled(!client || !Platform.isDesktopApp);
+        };
+        showAccount();
 
         heading('Other plugins');
         new Setting(containerEl).setName('Keep Linter out of the writing ' +
