@@ -425,7 +425,8 @@ test('the table filter draws a rule for a row of dashes, widens a ' +
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dendrite-'));
     const lua = path.join(dir, 'tables.lua');
     fs.writeFileSync(lua, p.TABLES_LUA);
-    const md = '| Data | Patients | Libraries |\n' +
+    const md = '## Storage\n\n### Details\n\n' +
+        '| Data | Patients | Libraries |\n' +
         '| ----------------------------- | -------: | ' +
         '------------------------------------------------------------ |\n' +
         '| --- | --- | --- |\n' +
@@ -452,6 +453,10 @@ test('the table filter draws a rule for a row of dashes, widens a ' +
     assert.match(tex, /RNA CRAMs & - & 318 \\\\\*\n\\midrule\n\\textbf/,
                  'one dash is a value; seven are a rule');
     assert.match(tex, /WGS CRAMs & 175 & .* \\\\\*\n/, 'no break after');
+    const need = tex.indexOf('\\dendriteneed{');
+    assert.ok(need >= 0 && need < tex.indexOf('Storage') &&
+              tex.indexOf('\\dendriteneed{', need + 1) < 0,
+              'room asked once, before the first of the headings');
     assert.match(tex, /\\raggedleft\n\\dendriteheadstrut\nPatients/,
                  'a right-aligned header too');
     const widths = [...tex.matchAll(/\\real\{([\d.]+)\}/g)]
