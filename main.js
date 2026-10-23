@@ -1833,6 +1833,7 @@ var require_pandoc = __commonJS({
         "\\AtBeginEnvironment{longtable}{\\ifdefined\\setstretch\\setstretch{1}\\fi\\renewcommand{\\arraystretch}{1.6}}",
         "\\newcommand{\\dendriteheadstrut}{\\vrule width0pt height\\arraystretch\\ht\\strutbox\\relax}"
       );
+      out.push("\\makeatletter\\newcommand{\\dendriteneed}[1]{\\par\\begingroup\\dimen@=1.2\\dimexpr\\f@size pt\\relax\\dimen@=#1\\dimen@\\dimen@ii=\\pagegoal\\advance\\dimen@ii-\\pagetotal\\ifdim\\dimen@>\\dimen@ii\\ifdim\\dimen@ii>\\z@\\vfil\\fi\\break\\fi\\endgroup}\\makeatother");
       return out.join("\n") + "\n";
     }
     var TABLES_LUA = String.raw`local chars = 90
@@ -1895,6 +1896,44 @@ local function widen(t)
     end
     t.colspecs[i] = { t.colspecs[i][1], w[i] }
   end
+end
+
+-- About how many single-spaced lines a table takes: each row its
+-- tallest cell's wrapped lines and the space rows are set apart by,
+-- with its caption and rules. A table that may break is counted to
+-- its first rows only.
+local function tableLines(t)
+  widen(t)
+  local n = #t.colspecs
+  local avail = chars - n * 2.5
+  local function rowLines(r)
+    local most, i = 1, 1
+    for _, c in ipairs(r.cells) do
+      local w = t.colspecs[i] and t.colspecs[i][2]
+      local len = utf8.len(cellText(c)) or 0
+      if w and w > 0 then
+        most = math.max(most, math.ceil(len / (w * avail)))
+      end
+      i = i + c.col_span
+    end
+    return most + 0.6
+  end
+  local rows = {}
+  for _, r in ipairs(t.head.rows) do table.insert(rows, r) end
+  local body = 0
+  for _, b in ipairs(t.bodies) do
+    for _, r in ipairs(b.body) do
+      table.insert(rows, r)
+      body = body + 1
+    end
+  end
+  for _, r in ipairs(t.foot.rows) do table.insert(rows, r) end
+  local count = #rows
+  if body > KEEP_ROWS then count = math.min(count, #t.head.rows + 3) end
+  local lines = 3
+  for k = 1, count do lines = lines + rowLines(rows[k]) end
+  local caption = utf8.len(pandoc.utils.stringify(t.caption.long)) or 0
+  return lines + math.ceil(caption / chars)
 end
 
 -- A row of three or more dashes, '| --- | --- |', is a rule across the
@@ -1963,6 +2002,26 @@ return {
   { Meta = function(m)
       local c = m['dendrite-chars']
       if c then chars = tonumber(pandoc.utils.stringify(c)) or chars end
+    end },
+  -- Headings straight before a table are kept with it: before the
+  -- first of them, room is asked for the headings and the table, or for
+  -- its first rows if it may break.
+  { Blocks = function(blocks)
+      if not FORMAT:match('latex') then return nil end
+      local out = pandoc.List()
+      local i = 1
+      while i <= #blocks do
+        local j = i
+        while j <= #blocks and blocks[j].t == 'Header' do j = j + 1 end
+        if j > i and j <= #blocks and blocks[j].t == 'Table' then
+          local need = (j - i) * 3 + tableLines(blocks[j])
+          out:insert(pandoc.RawBlock('latex', string.format(
+            '\\dendriteneed{%.1f}', need)))
+        end
+        for k = i, math.max(i, j - 1) do out:insert(blocks[k]) end
+        i = math.max(i, j - 1) + 1
+      end
+      return out
     end },
   { Table = function(t)
       local latex = FORMAT:match('latex') ~= nil
