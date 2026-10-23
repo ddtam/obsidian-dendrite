@@ -25,13 +25,14 @@ const {
     ItemView, MarkdownView, Plugin, PluginSettingTab, Setting,
     MarkdownRenderer,
     Component, Modal, Notice, TFile, TFolder, Scope, setIcon, Platform,
-    normalizePath, Keymap,
+    normalizePath, Keymap, requestUrl,
 } = require('obsidian');
 const core = require('./core.js');
 const textedit = require('./textedit.js');
 const { cardEditor } = require('./editor.js');
 const pandoc = require('./pandoc.js');
 const review = require('./review.js');
+const google = require('./google.js');
 const { History, idbStore } = require('./history.js');
 
 const VIEW = 'dendrite-view';
@@ -104,6 +105,11 @@ const DEFAULTS = {
     // Reviews submitted, pending until added or ignored on the board,
     // and the latest ones decided, so a submitter can ask.
     reviewQueue: [],
+    // Google Docs: the OAuth client's JSON and the Picker API key, as
+    // pasted, so every desktop the vault syncs to can sign in. Each
+    // computer keeps its own sign-in token, outside the vault.
+    googleClientJson: '',
+    googlePickerKey: '',
 };
 const LINTER_ID = 'obsidian-linter';
 // Linter rules switched off when Dendrite lints a card. "File name
@@ -192,6 +198,38 @@ function discoveryPath() {
     return (typeof process !== 'undefined' && process.env &&
             process.env.DENDRITE_REVIEW_API_FILE) ||
         path.join(os.homedir(), '.config', 'dendrite', 'review-api.json');
+}
+
+/** Where Dendrite keeps a file of its own outside the vault. */
+function configFile(name) {
+    try {
+        return require('path').join(require('path').dirname(
+            discoveryPath()), name);
+    } catch (err) {
+        return `~/.config/dendrite/${name}`;
+    }
+}
+
+/** A request to Google through Obsidian, answered as { status, json }. */
+async function googleRequest(req) {
+    const res = await requestUrl({ url: req.url, method: req.method || 'GET',
+        headers: req.headers, body: req.body, contentType: req.contentType,
+        throw: false });
+    let json = null;
+    try {
+        json = res.json;
+    } catch (err) {
+        json = null;
+    }
+    return { status: res.status, json };
+}
+
+function openExternal(url) {
+    try {
+        require('electron').shell.openExternal(url);
+    } catch (err) {
+        window.open(url);
+    }
 }
 
 /** Who wrote review items, for a label: "Claude", or "A, B". */
@@ -3656,6 +3694,44 @@ class DendriteView extends ItemView {
         input.click();
     }
 
+    /** The Google Doc this manuscript is linked to, or null. */
+    gdocUrl() {
+        const fm = this.file &&
+            this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+        return fm && typeof fm.dendrite_gdoc === 'string' ?
+            fm.dendrite_gdoc : null;
+    }
+
+    /**
+     * Bring in the linked Google Doc's open comments and suggested
+     * changes through the review dialog, as from a returned Word file.
+     */
+    async pullGdoc() {
+        const url = this.gdocUrl();
+        if (!url) {
+            new Notice('Dendrite: link a Google Doc in the manuscript\'s ' +
+                       'settings first.');
+            return null;
+        }
+        let r;
+        try {
+            r = await this.plugin.gdocReview(url);
+        } catch (err) {
+            new Notice(`Dendrite: could not read the Google Doc ` +
+                       `(${err.message}).`, 10000);
+            return null;
+        }
+        if (!r) return null;
+        if (!r.items.length) {
+            new Notice(`Dendrite: ${r.title || 'the doc'} has no open ` +
+                       'comments or suggested changes' + (r.resolved ?
+                           `; ${r.resolved} resolved left out.` : '.'));
+            return null;
+        }
+        return this.reviewModal(`${r.title || 'Google Doc'} (Google Docs)`,
+                                r.items);
+    }
+
     /** Submitted reviews for this manuscript, waiting on the bar. */
     refreshInbox() {
         const q = this.plugin.reviewQueue ? this.plugin.reviewQueue() : [];
@@ -4734,6 +4810,12 @@ class DendriteView extends ItemView {
                 m.addItem((i) => i.setTitle('Import review…')
                     .setIcon('message-square')
                     .onClick(() => this.importReview()));
+                if (this.gdocUrl()) {
+                    m.addItem((i) => i
+                        .setTitle('Pull review from Google Docs')
+                        .setIcon('message-square')
+                        .onClick(() => this.pullGdoc()));
+                }
             }
         }
         if (event) m.showAtMouseEvent(event);
@@ -5366,6 +5448,32 @@ class ManuscriptModal extends Modal {
                 this.close();
                 new RenameModal(view).open();
             }));
+        if (Platform.isDesktopApp) {
+            const linked = view.gdocUrl();
+            const fm = view.app.metadataCache.getFileCache(view.file)
+                ?.frontmatter || {};
+            const gdoc = new Setting(contentEl).setName('Google Doc')
+                .setDesc(linked ? `Linked to ${fm.dendrite_gdoc_title ||
+                    linked}. Its comments and suggested changes come in ` +
+                    'with Pull review from Google Docs, in Export.' :
+                    'The doc coauthors review, chosen in Google\'s file ' +
+                    'picker, which gives Dendrite that doc only.')
+                .addButton((b) => b.setButtonText(linked ? 'Change…' :
+                                                  'Link a Google Doc…')
+                    .onClick(async () => {
+                        this.close();
+                        await view.plugin.linkGdoc(view.file);
+                    }));
+            if (linked) {
+                gdoc.addButton((b) => b.setButtonText('Unlink')
+                    .onClick(async () => {
+                        await writeProps(view.app, view.file, {
+                            dendrite_gdoc: null,
+                            dendrite_gdoc_title: null });
+                        this.close();
+                    }));
+            }
+        }
         quotaSetting(contentEl, 'Total quota',
             'For the whole manuscript, shown in the top bar against what ' +
             'it uses and what its sections allocate.', ms.limit,
@@ -6376,6 +6484,42 @@ class DendriteSettings extends PluginSettingTab {
                            'works.');
             }));
 
+        heading('Google Docs');
+        new Setting(containerEl).setName('Google OAuth client')
+            .setDesc('The JSON of a Desktop app client from your Google ' +
+                     'Cloud project, pasted whole. It syncs with the ' +
+                     'vault; Google treats a desktop client\'s secret as ' +
+                     'not confidential.')
+            .addTextArea((t) => t.setValue(s.googleClientJson || '')
+                .setPlaceholder('{"installed": {"client_id": ...}}')
+                .onChange((v) => {
+                    s.googleClientJson = v.trim();
+                    save();
+                }));
+        new Setting(containerEl).setName('Google Picker API key')
+            .setDesc('An API key restricted to the Google Picker API, for ' +
+                     'choosing a manuscript\'s doc.')
+            .addText((t) => t.setValue(s.googlePickerKey || '')
+                .onChange((v) => {
+                    s.googlePickerKey = v.trim();
+                    save();
+                }));
+        const signedIn = !!this.plugin.googleToken();
+        const hasClient = !!this.plugin.googleClient();
+        new Setting(containerEl).setName('Google account')
+            .setDesc(!hasClient ? 'Paste the OAuth client above first.' :
+                signedIn ? 'Signed in. Dendrite reaches only the docs ' +
+                    'you link to a manuscript.' :
+                    'Not signed in. Signing in opens your browser.')
+            .addButton((b) => b.setButtonText(signedIn ? 'Sign out' :
+                                              'Sign in with Google')
+                .setDisabled(!hasClient || !Platform.isDesktopApp)
+                .onClick(async () => {
+                    if (signedIn) await this.plugin.googleSignOut();
+                    else await this.plugin.googleSignIn();
+                    this.display();
+                }));
+
         heading('Other plugins');
         new Setting(containerEl).setName('Keep Linter out of the writing ' +
                                          'folder')
@@ -6482,6 +6626,9 @@ module.exports = class DendritePlugin extends Plugin {
         viewCommand('import-review', 'Import review comments from a ' +
             'returned Word file or a JSON list', false,
             (v) => v.importReview());
+        viewCommand('pull-gdoc-review', 'Pull review comments and ' +
+            'suggested changes from the linked Google Doc', false,
+            (v) => v.pullGdoc());
         viewCommand('add-types', 'Add the type property to the index ' +
             'and every card', false, (v) => v.sweepTypes());
         viewCommand('merge-into-above', 'Merge card into the card above',
@@ -6721,6 +6868,148 @@ module.exports = class DendritePlugin extends Plugin {
                                           manuscript: r.manuscript,
                                           title: r.title } } :
             { status: 404, json: { error: 'no such review' } };
+    }
+
+    // ---- Google Docs ---------------------------------------------------
+
+    /**
+     * The OAuth client, as pasted in the settings or else from its file,
+     * or null without one.
+     */
+    googleClient() {
+        const pasted = this.settings && this.settings.googleClientJson;
+        try {
+            return google.readClient(pasted && pasted.trim() ? pasted :
+                require('fs').readFileSync(
+                    configFile('google-oauth-client.json'), 'utf8'));
+        } catch (err) {
+            return null;
+        }
+    }
+
+    /** The Picker API key, as pasted or else from its file. */
+    googlePickerKey() {
+        const pasted = this.settings && this.settings.googlePickerKey;
+        if (pasted && pasted.trim()) return pasted.trim();
+        try {
+            return require('fs').readFileSync(
+                configFile('google-api-key.txt'), 'utf8').trim();
+        } catch (err) {
+            return '';
+        }
+    }
+
+    googleToken() {
+        try {
+            return JSON.parse(require('fs').readFileSync(
+                configFile('google-token.json'), 'utf8'));
+        } catch (err) {
+            return null;
+        }
+    }
+
+    saveGoogleToken(tok) {
+        const fs = require('fs');
+        const file = configFile('google-token.json');
+        fs.mkdirSync(require('path').dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(tok, null, 2) + '\n',
+                         { mode: 0o600 });
+    }
+
+    googleDeps() {
+        return { request: googleRequest, openUrl: openExternal,
+                 http: require('http'), crypto: require('crypto') };
+    }
+
+    /** Sign in as the user in the browser; false when it did not work. */
+    async googleSignIn() {
+        const client = this.googleClient();
+        if (!client) {
+            new Notice('Dendrite: paste the Google OAuth client\'s JSON in ' +
+                       'Dendrite\'s settings first.', 10000);
+            return false;
+        }
+        new Notice('Dendrite: sign in to Google in the browser that ' +
+                   'opened.');
+        try {
+            const tok = await google.signIn(Object.assign(
+                { client }, this.googleDeps()));
+            this.saveGoogleToken(tok);
+        } catch (err) {
+            new Notice(`Dendrite: Google sign-in failed (${err.message}).`,
+                       10000);
+            return false;
+        }
+        new Notice('Dendrite: signed in to Google.');
+        return true;
+    }
+
+    async googleSignOut() {
+        const tok = this.googleToken();
+        try {
+            await google.revoke({ tok, request: googleRequest });
+        } catch (err) {
+            // Revoked already, or offline: the token goes either way.
+        }
+        try {
+            require('fs').unlinkSync(configFile('google-token.json'));
+        } catch (err) {
+            // Never signed in.
+        }
+    }
+
+    /** A current access token, signing in first when Google wants it. */
+    async googleAccess() {
+        const client = this.googleClient();
+        const get = () => google.accessToken({ client,
+            tok: this.googleToken(), request: googleRequest,
+            save: async (t) => this.saveGoogleToken(t) });
+        try {
+            return await get();
+        } catch (err) {
+            if (!err.signIn) throw err;
+            if (!await this.googleSignIn()) return null;
+            return get();
+        }
+    }
+
+    /**
+     * Pair a manuscript with a Google Doc, chosen in Google's picker,
+     * which also grants Dendrite that doc.
+     */
+    async linkGdoc(indexFile) {
+        const key = this.googlePickerKey();
+        if (!key) {
+            new Notice('Dendrite: paste the Google Picker API key in ' +
+                       'Dendrite\'s settings first.', 10000);
+            return;
+        }
+        const token = await this.googleAccess();
+        if (!token) return;
+        new Notice('Dendrite: choose the doc in the browser that opened.');
+        let picked;
+        try {
+            picked = await google.pick(Object.assign({ token, apiKey: key,
+                client: this.googleClient() }, this.googleDeps()));
+        } catch (err) {
+            new Notice(`Dendrite: the picker failed (${err.message}).`,
+                       10000);
+            return;
+        }
+        if (!picked) return;
+        await writeProps(this.app, indexFile, {
+            dendrite_gdoc: google.docUrl(picked.id),
+            dendrite_gdoc_title: picked.name || null });
+        new Notice(`Dendrite: linked to the Google Doc ${picked.name}.`);
+    }
+
+    /** A linked doc's open comments and suggested changes. */
+    async gdocReview(url) {
+        const docId = google.docIdFromUrl(url);
+        if (!docId) throw new Error('the linked doc\'s URL has no doc id');
+        const token = await this.googleAccess();
+        if (!token) return null;
+        return google.fetchReview({ docId, token, request: googleRequest });
     }
 
     async settleReview(id, state) {

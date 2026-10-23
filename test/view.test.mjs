@@ -1060,7 +1060,8 @@ test('settings are grouped under headings by what they affect', () => {
                     autosaveMs: 600, openInDendrite: true, vimKeys: true,
                     manageLinter: true, lintCards: true,
                     obsidianEditor: true },
-        saveSettings() {}, rerender() {} });
+        saveSettings() {}, rerender() {}, googleToken: () => null,
+        googleClient: () => null });
     tab.display();
     const out = h.obsidian.settingsLog.map((s) =>
         (s.heading ? '## ' : '') + s.name);
@@ -1074,6 +1075,8 @@ test('settings are grouped under headings by what they affect', () => {
         'Fallback .bib',
         '## Review', 'Accept reviews from programs on this computer',
         'Review port',
+        '## Google Docs', 'Google OAuth client', 'Google Picker API key',
+        'Google account',
         '## Other plugins', 'Keep Linter out of the writing folder',
         'Clean up cards with Linter',
     ]);
@@ -2667,4 +2670,82 @@ test('an old version can be deleted from the stack, undoably',
     assert.match(read(cardPath('G-aaaaa')), /Old\./);
     assert.deepEqual(view.byId.get('G-ccccc').children.map((n) => n.id),
                      ['G-aaaaa']);
+});
+
+test('a manuscript linked to a Google Doc pulls its comments and ' +
+     'suggested changes into the review dialog, and offers it in Export',
+     async () => {
+    const { app, view, text } = await open(
+        '---\ndendrite_prefix: G\ndendrite_gdoc: https://docs.google.com/' +
+        'document/d/DOC1/edit\ndendrite_gdoc_title: RAC draft\n---\n' +
+        '- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'Samples were collected between 2014 and 2023 ' +
+          'under the protocol.' });
+    let asked = null;
+    view.plugin.gdocReview = async (url) => {
+        asked = url;
+        return { title: 'RAC draft', resolved: 2, items: [
+            { kind: 'comment', author: 'Aly Karsan', date: '2026-10-24',
+              text: 'Which protocol?', quote: 'the protocol',
+              before: '', after: '' },
+            { kind: 'change', author: 'Google Docs suggestion',
+              date: '2026-10-24', quote: 'between 2014 and 2023',
+              insert: 'from 2014 to 2023', before: 'collected ',
+              after: ' under' }] };
+    };
+    assert.equal(view.gdocUrl(),
+                 'https://docs.google.com/document/d/DOC1/edit');
+    view.exportMenu(null, { preventDefault() {} });
+    assert.ok(h.obsidian.lastMenu.items.some((i) =>
+        i.title === 'Pull review from Google Docs'));
+    const m = await view.pullGdoc();
+    assert.equal(asked, view.gdocUrl());
+    assert.match(m.titleEl.textContent, /RAC draft \(Google Docs\)/);
+    assert.equal(m.rows.filter((r) => r.use).length, 2);
+    await m.contentEl.querySelector('.mod-cta').onclick();
+    assert.equal(text(cardPath('G-aaaaa')), 'Samples were collected ' +
+        '==between 2014 and 2023==%%[!suggest] Google Docs suggestion, ' +
+        '2026-10-24: from 2014 to 2023%% under ==the protocol==' +
+        '%%[!review] Aly Karsan, 2026-10-24: Which protocol?%%.');
+    // Pulled again: nothing comes ticked.
+    const again = await view.pullGdoc();
+    assert.equal(again.rows.filter((r) => r.use).length, 0);
+    view.plugin.gdocReview = async () => ({ title: 'RAC draft',
+                                            resolved: 3, items: [] });
+    h.notices.length = 0;
+    assert.equal(await view.pullGdoc(), null);
+    assert.match(h.notices[0], /no open comments .* 3 resolved left out/);
+    void app;
+});
+
+test('the Google client and Picker key can be pasted into the settings, ' +
+     'which come before the files', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dendrite-g-'));
+    process.env.DENDRITE_REVIEW_API_FILE = path.join(dir, 'review-api.json');
+    try {
+        const p = new DendritePlugin();
+        p.settings = { googleClientJson: '', googlePickerKey: '' };
+        assert.equal(p.googleClient(), null);
+        assert.equal(p.googlePickerKey(), '');
+        fs.writeFileSync(path.join(dir, 'google-oauth-client.json'),
+            JSON.stringify({ installed: { client_id: '1-file' } }));
+        fs.writeFileSync(path.join(dir, 'google-api-key.txt'), 'FILEKEY\n');
+        assert.equal(p.googleClient().clientId, '1-file');
+        assert.equal(p.googlePickerKey(), 'FILEKEY');
+        p.settings.googleClientJson = JSON.stringify({ installed: {
+            client_id: '2-pasted', client_secret: 's' } });
+        p.settings.googlePickerKey = ' PASTED ';
+        assert.equal(p.googleClient().clientId, '2-pasted');
+        assert.equal(p.googleClient().projectNumber, '2');
+        assert.equal(p.googlePickerKey(), 'PASTED');
+        p.settings.googleClientJson = 'not json';
+        assert.equal(p.googleClient(), null, 'unreadable: none');
+    } finally {
+        delete process.env.DENDRITE_REVIEW_API_FILE;
+        fs.rmSync(dir, { recursive: true });
+    }
 });

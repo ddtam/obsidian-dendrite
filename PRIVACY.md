@@ -6,9 +6,9 @@ Dendrite is an Obsidian plugin that runs on your own computer. It has no server 
 
 When you sign in with Google in Dendrite's settings, Dendrite asks Google only for access to files it creates or that you open with it (the `drive.file` permission). It cannot see any other file in your Google Drive.
 
-With that access Dendrite creates a Google Doc from a manuscript when you ask, reads the comments and suggested changes on it so you can bring them into your cards, and writes the changes you send to it. It does this only when you ask, from your computer, directly with Google.
+With that access Dendrite reads the comments and suggested changes on the doc you link to a manuscript, chosen in Google's own file picker, so you can bring them into your cards, and writes the changes you send to it. It does this only when you ask, from your computer, directly with Google.
 
-Your sign-in token is stored on your computer, outside your vault, and is never sent anywhere except to Google. You can remove Dendrite's access at any time at https://myaccount.google.com/permissions, or by signing out in Dendrite's settings.
+Your sign-in token is stored on your computer, outside your vault, and is never sent anywhere except to Google. The OAuth client and Picker API key you paste into Dendrite's settings are kept in those settings, inside your vault, and are used only to sign you in and open Google's picker. You can remove Dendrite's access at any time at https://myaccount.google.com/permissions, or by signing out in Dendrite's settings.
 
 ## Other connections
 

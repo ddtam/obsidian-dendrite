@@ -3022,6 +3022,414 @@ var require_review = __commonJS({
   }
 });
 
+// src/google.js
+var require_google = __commonJS({
+  "src/google.js"(exports2, module2) {
+    "use strict";
+    var SCOPE = "https://www.googleapis.com/auth/drive.file";
+    var DOCS = "https://docs.googleapis.com/v1/documents/";
+    var DRIVE = "https://www.googleapis.com/drive/v3/files/";
+    var REVOKE = "https://oauth2.googleapis.com/revoke";
+    var WAIT_MS = 10 * 60 * 1e3;
+    function readClient(text) {
+      const d = JSON.parse(text);
+      const c = d.installed || d.web;
+      if (!c || !c.client_id) throw new Error("not an OAuth client file");
+      return {
+        clientId: c.client_id,
+        clientSecret: c.client_secret || "",
+        authUri: c.auth_uri || "https://accounts.google.com/o/oauth2/auth",
+        tokenUri: c.token_uri || "https://oauth2.googleapis.com/token",
+        // The number a client id starts with is its project's,
+        // which the picker needs to grant the file to this app.
+        projectNumber: c.client_id.split("-")[0]
+      };
+    }
+    function docIdFromUrl(url) {
+      const s = String(url || "").trim();
+      const m = /\/document\/d\/([\w-]+)/.exec(s);
+      if (m) return m[1];
+      return /^[\w-]{20,}$/.test(s) ? s : null;
+    }
+    var docUrl = (id) => `https://docs.google.com/document/d/${id}/edit`;
+    function base64url(buf) {
+      return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+    function pkce(crypto) {
+      const verifier = base64url(crypto.randomBytes(48));
+      const challenge = base64url(crypto.createHash("sha256").update(verifier).digest());
+      return { verifier, challenge };
+    }
+    function form(obj) {
+      return Object.entries(obj).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+    }
+    function loopback(http, route) {
+      return new Promise((resolve, reject) => {
+        let finish;
+        let fail;
+        const done = new Promise((y, n) => {
+          finish = y;
+          fail = n;
+        });
+        const server = http.createServer((req, res) => {
+          const url = new URL(req.url, "http://127.0.0.1");
+          let out;
+          try {
+            out = route(url, res);
+          } catch (err) {
+            res.writeHead(400, { "content-type": "text/plain" });
+            res.end(String(err.message));
+            return;
+          }
+          if (out !== void 0) finish(out);
+        });
+        const timer = setTimeout(() => fail(new Error(
+          "no answer from the browser within 10 minutes"
+        )), WAIT_MS);
+        if (timer.unref) timer.unref();
+        done.then(() => {
+        }, () => {
+        }).finally(() => {
+          clearTimeout(timer);
+          server.close();
+        });
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          resolve({
+            base: `http://127.0.0.1:${server.address().port}`,
+            done
+          });
+        });
+      });
+    }
+    function page(res, text) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`<!doctype html><meta charset="utf-8"><title>Dendrite</title><body style="font-family:sans-serif;margin:2em"><p>${text}</p></body>`);
+    }
+    async function signIn({
+      client,
+      request,
+      openUrl,
+      http,
+      crypto,
+      now = Date.now
+    }) {
+      const { verifier, challenge } = pkce(crypto);
+      const state = base64url(crypto.randomBytes(16));
+      const { base, done } = await loopback(http, (url, res2) => {
+        if (url.pathname !== "/") return void 0;
+        if (url.searchParams.get("state") !== state) {
+          throw new Error("this sign-in was not started by Dendrite");
+        }
+        const err = url.searchParams.get("error");
+        page(res2, err ? `Sign-in did not finish (${err}). You can close this tab.` : "Signed in. You can close this tab and go back to Obsidian.");
+        return err ? { error: err } : { code: url.searchParams.get("code") };
+      });
+      openUrl(`${client.authUri}?` + form({
+        client_id: client.clientId,
+        redirect_uri: base,
+        response_type: "code",
+        scope: SCOPE,
+        access_type: "offline",
+        prompt: "consent",
+        state,
+        code_challenge: challenge,
+        code_challenge_method: "S256"
+      }));
+      const got = await done;
+      if (got.error) throw new Error(`Google said ${got.error}`);
+      const res = await request({
+        url: client.tokenUri,
+        method: "POST",
+        contentType: "application/x-www-form-urlencoded",
+        body: form({
+          code: got.code,
+          client_id: client.clientId,
+          client_secret: client.clientSecret,
+          redirect_uri: base,
+          grant_type: "authorization_code",
+          code_verifier: verifier
+        })
+      });
+      if (res.status !== 200 || !res.json.refresh_token) {
+        throw new Error("Google did not give a token" + (res.json && res.json.error ? ` (${res.json.error})` : ""));
+      }
+      return {
+        refresh_token: res.json.refresh_token,
+        access_token: res.json.access_token,
+        expires_at: now() + (res.json.expires_in || 3600) * 1e3
+      };
+    }
+    async function accessToken({
+      client,
+      tok,
+      request,
+      save,
+      now = Date.now
+    }) {
+      if (!tok || !tok.refresh_token) {
+        const e = new Error("not signed in to Google");
+        e.signIn = true;
+        throw e;
+      }
+      if (tok.access_token && tok.expires_at > now() + 6e4) {
+        return tok.access_token;
+      }
+      const res = await request({
+        url: client.tokenUri,
+        method: "POST",
+        contentType: "application/x-www-form-urlencoded",
+        body: form({
+          client_id: client.clientId,
+          client_secret: client.clientSecret,
+          refresh_token: tok.refresh_token,
+          grant_type: "refresh_token"
+        })
+      });
+      if (res.status !== 200) {
+        const e = new Error("Google wants you to sign in again" + (res.json && res.json.error ? ` (${res.json.error})` : ""));
+        e.signIn = true;
+        throw e;
+      }
+      const next = Object.assign({}, tok, {
+        access_token: res.json.access_token,
+        expires_at: now() + (res.json.expires_in || 3600) * 1e3
+      });
+      await save(next);
+      return next.access_token;
+    }
+    async function revoke({ tok, request }) {
+      if (!tok || !tok.refresh_token) return;
+      await request({
+        url: REVOKE,
+        method: "POST",
+        contentType: "application/x-www-form-urlencoded",
+        body: form({ token: tok.refresh_token })
+      });
+    }
+    function pickerPage(o) {
+      const j = (v) => JSON.stringify(v).replace(/</g, "\\u003c");
+      return `<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Dendrite: link a Google Doc</title>
+<style>body { font-family: sans-serif; margin: 2em; }</style>
+</head><body>
+<p id="m">Opening Google's file picker. Choose the manuscript's doc.</p>
+<script>
+const O = ${j(o)};
+function say(t) { document.getElementById('m').textContent = t; }
+function tell(path) {
+  fetch(path).finally(() => say('Done. You can close this tab and go ' +
+                                'back to Obsidian.'));
+}
+function onCallback(d) {
+  const P = google.picker;
+  if (d[P.Response.ACTION] === P.Action.PICKED) {
+    const doc = d[P.Response.DOCUMENTS][0];
+    tell(O.back + '/picked?id=' + encodeURIComponent(doc[P.Document.ID]) +
+         '&name=' + encodeURIComponent(doc[P.Document.NAME]));
+  } else if (d[P.Response.ACTION] === P.Action.CANCEL) {
+    tell(O.back + '/cancel');
+  }
+}
+function onApi() {
+  gapi.load('picker', () => {
+    const P = google.picker;
+    const view = new P.DocsView(P.ViewId.DOCUMENTS)
+      .setMode(P.DocsViewMode.LIST);
+    new P.PickerBuilder().addView(view).setOAuthToken(O.token)
+      .setDeveloperKey(O.key).setAppId(O.app).setCallback(onCallback)
+      .build().setVisible(true);
+  });
+}
+<\/script>
+<script async defer src="https://apis.google.com/js/api.js"
+        onload="onApi()"
+        onerror="say('Google\\'s picker could not load.')"><\/script>
+</body></html>`;
+    }
+    async function pick({ token, apiKey, client, openUrl, http, crypto }) {
+      const secret = base64url(crypto.randomBytes(16));
+      let back = "";
+      const { base, done } = await loopback(http, (url, res) => {
+        if (url.pathname === `/${secret}`) {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end(pickerPage({
+            token,
+            key: apiKey,
+            app: client.projectNumber,
+            back
+          }));
+          return void 0;
+        }
+        if (url.pathname === `/${secret}/picked`) {
+          page(res, "Linked.");
+          return {
+            id: url.searchParams.get("id"),
+            name: url.searchParams.get("name") || ""
+          };
+        }
+        if (url.pathname === `/${secret}/cancel`) {
+          page(res, "Cancelled.");
+          return null;
+        }
+        res.writeHead(404);
+        res.end();
+        return void 0;
+      });
+      back = `/${secret}`;
+      openUrl(`${base}/${secret}`);
+      return done;
+    }
+    var CONTEXT = 40;
+    function unescapeHtml(s) {
+      return String(s || "").replace(
+        /&#(\d+);/g,
+        (m, n) => String.fromCharCode(Number(n))
+      ).replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+    }
+    function suggestionItems(doc, date = "") {
+      const out = [];
+      const paras = [];
+      const walk = (content) => {
+        for (const el of content || []) {
+          if (el.paragraph) paras.push(el.paragraph);
+          if (el.table) {
+            for (const row of el.table.tableRows || []) {
+              for (const cell of row.tableCells || []) {
+                walk(cell.content);
+              }
+            }
+          }
+        }
+      };
+      walk(doc.body && doc.body.content);
+      for (const p of paras) {
+        let text = "";
+        const sugg = /* @__PURE__ */ new Map();
+        for (const el of p.elements || []) {
+          const run = el.textRun;
+          if (!run) continue;
+          const t = run.content.replace(/\n$/, "");
+          const ins = run.suggestedInsertionIds || [];
+          const del = run.suggestedDeletionIds || [];
+          for (const id of [...ins, ...del]) {
+            if (!sugg.has(id)) {
+              sugg.set(id, {
+                start: text.length,
+                end: text.length,
+                quote: "",
+                insert: ""
+              });
+            }
+          }
+          if (ins.length) {
+            for (const id of ins) sugg.get(id).insert += t;
+            continue;
+          }
+          for (const id of del) {
+            const s = sugg.get(id);
+            s.quote += t;
+            s.end = text.length + t.length;
+          }
+          text += t;
+        }
+        for (const s of sugg.values()) {
+          out.push({
+            kind: "change",
+            author: "Google Docs suggestion",
+            date,
+            quote: s.quote,
+            insert: s.insert,
+            before: text.slice(
+              Math.max(0, s.start - CONTEXT),
+              s.start
+            ),
+            after: text.slice(s.end, s.end + CONTEXT)
+          });
+        }
+      }
+      return out;
+    }
+    function commentItems(comments) {
+      const out = [];
+      for (const c of comments || []) {
+        if (c.resolved || c.deleted) continue;
+        const replies = (c.replies || []).filter((r) => !r.deleted && r.content).map((r) => ` Reply from ${r.author && r.author.displayName || "someone"}: ${r.content}`);
+        out.push({
+          kind: "comment",
+          author: c.author && c.author.displayName || "",
+          date: String(c.createdTime || "").slice(0, 10),
+          text: (c.content || "") + replies.join(""),
+          quote: unescapeHtml(c.quotedFileContent && c.quotedFileContent.value),
+          before: "",
+          after: ""
+        });
+      }
+      return out;
+    }
+    async function getJson(request, url, token) {
+      const res = await request({ url, headers: {
+        Authorization: `Bearer ${token}`
+      } });
+      if (res.status !== 200) {
+        const msg = res.json && res.json.error && res.json.error.message;
+        const e = new Error(`Google answered ${res.status}` + (msg ? `: ${msg}` : ""));
+        e.status = res.status;
+        throw e;
+      }
+      return res.json;
+    }
+    async function fetchReview({
+      docId,
+      token,
+      request,
+      today = /* @__PURE__ */ new Date()
+    }) {
+      const doc = await getJson(request, `${DOCS}${docId}?suggestionsViewMode=SUGGESTIONS_INLINE`, token);
+      const comments = [];
+      let pageToken = "";
+      let resolved = 0;
+      for (let k = 0; k < 50; k++) {
+        const r = await getJson(request, `${DRIVE}${docId}/comments?` + form({
+          pageSize: 100,
+          includeDeleted: false,
+          fields: "nextPageToken,comments(id,content,createdTime,resolved,deleted,author(displayName),quotedFileContent(value),replies(content,deleted,author(displayName)))"
+        }) + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""), token);
+        for (const c of r.comments || []) {
+          if (c.resolved) resolved++;
+          comments.push(c);
+        }
+        if (!r.nextPageToken) break;
+        pageToken = r.nextPageToken;
+      }
+      return {
+        title: doc.title || "",
+        items: [...commentItems(comments), ...suggestionItems(
+          doc,
+          today.toISOString().slice(0, 10)
+        )],
+        resolved
+      };
+    }
+    module2.exports = {
+      SCOPE,
+      readClient,
+      docIdFromUrl,
+      docUrl,
+      pkce,
+      signIn,
+      accessToken,
+      revoke,
+      pick,
+      pickerPage,
+      suggestionItems,
+      commentItems,
+      fetchReview
+    };
+  }
+});
+
 // src/history.js
 var require_history = __commonJS({
   "src/history.js"(exports2, module2) {
@@ -3288,13 +3696,15 @@ var {
   setIcon,
   Platform,
   normalizePath,
-  Keymap
+  Keymap,
+  requestUrl
 } = require("obsidian");
 var core = require_core();
 var textedit = require_textedit();
 var { cardEditor } = require_editor();
 var pandoc = require_pandoc();
 var review = require_review();
+var google = require_google();
 var { History, idbStore } = require_history();
 var VIEW = "dendrite-view";
 var ROLE_ITEMS = [
@@ -3362,7 +3772,12 @@ var DEFAULTS = {
   reviewApiKey: "",
   // Reviews submitted, pending until added or ignored on the board,
   // and the latest ones decided, so a submitter can ask.
-  reviewQueue: []
+  reviewQueue: [],
+  // Google Docs: the OAuth client's JSON and the Picker API key, as
+  // pasted, so every desktop the vault syncs to can sign in. Each
+  // computer keeps its own sign-in token, outside the vault.
+  googleClientJson: "",
+  googlePickerKey: ""
 };
 var LINTER_ID = "obsidian-linter";
 var CARD_UNSAFE_RULES = ["file-name-heading", "capitalize-headings"];
@@ -3419,6 +3834,39 @@ function discoveryPath() {
     return "~/.config/dendrite/review-api.json";
   }
   return typeof process !== "undefined" && process.env && process.env.DENDRITE_REVIEW_API_FILE || path.join(os.homedir(), ".config", "dendrite", "review-api.json");
+}
+function configFile(name) {
+  try {
+    return require("path").join(require("path").dirname(
+      discoveryPath()
+    ), name);
+  } catch (err) {
+    return `~/.config/dendrite/${name}`;
+  }
+}
+async function googleRequest(req) {
+  const res = await requestUrl({
+    url: req.url,
+    method: req.method || "GET",
+    headers: req.headers,
+    body: req.body,
+    contentType: req.contentType,
+    throw: false
+  });
+  let json = null;
+  try {
+    json = res.json;
+  } catch (err) {
+    json = null;
+  }
+  return { status: res.status, json };
+}
+function openExternal(url) {
+  try {
+    require("electron").shell.openExternal(url);
+  } catch (err) {
+    window.open(url);
+  }
 }
 function reviewAuthors(items) {
   return [...new Set(items.map((x) => x.author || "Reviewer"))].join(", ");
@@ -6638,6 +7086,38 @@ var DendriteView = class extends ItemView {
     };
     input.click();
   }
+  /** The Google Doc this manuscript is linked to, or null. */
+  gdocUrl() {
+    const fm = this.file && this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+    return fm && typeof fm.dendrite_gdoc === "string" ? fm.dendrite_gdoc : null;
+  }
+  /**
+   * Bring in the linked Google Doc's open comments and suggested
+   * changes through the review dialog, as from a returned Word file.
+   */
+  async pullGdoc() {
+    const url = this.gdocUrl();
+    if (!url) {
+      new Notice("Dendrite: link a Google Doc in the manuscript's settings first.");
+      return null;
+    }
+    let r;
+    try {
+      r = await this.plugin.gdocReview(url);
+    } catch (err) {
+      new Notice(`Dendrite: could not read the Google Doc (${err.message}).`, 1e4);
+      return null;
+    }
+    if (!r) return null;
+    if (!r.items.length) {
+      new Notice(`Dendrite: ${r.title || "the doc"} has no open comments or suggested changes` + (r.resolved ? `; ${r.resolved} resolved left out.` : "."));
+      return null;
+    }
+    return this.reviewModal(
+      `${r.title || "Google Doc"} (Google Docs)`,
+      r.items
+    );
+  }
   /** Submitted reviews for this manuscript, waiting on the bar. */
   refreshInbox() {
     const q = this.plugin.reviewQueue ? this.plugin.reviewQueue() : [];
@@ -7698,6 +8178,9 @@ var DendriteView = class extends ItemView {
       if (!node) {
         m.addSeparator();
         m.addItem((i) => i.setTitle("Import review\u2026").setIcon("message-square").onClick(() => this.importReview()));
+        if (this.gdocUrl()) {
+          m.addItem((i) => i.setTitle("Pull review from Google Docs").setIcon("message-square").onClick(() => this.pullGdoc()));
+        }
       }
     }
     if (event) m.showAtMouseEvent(event);
@@ -8285,6 +8768,23 @@ var ManuscriptModal = class extends Modal {
       this.close();
       new RenameModal(view).open();
     }));
+    if (Platform.isDesktopApp) {
+      const linked = view.gdocUrl();
+      const fm = view.app.metadataCache.getFileCache(view.file)?.frontmatter || {};
+      const gdoc = new Setting(contentEl).setName("Google Doc").setDesc(linked ? `Linked to ${fm.dendrite_gdoc_title || linked}. Its comments and suggested changes come in with Pull review from Google Docs, in Export.` : "The doc coauthors review, chosen in Google's file picker, which gives Dendrite that doc only.").addButton((b) => b.setButtonText(linked ? "Change\u2026" : "Link a Google Doc\u2026").onClick(async () => {
+        this.close();
+        await view.plugin.linkGdoc(view.file);
+      }));
+      if (linked) {
+        gdoc.addButton((b) => b.setButtonText("Unlink").onClick(async () => {
+          await writeProps(view.app, view.file, {
+            dendrite_gdoc: null,
+            dendrite_gdoc_title: null
+          });
+          this.close();
+        }));
+      }
+    }
     quotaSetting(
       contentEl,
       "Total quota",
@@ -9087,6 +9587,22 @@ var DendriteSettings = class extends PluginSettingTab {
       await this.plugin.syncReviewApi(true);
       new Notice(`Dendrite: a new review key is in ${discoveryPath()}; the old one no longer works.`);
     }));
+    heading("Google Docs");
+    new Setting(containerEl).setName("Google OAuth client").setDesc("The JSON of a Desktop app client from your Google Cloud project, pasted whole. It syncs with the vault; Google treats a desktop client's secret as not confidential.").addTextArea((t) => t.setValue(s.googleClientJson || "").setPlaceholder('{"installed": {"client_id": ...}}').onChange((v) => {
+      s.googleClientJson = v.trim();
+      save();
+    }));
+    new Setting(containerEl).setName("Google Picker API key").setDesc("An API key restricted to the Google Picker API, for choosing a manuscript's doc.").addText((t) => t.setValue(s.googlePickerKey || "").onChange((v) => {
+      s.googlePickerKey = v.trim();
+      save();
+    }));
+    const signedIn = !!this.plugin.googleToken();
+    const hasClient = !!this.plugin.googleClient();
+    new Setting(containerEl).setName("Google account").setDesc(!hasClient ? "Paste the OAuth client above first." : signedIn ? "Signed in. Dendrite reaches only the docs you link to a manuscript." : "Not signed in. Signing in opens your browser.").addButton((b) => b.setButtonText(signedIn ? "Sign out" : "Sign in with Google").setDisabled(!hasClient || !Platform.isDesktopApp).onClick(async () => {
+      if (signedIn) await this.plugin.googleSignOut();
+      else await this.plugin.googleSignIn();
+      this.display();
+    }));
     heading("Other plugins");
     new Setting(containerEl).setName("Keep Linter out of the writing folder").setDesc("Adds the writing folder to the Linter plugin's folders to ignore, so its rules never rewrite a card. Off removes the entry, if Dendrite added it.").addToggle((tg) => tg.setValue(s.manageLinter).onChange((v) => {
       s.manageLinter = v;
@@ -9193,6 +9709,12 @@ module.exports = class DendritePlugin extends Plugin {
       "Import review comments from a returned Word file or a JSON list",
       false,
       (v) => v.importReview()
+    );
+    viewCommand(
+      "pull-gdoc-review",
+      "Pull review comments and suggested changes from the linked Google Doc",
+      false,
+      (v) => v.pullGdoc()
     );
     viewCommand("add-types", "Add the type property to the index and every card", false, (v) => v.sweepTypes());
     viewCommand(
@@ -9423,6 +9945,157 @@ module.exports = class DendritePlugin extends Plugin {
       manuscript: r.manuscript,
       title: r.title
     } } : { status: 404, json: { error: "no such review" } };
+  }
+  // ---- Google Docs ---------------------------------------------------
+  /**
+   * The OAuth client, as pasted in the settings or else from its file,
+   * or null without one.
+   */
+  googleClient() {
+    const pasted = this.settings && this.settings.googleClientJson;
+    try {
+      return google.readClient(pasted && pasted.trim() ? pasted : require("fs").readFileSync(
+        configFile("google-oauth-client.json"),
+        "utf8"
+      ));
+    } catch (err) {
+      return null;
+    }
+  }
+  /** The Picker API key, as pasted or else from its file. */
+  googlePickerKey() {
+    const pasted = this.settings && this.settings.googlePickerKey;
+    if (pasted && pasted.trim()) return pasted.trim();
+    try {
+      return require("fs").readFileSync(
+        configFile("google-api-key.txt"),
+        "utf8"
+      ).trim();
+    } catch (err) {
+      return "";
+    }
+  }
+  googleToken() {
+    try {
+      return JSON.parse(require("fs").readFileSync(
+        configFile("google-token.json"),
+        "utf8"
+      ));
+    } catch (err) {
+      return null;
+    }
+  }
+  saveGoogleToken(tok) {
+    const fs = require("fs");
+    const file = configFile("google-token.json");
+    fs.mkdirSync(require("path").dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify(tok, null, 2) + "\n",
+      { mode: 384 }
+    );
+  }
+  googleDeps() {
+    return {
+      request: googleRequest,
+      openUrl: openExternal,
+      http: require("http"),
+      crypto: require("crypto")
+    };
+  }
+  /** Sign in as the user in the browser; false when it did not work. */
+  async googleSignIn() {
+    const client = this.googleClient();
+    if (!client) {
+      new Notice("Dendrite: paste the Google OAuth client's JSON in Dendrite's settings first.", 1e4);
+      return false;
+    }
+    new Notice("Dendrite: sign in to Google in the browser that opened.");
+    try {
+      const tok = await google.signIn(Object.assign(
+        { client },
+        this.googleDeps()
+      ));
+      this.saveGoogleToken(tok);
+    } catch (err) {
+      new Notice(
+        `Dendrite: Google sign-in failed (${err.message}).`,
+        1e4
+      );
+      return false;
+    }
+    new Notice("Dendrite: signed in to Google.");
+    return true;
+  }
+  async googleSignOut() {
+    const tok = this.googleToken();
+    try {
+      await google.revoke({ tok, request: googleRequest });
+    } catch (err) {
+    }
+    try {
+      require("fs").unlinkSync(configFile("google-token.json"));
+    } catch (err) {
+    }
+  }
+  /** A current access token, signing in first when Google wants it. */
+  async googleAccess() {
+    const client = this.googleClient();
+    const get = () => google.accessToken({
+      client,
+      tok: this.googleToken(),
+      request: googleRequest,
+      save: async (t) => this.saveGoogleToken(t)
+    });
+    try {
+      return await get();
+    } catch (err) {
+      if (!err.signIn) throw err;
+      if (!await this.googleSignIn()) return null;
+      return get();
+    }
+  }
+  /**
+   * Pair a manuscript with a Google Doc, chosen in Google's picker,
+   * which also grants Dendrite that doc.
+   */
+  async linkGdoc(indexFile) {
+    const key = this.googlePickerKey();
+    if (!key) {
+      new Notice("Dendrite: paste the Google Picker API key in Dendrite's settings first.", 1e4);
+      return;
+    }
+    const token = await this.googleAccess();
+    if (!token) return;
+    new Notice("Dendrite: choose the doc in the browser that opened.");
+    let picked;
+    try {
+      picked = await google.pick(Object.assign({
+        token,
+        apiKey: key,
+        client: this.googleClient()
+      }, this.googleDeps()));
+    } catch (err) {
+      new Notice(
+        `Dendrite: the picker failed (${err.message}).`,
+        1e4
+      );
+      return;
+    }
+    if (!picked) return;
+    await writeProps(this.app, indexFile, {
+      dendrite_gdoc: google.docUrl(picked.id),
+      dendrite_gdoc_title: picked.name || null
+    });
+    new Notice(`Dendrite: linked to the Google Doc ${picked.name}.`);
+  }
+  /** A linked doc's open comments and suggested changes. */
+  async gdocReview(url) {
+    const docId = google.docIdFromUrl(url);
+    if (!docId) throw new Error("the linked doc's URL has no doc id");
+    const token = await this.googleAccess();
+    if (!token) return null;
+    return google.fetchReview({ docId, token, request: googleRequest });
   }
   async settleReview(id, state) {
     const r = this.reviewQueue().find((x) => x.id === id);
