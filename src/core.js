@@ -942,15 +942,55 @@ function stackNotes(anchors, heights, current, gap) {
 }
 
 /**
- * How far a column of comments longer than the text it sits beside is
- * moved up, at a scroll of `scrollTop` out of `maxScroll`: the part past
- * the text's end, `overflow`, in proportion, so the column scrolls a
- * little faster than the text and its end comes into view with the
- * text's.
+ * Comment bubbles placed in their own column, and how the text keeps
+ * pace with it. Each bubble goes level with its passage, `anchors` in
+ * order, or below the one before it, `gap` apart, when that is lower;
+ * once pushed down, those after it stay that much lower, so a crowded
+ * run makes the column longer than the text by its overflow. `knots`
+ * pair each bubble's place in the column with its passage's in the text,
+ * from [0, 0]: between them the text moves no faster than the column,
+ * slower where bubbles are crowded, and level with them otherwise.
+ * Answers { tops, knots }.
  */
-function gutterShift(overflow, scrollTop, maxScroll) {
-    if (!(overflow > 0) || !(maxScroll > 0)) return 0;
-    return overflow * Math.min(1, Math.max(0, scrollTop / maxScroll));
+function placeComments(anchors, heights, gap) {
+    const tops = [];
+    const knots = [[0, 0]];
+    let off = 0;
+    let below = -gap;
+    anchors.forEach((a, i) => {
+        const c = Math.max(a + off, below + gap);
+        off = c - a;
+        tops.push(c);
+        knots.push([c, a]);
+        below = c + heights[i];
+    });
+    return { tops, knots };
+}
+
+/** Where the text is at a scroll of `s` through the comment column. */
+function textAt(s, knots) {
+    for (let k = 1; k < knots.length; k++) {
+        const [c0, t0] = knots[k - 1];
+        const [c1, t1] = knots[k];
+        if (s <= c1) {
+            return c1 === c0 ? t1 : t0 + (s - c0) * (t1 - t0) / (c1 - c0);
+        }
+    }
+    const [c, t] = knots[knots.length - 1];
+    return t + (s - c);
+}
+
+/** The scroll at which the text is at `t`, the first where it waits. */
+function scrollFor(t, knots) {
+    for (let k = 1; k < knots.length; k++) {
+        const [c0, t0] = knots[k - 1];
+        const [c1, t1] = knots[k];
+        if (t <= t1) {
+            return t1 === t0 ? c0 : c0 + (t - t0) * (c1 - c0) / (t1 - t0);
+        }
+    }
+    const [c, tl] = knots[knots.length - 1];
+    return c + (t - tl);
 }
 
 // ---- splitting and merging card text -------------------------------------
@@ -1542,7 +1582,7 @@ module.exports = {
     splitText, mergeText,
     mergeIntoAbove, mergeIntoParent, moveNode,
     flowPath, threadPath, exportSegments, roleFor, cardRole, ROLES, KINDS,
-    stackNotes, gutterShift,
+    stackNotes, placeComments, textAt, scrollFor,
     withKinds, floatLabels, countManuscript,
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,

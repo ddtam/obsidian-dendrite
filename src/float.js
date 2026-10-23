@@ -8,6 +8,11 @@
 const TABLE_LINE = /^\s*\|/;
 const IMAGE = /!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\)/;
 const IMAGE_LINE = /^\s*(!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\))\s*$/;
+// An image's file, by its extension.
+const IMAGE_FILE = /\.(png|jpe?g|gif|svg|webp|bmp|tiff?|avif)(\|[^\]]*)?$/i;
+// A link alone on its line to an image file, which Obsidian's link
+// search writes without the ! that makes it an embed.
+const IMAGE_LINK_LINE = /^\s*\[\[([^\]]+)\]\]\s*$/;
 
 /** The table a card set to Table starts with, to fill in. */
 const STARTER_TABLE = '| Column 1 | Column 2 |\n| --- | --- |\n|  |  |';
@@ -25,9 +30,11 @@ function split(body, kind) {
         content = lines.filter((l) => TABLE_LINE.test(l));
         rest = lines.filter((l) => !TABLE_LINE.test(l));
     } else {
-        const k = lines.findIndex((l) => IMAGE_LINE.test(l));
+        const k = lines.findIndex((l) => IMAGE_LINE.test(l) ||
+            (IMAGE_LINK_LINE.test(l) &&
+             IMAGE_FILE.test(IMAGE_LINK_LINE.exec(l)[1])));
         if (k >= 0) {
-            content = [lines[k].trim()];
+            content = [linkedImage(lines[k])];
             rest = lines.filter((l, i) => i !== k);
         }
     }
@@ -166,7 +173,9 @@ function floatEditor(opts) {
         // or filled in by an image pasted or dropped.
         image = field('Image: type [[ to find one, or paste or drop one',
                       'dendrite-float-image', content, (v) => {
-                          content = v.trim();
+                          // Saved as an embed, as the link search writes
+                          // it without the !.
+                          content = linkedImage(v) || v.trim();
                           draw();
                       });
         cap = field('Caption, printed below the figure', null, caption,

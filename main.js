@@ -694,9 +694,41 @@ var require_core = __commonJS({
       }
       return top[0] < 0 ? down(0, Math.max(0, anchors[0])) : top;
     }
-    function gutterShift(overflow, scrollTop, maxScroll) {
-      if (!(overflow > 0) || !(maxScroll > 0)) return 0;
-      return overflow * Math.min(1, Math.max(0, scrollTop / maxScroll));
+    function placeComments(anchors, heights, gap) {
+      const tops = [];
+      const knots = [[0, 0]];
+      let off = 0;
+      let below = -gap;
+      anchors.forEach((a, i) => {
+        const c = Math.max(a + off, below + gap);
+        off = c - a;
+        tops.push(c);
+        knots.push([c, a]);
+        below = c + heights[i];
+      });
+      return { tops, knots };
+    }
+    function textAt(s, knots) {
+      for (let k = 1; k < knots.length; k++) {
+        const [c0, t0] = knots[k - 1];
+        const [c1, t1] = knots[k];
+        if (s <= c1) {
+          return c1 === c0 ? t1 : t0 + (s - c0) * (t1 - t0) / (c1 - c0);
+        }
+      }
+      const [c, t] = knots[knots.length - 1];
+      return t + (s - c);
+    }
+    function scrollFor(t, knots) {
+      for (let k = 1; k < knots.length; k++) {
+        const [c0, t0] = knots[k - 1];
+        const [c1, t1] = knots[k];
+        if (t <= t1) {
+          return t1 === t0 ? c0 : c0 + (t - t0) * (c1 - c0) / (t1 - t0);
+        }
+      }
+      const [c, tl] = knots[knots.length - 1];
+      return c + (t - tl);
     }
     function splitText(body, start, end) {
       const a = Math.min(start, end);
@@ -1125,7 +1157,9 @@ var require_core = __commonJS({
       ROLES,
       KINDS,
       stackNotes,
-      gutterShift,
+      placeComments,
+      textAt,
+      scrollFor,
       withKinds,
       floatLabels,
       countManuscript,
@@ -3085,24 +3119,47 @@ var require_review = __commonJS({
       const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(iso || "");
       return m ? `${Number(m[2])} ${MONTHS[Number(m[1]) - 1]}` : iso || "";
     }
+    function googleOf(it) {
+      if (it.kind === "suggest" || it.kind === "change") return null;
+      return reviewKeys(it).find((k) => k.startsWith("g:")) || null;
+    }
+    function firstOfComment(items) {
+      const seen = /* @__PURE__ */ new Map();
+      return items.map((it, i) => {
+        const g = googleOf(it);
+        if (!g) return i;
+        if (!seen.has(g)) seen.set(g, i);
+        return seen.get(g);
+      });
+    }
+    function countComments(items) {
+      return firstOfComment(items).filter((f, i) => f === i).length;
+    }
     function renderMarkdown(md) {
       let n = 0;
+      const numbers = /* @__PURE__ */ new Map();
       ITEM.lastIndex = 0;
       return md.replace(ITEM, (m, passage, kind, body) => {
-        n++;
+        const g = kind === "review" ? googleOf({ kind, text: (HEAD.exec(body.replace(/^\s+/, "")) || [])[3] || body }) : null;
+        let num;
+        if (g && numbers.has(g)) num = numbers.get(g);
+        else {
+          num = ++n;
+          if (g) numbers.set(g, num);
+        }
         const h = HEAD.exec(body.replace(/^\s+/, ""));
         const text = h ? h[3] : body.trim();
         const cls = kind === "suggest" ? " is-suggest" : "";
-        const num = `<sup class="dendrite-review-n${cls}">${n}</sup>`;
+        const sup = `<sup class="dendrite-review-n${cls}">${num}</sup>`;
         if (kind === "suggest" && !passage) {
           const lead = /^\s*/.exec(text)[0];
-          return `${lead}<span class="dendrite-review-new">${text.slice(lead.length)}</span>${num}`;
+          return `${lead}<span class="dendrite-review-new">${text.slice(lead.length)}</span>${sup}`;
         }
-        if (!passage) return num;
+        if (!passage) return sup;
         if (kind === "suggest") {
-          return `<span class="dendrite-review-old">${passage}</span>` + (text ? `<span class="dendrite-review-new">${text}</span>` : "") + num;
+          return `<span class="dendrite-review-old">${passage}</span>` + (text ? `<span class="dendrite-review-new">${text}</span>` : "") + sup;
         }
-        return `<mark class="dendrite-review-mark">${passage}</mark>${num}`;
+        return `<mark class="dendrite-review-mark">${passage}</mark>${sup}`;
       });
     }
     function commentActions(it) {
@@ -3122,7 +3179,10 @@ var require_review = __commonJS({
         }
         return b.parentElement === root ? b : null;
       };
+      const first = firstOfComment(items);
+      const passages = (i) => first.filter((f) => f === i).length;
       items.forEach((it, i) => {
+        if (first[i] !== i) return;
         const sup = nums[i];
         const b = sup ? blockOf(sup) : null;
         if (!blocks.has(b)) blocks.set(b, []);
@@ -3137,7 +3197,7 @@ var require_review = __commonJS({
           note.className = "dendrite-review-note" + (it.kind === "suggest" ? " is-suggest" : "");
           const n = doc.createElement("span");
           n.className = "dendrite-review-n";
-          n.textContent = String(i + 1);
+          n.textContent = nums[i] ? nums[i].textContent : String(i + 1);
           const main = doc.createElement("div");
           main.className = "dendrite-review-main";
           const meta = doc.createElement("div");
@@ -3145,6 +3205,7 @@ var require_review = __commonJS({
           const who = doc.createElement("b");
           who.textContent = it.author || "Reviewer";
           meta.append(who, ` \xB7 ${shortDate(it.date)}`);
+          if (passages(i) > 1) meta.append(` \xB7 ${passages(i)} passages`);
           const text = doc.createElement("div");
           text.className = "dendrite-review-text";
           const { text: said, url } = noteLink(it.text);
@@ -3202,6 +3263,9 @@ var require_review = __commonJS({
       commentActions,
       commentMenu,
       googleData,
+      googleOf,
+      firstOfComment,
+      countComments,
       itemText,
       addItems,
       removeItem,
@@ -3726,6 +3790,8 @@ var require_float = __commonJS({
     var TABLE_LINE = /^\s*\|/;
     var IMAGE = /!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\)/;
     var IMAGE_LINE = /^\s*(!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\))\s*$/;
+    var IMAGE_FILE = /\.(png|jpe?g|gif|svg|webp|bmp|tiff?|avif)(\|[^\]]*)?$/i;
+    var IMAGE_LINK_LINE = /^\s*\[\[([^\]]+)\]\]\s*$/;
     var STARTER_TABLE = "| Column 1 | Column 2 |\n| --- | --- |\n|  |  |";
     function split(body, kind) {
       const lines = String(body || "").split("\n");
@@ -3735,9 +3801,9 @@ var require_float = __commonJS({
         content = lines.filter((l) => TABLE_LINE.test(l));
         rest = lines.filter((l) => !TABLE_LINE.test(l));
       } else {
-        const k = lines.findIndex((l) => IMAGE_LINE.test(l));
+        const k = lines.findIndex((l) => IMAGE_LINE.test(l) || IMAGE_LINK_LINE.test(l) && IMAGE_FILE.test(IMAGE_LINK_LINE.exec(l)[1]));
         if (k >= 0) {
-          content = [lines[k].trim()];
+          content = [linkedImage(lines[k])];
           rest = lines.filter((l, i) => i !== k);
         }
       }
@@ -3881,7 +3947,7 @@ var require_float = __commonJS({
           "dendrite-float-image",
           content,
           (v) => {
-            content = v.trim();
+            content = linkedImage(v) || v.trim();
             draw();
           }
         );
@@ -5120,10 +5186,15 @@ var DendriteView = class extends ItemView {
     const out = createDiv({ cls: "dendrite-md markdown-rendered" });
     const notes = review.reviewItems(text);
     const kind = this.kindOf(id);
+    const shown = kind === "figure" && !notes.length ? float.compose(
+      "figure",
+      float.split(text, "figure").caption,
+      float.split(text, "figure").content
+    ) : text;
     if (text.trim()) {
       await MarkdownRenderer.render(
         this.app,
-        notes.length ? review.renderMarkdown(text) : text,
+        notes.length ? review.renderMarkdown(text) : shown,
         out,
         f.path,
         comp
@@ -7287,9 +7358,11 @@ var DendriteView = class extends ItemView {
       for (const v of stack) {
         const f = this.cardFile(v.id);
         if (!f) continue;
-        open += review.reviewItems(core.splitFrontmatter(
-          await this.app.vault.cachedRead(f)
-        ).body).length;
+        open += review.countComments(review.reviewItems(
+          core.splitFrontmatter(
+            await this.app.vault.cachedRead(f)
+          ).body
+        ));
       }
       counts.set(id, open);
     }
@@ -7426,7 +7499,7 @@ var DendriteView = class extends ItemView {
     if (notes.length) {
       const chip = el.createDiv({ cls: "dendrite-status" }).createSpan({
         cls: "dendrite-status-chip is-revise",
-        text: `${notes.length} open \u2691`
+        text: `${review.countComments(notes)} open \u2691`
       });
       const colour = this.plugin.statusColour && this.plugin.statusColour("revise");
       if (colour) chip.style.setProperty("--dendrite-chip", colour);
@@ -9956,12 +10029,21 @@ var DendritePreview = class extends ItemView {
     );
     notes.addClass("dendrite-bar-gap-before");
     this.doc = el.createDiv({ cls: "dendrite-preview-doc markdown-preview-view markdown-rendered" });
+    this.doc.addEventListener("wheel", (e) => {
+      const knots = this.showComments && this.commentKnots;
+      if (!knots || e.ctrlKey || !e.deltaY || e.target.closest(".dendrite-pgutter")) return;
+      const line = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? this.doc.clientHeight : 1;
+      const t = core.textAt(this.doc.scrollTop, knots);
+      const to = core.scrollFor(Math.max(0, t + e.deltaY * line), knots);
+      e.preventDefault();
+      this.doc.scrollTop = Math.max(0, to);
+    }, { passive: false });
     this.doc.addEventListener("scroll", () => {
       if (this.shiftFrame) return;
       const win = this.doc.ownerDocument.defaultView;
       this.shiftFrame = win.requestAnimationFrame(() => {
         this.shiftFrame = null;
-        this.shiftGutter();
+        this.keepPace();
       });
     });
     if (this.resizer) this.resizer.disconnect();
@@ -10067,7 +10149,17 @@ var DendritePreview = class extends ItemView {
           /<sup class="dendrite-review-n[^"]*">(\d+)<\/sup>/g
         )].map((m) => Number(m[1]) - 1));
         items.forEach((item, n) => {
-          if (shown.has(n)) list.push({ id: sg.id, n, item });
+          if (!shown.has(n)) return;
+          const g = review.googleOf(item);
+          const had = g && list.find((x) => x.g === g);
+          if (had) had.parts.push({ id: sg.id, n });
+          else list.push({
+            id: sg.id,
+            n,
+            item,
+            g,
+            parts: [{ id: sg.id, n }]
+          });
         });
       }
     }
@@ -10082,6 +10174,7 @@ var DendritePreview = class extends ItemView {
     }
     if (this.reviewAt >= list.length) this.reviewAt = list.length - 1;
     this.doc.toggleClass("has-comments", this.showComments);
+    if (!this.showComments) this.commentKnots = null;
     if (!this.showComments && this.gutterEl) {
       this.gutterEl.remove();
       this.gutterEl = null;
@@ -10110,11 +10203,18 @@ var DendritePreview = class extends ItemView {
     if (!b) return;
     const bubble = this.bubbleOf(cur.id, cur.n);
     if (bubble) bubble.addClass("is-current");
-    for (const el of this.passageOf(b.el, cur.n)) el.addClass("is-current");
+    for (const el of this.passagesOf(cur)) el.addClass("is-current");
     this.scheduleBubbles();
   }
   bubbleOf(id, n) {
     return this.gutterEl ? [...this.gutterEl.children].find((el) => el.dataset.id === id && Number(el.dataset.n) === n) || null : null;
+  }
+  /** Every passage of a comment's entry, in every card it is on. */
+  passagesOf(entry) {
+    return (entry.parts || [{ id: entry.id, n: entry.n }]).flatMap((p) => {
+      const b = this.blocks.get(p.id);
+      return b ? this.passageOf(b.el, p.n) : [];
+    });
   }
   /**
    * A comment's passage in a card's rendered text, `n` its index in the
@@ -10153,8 +10253,14 @@ var DendritePreview = class extends ItemView {
     if (b && b.el.hasClass("is-pending")) await this.renderBlock(cur.id);
     this.showPos();
     const at = b && this.passageOf(b.el, cur.n)[0];
-    if (at && at.scrollIntoView && !this.inView(at)) {
-      at.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (at && !this.inView(at)) {
+      let t = 0;
+      for (let e = at; e && e !== this.doc; e = e.offsetParent) {
+        t += e.offsetTop;
+      }
+      if (!this.scrollToText(t, this.doc.clientHeight / 3) && at.scrollIntoView) {
+        at.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
     }
     if (this.file) this.plugin.focusCard(this.file, cur.id, false);
   }
@@ -10176,19 +10282,19 @@ var DendritePreview = class extends ItemView {
     }
     const body = (this.bodies.get(id) || {}).body || "";
     const items = review.reviewItems(body);
-    const blockEl = () => (this.blocks.get(id) || {}).el;
-    const mark = (n, on) => {
-      const b = blockEl();
-      if (!b) return;
-      for (const p of this.passageOf(b, n)) p.toggleClass("is-hover", on);
+    const mark = (entry, on) => {
+      for (const p of this.passagesOf(entry)) {
+        p.toggleClass("is-hover", on);
+      }
     };
-    for (const { n } of this.reviewList.filter((x) => x.id === id)) {
+    for (const entry of this.reviewList.filter((x) => x.id === id)) {
+      const { n } = entry;
       const it = items[n];
       const el = gutter.createDiv({ cls: "dendrite-pbubble" + (it.kind === "suggest" ? " is-suggest" : "") });
       el.dataset.id = id;
       el.dataset.n = String(n);
-      el.addEventListener("mouseenter", () => mark(n, true));
-      el.addEventListener("mouseleave", () => mark(n, false));
+      el.addEventListener("mouseenter", () => mark(entry, true));
+      el.addEventListener("mouseleave", () => mark(entry, false));
       el.addEventListener("click", (e) => {
         if (e.target.closest("button, a")) return;
         e.stopPropagation();
@@ -10200,6 +10306,9 @@ var DendritePreview = class extends ItemView {
       const meta = el.createDiv({ cls: "dendrite-review-meta" });
       meta.createEl("b", { text: it.author || "Reviewer" });
       meta.appendText(` \xB7 ${review.shortDate(it.date)}`);
+      if (entry.parts.length > 1) {
+        meta.appendText(` \xB7 ${entry.parts.length} passages`);
+      }
       const { text, url } = review.noteLink(it.text);
       if (url && it.kind !== "suggest") {
         meta.appendText(" ");
@@ -10258,37 +10367,71 @@ var DendritePreview = class extends ItemView {
     });
   }
   /**
-   * Place the bubbles: each as near its passage's number as it can be,
-   * none overlapping, the one gone to level with its own, those
-   * before it moved up for it (core.stackNotes).
+   * Place the bubbles in their column, each level with its passage, a
+   * crowded run pushed down (core.placeComments), and keep the column
+   * long enough for them. Positions are read without the text's offset
+   * (offsetTop ignores transforms), which is the scroll's to set.
    */
   layoutBubbles() {
     const gutter = this.gutterEl;
-    if (!gutter || !this.doc) return;
+    const doc = this.doc;
+    if (!gutter || !doc) return;
     const bubbles = [...gutter.querySelectorAll(".dendrite-pbubble")];
-    const base = this.doc.getBoundingClientRect().top - this.doc.scrollTop;
+    const topIn = (el) => {
+      let y = 0;
+      for (let e = el; e && e !== doc; e = e.offsetParent) {
+        y += e.offsetTop;
+      }
+      return y;
+    };
     const anchors = bubbles.map((el) => {
       const b = this.blocks.get(el.dataset.id);
       const sup = b && this.passageOf(b.el, Number(el.dataset.n)).slice(-1)[0];
       const at = sup || b && b.el;
-      return at ? at.getBoundingClientRect().top - base : 0;
+      return at ? topIn(at) : 0;
     });
-    const focus = this.bubbleFocus(bubbles);
-    if (focus.at === "card") {
-      const b = this.blocks.get(this.active);
-      if (b) anchors[focus.index] = b.el.getBoundingClientRect().top - base;
-    }
     const heights = bubbles.map((el) => el.offsetHeight);
-    const tops = core.stackNotes(anchors, heights, focus.index, 8);
+    const placed = core.placeComments(anchors, heights, 8);
     bubbles.forEach((el, k) => {
-      el.style.top = `${tops[k]}px`;
+      el.style.top = `${placed.tops[k]}px`;
     });
-    const last = [...this.blocks.values()].map((b) => b.el).filter((el) => el.parentElement === this.doc).slice(-1)[0];
-    const end = last ? last.getBoundingClientRect().bottom - base : 0;
-    const bottom = Math.max(0, ...tops.map((t, k) => t + heights[k]));
-    this.bubbleOverflow = Math.max(0, bottom - end);
-    this.bubbleFocused = focus.index >= 0;
-    this.shiftGutter();
+    this.commentKnots = placed.knots;
+    const last = [...this.blocks.values()].map((b) => b.el).filter((el) => el.parentElement === doc).slice(-1)[0];
+    const end = last ? topIn(last) + last.offsetHeight : 0;
+    const [c, t] = placed.knots[placed.knots.length - 1];
+    gutter.style.minHeight = `${Math.max(0, end + c - t)}px`;
+    this.keepPace();
+  }
+  /**
+   * The text kept level with the comment column as it scrolls: moved
+   * down by how far it lags the scroll, slower through a crowded run
+   * of comments (core.textAt).
+   */
+  keepPace() {
+    const doc = this.doc;
+    if (!doc) return;
+    const knots = this.showComments && this.commentKnots;
+    const lag = knots ? doc.scrollTop - core.textAt(
+      doc.scrollTop,
+      knots
+    ) : 0;
+    doc.style.setProperty("--dendrite-lag", `${Math.round(lag)}px`);
+  }
+  /**
+   * Scroll so the text at `t`, from the top of the text, shows `y`
+   * below the preview's top; smooth, the comment column following.
+   */
+  scrollToText(t, y) {
+    const doc = this.doc;
+    const knots = this.commentKnots;
+    if (!doc || !knots || !doc.clientHeight || !doc.scrollTo) {
+      return false;
+    }
+    doc.scrollTo({
+      top: Math.max(0, core.scrollFor(t - y, knots)),
+      behavior: "smooth"
+    });
+    return true;
   }
   /**
    * Which bubble the column is laid out from: the comment gone to,
@@ -10303,22 +10446,6 @@ var DendritePreview = class extends ItemView {
     }
     const k = bubbles.findIndex((el) => el.dataset.id === this.active);
     return k >= 0 ? { index: k, at: "card" } : { index: -1, at: null };
-  }
-  /**
-   * Move the comment column up by what it runs past the text's end, in
-   * proportion to the scroll, so its end comes with the text's; not
-   * while a comment or card is in focus, which it is aligned to.
-   */
-  shiftGutter() {
-    const gutter = this.gutterEl;
-    const doc = this.doc;
-    if (!gutter || !doc) return;
-    const shift = this.bubbleFocused ? 0 : core.gutterShift(
-      this.bubbleOverflow || 0,
-      doc.scrollTop,
-      doc.scrollHeight - doc.clientHeight
-    );
-    gutter.style.transform = shift ? `translateY(${-Math.round(shift)}px)` : "";
   }
   /**
    * A card selected: the other cards' comments fade, when it has
@@ -10340,7 +10467,11 @@ var DendritePreview = class extends ItemView {
    * resized moves them smoothly.
    */
   fitComments() {
-    if (!this.doc || !this.showComments) return;
+    if (!this.doc) return;
+    if (!this.showComments) {
+      this.keepPace();
+      return;
+    }
     this.layoutBubbles();
   }
   renderSegments(segs) {
@@ -10476,12 +10607,17 @@ var DendritePreview = class extends ItemView {
     this.fadeBubbles();
     this.scheduleBubbles();
     const b = this.blocks.get(id);
-    if (b && b.el.scrollIntoView) {
-      const tall = this.doc && this.doc.clientHeight && b.el.offsetHeight > this.doc.clientHeight * 0.8;
-      b.el.scrollIntoView({
-        block: tall ? "start" : "center",
-        behavior: "smooth"
-      });
+    if (b) {
+      const view = this.doc ? this.doc.clientHeight : 0;
+      const tall = view && b.el.offsetHeight > view * 0.8;
+      const y = tall ? 16 : (view - b.el.offsetHeight) / 2;
+      const done = this.showComments && this.scrollToText(b.el.offsetTop, y);
+      if (!done && b.el.scrollIntoView) {
+        b.el.scrollIntoView({
+          block: tall ? "start" : "center",
+          behavior: "smooth"
+        });
+      }
     }
   }
 };

@@ -1914,3 +1914,24 @@ button.dendrite-review-btn:hover {
 .dendrite-float-hint {
     font-family: var(--font-interface);
 }
+
+/* With comments shown, the text keeps pace with the comment column: the
+   view moves it down by how far it lags the scroll. */
+.dendrite-preview-doc.has-comments > .dendrite-pblock {
+    transform: translateY(var(--dendrite-lag, 0px));
+}
+
+/* Images on cards and in the figure editor dimmed as the theme dims
+   images in notes in the dark, where it says how (Minimal's
+   --image-muted), and at full strength under the pointer. */
+.theme-dark .dendrite-md img,
+.theme-dark .dendrite-float-shown img,
+.theme-dark .dendrite-version img {
+    opacity: var(--image-muted, 1);
+    transition: opacity 0.25s linear;
+}
+.theme-dark .dendrite-md img:hover,
+.theme-dark .dendrite-float-shown img:hover,
+.theme-dark .dendrite-version img:hover {
+    opacity: 1;
+}

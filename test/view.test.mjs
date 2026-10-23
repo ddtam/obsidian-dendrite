@@ -3771,15 +3771,83 @@ test('a figure\'s image can be typed as a link in its own field, where ' +
     const image = form.querySelector('.dendrite-float-image textarea');
     assert.ok(image, 'an Image field');
     assert.equal(image.value, '![[old.png]]');
-    image.value = '![[umap_by_clone.png]]';
+    // As Obsidian's link search writes it, without the !: an embed all
+    // the same.
+    image.value = '[[umap_by_clone.png]]';
     image.dispatchEvent(new h.window.Event('input'));
     // A dropped image fills the field in.
     await view.editing.editor.take({ files: [],
         getData: () => '[[other.png]]' });
     assert.equal(image.value, '![[other.png]]');
-    image.value = '![[umap_by_clone.png]]';
+    image.value = '[[umap_by_clone.png]]';
     image.dispatchEvent(new h.window.Event('input'));
     await view.endEdit();
     assert.equal(text(cardPath('G-aaaaa')),
                  '![[umap_by_clone.png]]\n\nOld caption.');
+});
+
+test('in the preview a Google comment on several passages, in one card or ' +
+     'several, is one bubble and one step, its passages all marked',
+     async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n');
+    const url = 'https://docs.google.com/document/d/D/edit?disco=doco.W';
+    const n = (p, t, link) => `==${p}==%%[!review] J, 2026-10-23: ${t}` +
+        (link ? ` ${url}` : '') + '%%';
+    await app.vault.create(cardPath('G-aaaaa'), `A ${n('one', 'Same.', 1)} ` +
+        `and ${n('two', 'Other.')}.`);
+    await app.vault.create(cardPath('G-bbbbb'), `B ${n('three', 'Same.', 1)}.`);
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(30);
+    const bubbles = [...view.contentEl.querySelectorAll('.dendrite-pbubble')];
+    assert.equal(bubbles.length, 2);
+    assert.match(bubbles[0].textContent, /2 passages/);
+    assert.equal(view.contentEl.querySelector('.dendrite-pcomments-pos')
+        .textContent, '2 comments');
+    await [...view.contentEl.querySelectorAll('.dendrite-pcomments-nav ' +
+        'button')].find((b) => b.getAttribute('aria-label') ===
+        'Next comment').onclick();
+    const marked = [...view.contentEl.querySelectorAll(
+        'mark.dendrite-review-mark.is-current')].map((m) => m.textContent);
+    assert.deepEqual(marked, ['one', 'three'], 'all its passages');
+});
+
+test('scrolling over the text moves it at the wheel\'s pace, the comment ' +
+     'column hurrying through a crowded run; over the comments, they do',
+     async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'A ==b==%%[!review] J, ' +
+        '2026-10-23: Why?%%.');
+    const view = new DendritePreview({ app, updateHeader() {} },
+        { settings: { headingTop: 1 }, focusCard() {} });
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(30);
+    // A crowded run: the column moves 200 while the text moves 20.
+    view.commentKnots = [[0, 0], [100, 100], [300, 120]];
+    view.doc.scrollTop = 100;
+    const wheel = (target, deltaY) => {
+        const e = new h.window.WheelEvent('wheel', { deltaY, bubbles: true,
+                                                     cancelable: true });
+        target.dispatchEvent(e);
+        return e.defaultPrevented;
+    };
+    const block = view.blocks.get('G-aaaaa').el;
+    assert.ok(wheel(block, 50), 'over the text: taken over');
+    assert.equal(view.doc.scrollTop, 330, 'the text 50 on, past the run');
+    view.doc.scrollTop = 100;
+    const bubble = view.contentEl.querySelector('.dendrite-pbubble');
+    assert.ok(!wheel(bubble, 50), 'over the comments: the usual scroll');
+    view.commentKnots = null;
+    assert.ok(!wheel(block, 50), 'without comments: the usual scroll');
 });

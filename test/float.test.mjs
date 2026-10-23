@@ -45,3 +45,13 @@ test('a starter table, and the printed width of a page\'s text', () => {
     assert.equal(Math.round(f.textWidthPt({ paper: 'a4', margin: '1in' })),
                  451);
 });
+
+test('a figure\'s image written as a plain link is taken as its image, ' +
+     'and written back as an embed', () => {
+    const s = f.split('[[umap.png]]\n\nClones.', 'figure');
+    assert.deepEqual(s, { caption: 'Clones.', content: '![[umap.png]]' });
+    assert.equal(f.compose('figure', s.caption, s.content),
+                 '![[umap.png]]\n\nClones.');
+    assert.equal(f.split('See [[notes]] here.', 'figure').content, '',
+                 'a link to a note is not an image');
+});

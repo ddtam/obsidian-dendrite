@@ -1026,9 +1026,13 @@ class DendriteView extends ItemView {
         // their paragraphs, where Obsidian alone would hide them.
         const notes = review.reviewItems(text);
         const kind = this.kindOf(id);
+        // A figure's image written as a plain link shows as its image.
+        const shown = kind === 'figure' && !notes.length ?
+            float.compose('figure', float.split(text, 'figure').caption,
+                          float.split(text, 'figure').content) : text;
         if (text.trim()) {
             await MarkdownRenderer.render(this.app,
-                notes.length ? review.renderMarkdown(text) : text, out,
+                notes.length ? review.renderMarkdown(text) : shown, out,
                 f.path, comp);
             if (notes.length) {
                 review.decorate(out, notes,
@@ -3276,8 +3280,9 @@ class DendriteView extends ItemView {
             for (const v of stack) {
                 const f = this.cardFile(v.id);
                 if (!f) continue;
-                open += review.reviewItems(core.splitFrontmatter(
-                    await this.app.vault.cachedRead(f)).body).length;
+                open += review.countComments(review.reviewItems(
+                    core.splitFrontmatter(
+                        await this.app.vault.cachedRead(f)).body));
             }
             counts.set(id, open);
         }
@@ -3427,7 +3432,7 @@ class DendriteView extends ItemView {
         if (notes.length) {
             const chip = el.createDiv({ cls: 'dendrite-status' })
                 .createSpan({ cls: 'dendrite-status-chip is-revise',
-                              text: `${notes.length} open ⚑` });
+                              text: `${review.countComments(notes)} open ⚑` });
             const colour = this.plugin.statusColour &&
                 this.plugin.statusColour('revise');
             if (colour) chip.style.setProperty('--dendrite-chip', colour);
@@ -6086,13 +6091,27 @@ class DendritePreview extends ItemView {
         this.doc = el.createDiv({ cls: 'dendrite-preview-doc ' +
                                        'markdown-preview-view ' +
                                        'markdown-rendered' });
-        // Scrolling moves a comment column longer than the text.
+        // A wheel over the text moves the text at its own pace, the
+        // comment column hurrying through a crowded run; over the
+        // comments, the usual scroll moves them, and the text keeps pace.
+        this.doc.addEventListener('wheel', (e) => {
+            const knots = this.showComments && this.commentKnots;
+            if (!knots || e.ctrlKey || !e.deltaY ||
+                e.target.closest('.dendrite-pgutter')) return;
+            const line = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ?
+                this.doc.clientHeight : 1;
+            const t = core.textAt(this.doc.scrollTop, knots);
+            const to = core.scrollFor(Math.max(0, t + e.deltaY * line), knots);
+            e.preventDefault();
+            this.doc.scrollTop = Math.max(0, to);
+        }, { passive: false });
+        // Scrolling moves the text at the comment column's pace.
         this.doc.addEventListener('scroll', () => {
             if (this.shiftFrame) return;
             const win = this.doc.ownerDocument.defaultView;
             this.shiftFrame = win.requestAnimationFrame(() => {
                 this.shiftFrame = null;
-                this.shiftGutter();
+                this.keepPace();
             });
         });
         // A change of width reflows the text under the bubbles.
@@ -6206,7 +6225,14 @@ class DendritePreview extends ItemView {
                     /<sup class="dendrite-review-n[^"]*">(\d+)<\/sup>/g)]
                     .map((m) => Number(m[1]) - 1));
                 items.forEach((item, n) => {
-                    if (shown.has(n)) list.push({ id: sg.id, n, item });
+                    if (!shown.has(n)) return;
+                    // A Google comment on several passages, in this card
+                    // or others, is one entry, its passages its parts.
+                    const g = review.googleOf(item);
+                    const had = g && list.find((x) => x.g === g);
+                    if (had) had.parts.push({ id: sg.id, n });
+                    else list.push({ id: sg.id, n, item, g,
+                                     parts: [{ id: sg.id, n }] });
                 });
             }
         }
@@ -6224,6 +6250,7 @@ class DendritePreview extends ItemView {
         }
         if (this.reviewAt >= list.length) this.reviewAt = list.length - 1;
         this.doc.toggleClass('has-comments', this.showComments);
+        if (!this.showComments) this.commentKnots = null;
         if (!this.showComments && this.gutterEl) {
             this.gutterEl.remove();
             this.gutterEl = null;
@@ -6255,7 +6282,7 @@ class DendritePreview extends ItemView {
         if (!b) return;
         const bubble = this.bubbleOf(cur.id, cur.n);
         if (bubble) bubble.addClass('is-current');
-        for (const el of this.passageOf(b.el, cur.n)) el.addClass('is-current');
+        for (const el of this.passagesOf(cur)) el.addClass('is-current');
         this.scheduleBubbles();
     }
 
@@ -6263,6 +6290,14 @@ class DendritePreview extends ItemView {
         return this.gutterEl ? [...this.gutterEl.children].find((el) =>
             el.dataset.id === id && Number(el.dataset.n) === n) || null :
             null;
+    }
+
+    /** Every passage of a comment's entry, in every card it is on. */
+    passagesOf(entry) {
+        return (entry.parts || [{ id: entry.id, n: entry.n }]).flatMap((p) => {
+            const b = this.blocks.get(p.id);
+            return b ? this.passageOf(b.el, p.n) : [];
+        });
     }
 
     /**
@@ -6311,8 +6346,15 @@ class DendritePreview extends ItemView {
         // The passage brought to the middle unless it is in view; its
         // bubble is placed level with it.
         const at = b && this.passageOf(b.el, cur.n)[0];
-        if (at && at.scrollIntoView && !this.inView(at)) {
-            at.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        if (at && !this.inView(at)) {
+            let t = 0;
+            for (let e = at; e && e !== this.doc; e = e.offsetParent) {
+                t += e.offsetTop;
+            }
+            if (!this.scrollToText(t, this.doc.clientHeight / 3) &&
+                at.scrollIntoView) {
+                at.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
         }
         if (this.file) this.plugin.focusCard(this.file, cur.id, false);
     }
@@ -6336,13 +6378,13 @@ class DendritePreview extends ItemView {
         }
         const body = (this.bodies.get(id) || {}).body || '';
         const items = review.reviewItems(body);
-        const blockEl = () => (this.blocks.get(id) || {}).el;
-        const mark = (n, on) => {
-            const b = blockEl();
-            if (!b) return;
-            for (const p of this.passageOf(b, n)) p.toggleClass('is-hover', on);
+        const mark = (entry, on) => {
+            for (const p of this.passagesOf(entry)) {
+                p.toggleClass('is-hover', on);
+            }
         };
-        for (const { n } of this.reviewList.filter((x) => x.id === id)) {
+        for (const entry of this.reviewList.filter((x) => x.id === id)) {
+            const { n } = entry;
             const it = items[n];
             const el = gutter.createDiv({ cls: 'dendrite-pbubble' +
                 (it.kind === 'suggest' ? ' is-suggest' : '') });
@@ -6350,8 +6392,8 @@ class DendritePreview extends ItemView {
             el.dataset.n = String(n);
             // Pointing at a bubble shows its passage in the text; clicking
             // it goes to its comment, as stepping to it does.
-            el.addEventListener('mouseenter', () => mark(n, true));
-            el.addEventListener('mouseleave', () => mark(n, false));
+            el.addEventListener('mouseenter', () => mark(entry, true));
+            el.addEventListener('mouseleave', () => mark(entry, false));
             el.addEventListener('click', (e) => {
                 if (e.target.closest('button, a')) return;
                 e.stopPropagation();
@@ -6364,6 +6406,9 @@ class DendritePreview extends ItemView {
             const meta = el.createDiv({ cls: 'dendrite-review-meta' });
             meta.createEl('b', { text: it.author || 'Reviewer' });
             meta.appendText(` · ${review.shortDate(it.date)}`);
+            if (entry.parts.length > 1) {
+                meta.appendText(` · ${entry.parts.length} passages`);
+            }
             const { text, url } = review.noteLink(it.text);
             if (url && it.kind !== 'suggest') {
                 meta.appendText(' ');
@@ -6423,43 +6468,70 @@ class DendritePreview extends ItemView {
     }
 
     /**
-     * Place the bubbles: each as near its passage's number as it can be,
-     * none overlapping, the one gone to level with its own, those
-     * before it moved up for it (core.stackNotes).
+     * Place the bubbles in their column, each level with its passage, a
+     * crowded run pushed down (core.placeComments), and keep the column
+     * long enough for them. Positions are read without the text's offset
+     * (offsetTop ignores transforms), which is the scroll's to set.
      */
     layoutBubbles() {
         const gutter = this.gutterEl;
-        if (!gutter || !this.doc) return;
+        const doc = this.doc;
+        if (!gutter || !doc) return;
         const bubbles = [...gutter.querySelectorAll('.dendrite-pbubble')];
-        const base = this.doc.getBoundingClientRect().top -
-            this.doc.scrollTop;
+        const topIn = (el) => {
+            let y = 0;
+            for (let e = el; e && e !== doc; e = e.offsetParent) {
+                y += e.offsetTop;
+            }
+            return y;
+        };
         const anchors = bubbles.map((el) => {
             const b = this.blocks.get(el.dataset.id);
             const sup = b && this.passageOf(b.el, Number(el.dataset.n))
                 .slice(-1)[0];
             const at = sup || (b && b.el);
-            return at ? at.getBoundingClientRect().top - base : 0;
+            return at ? topIn(at) : 0;
         });
-        // The comment gone to, at its mark; else a selected card's first
-        // comment, at the card's top.
-        const focus = this.bubbleFocus(bubbles);
-        if (focus.at === 'card') {
-            const b = this.blocks.get(this.active);
-            if (b) anchors[focus.index] = b.el.getBoundingClientRect().top -
-                base;
-        }
         const heights = bubbles.map((el) => el.offsetHeight);
-        const tops = core.stackNotes(anchors, heights, focus.index, 8);
-        bubbles.forEach((el, k) => { el.style.top = `${tops[k]}px`; });
-        // How far the column runs past the text's end, which scrolling
-        // makes up for while nothing is in focus.
+        const placed = core.placeComments(anchors, heights, 8);
+        bubbles.forEach((el, k) => { el.style.top = `${placed.tops[k]}px`; });
+        this.commentKnots = placed.knots;
+        // The column runs past the text by what crowded runs pushed down.
         const last = [...this.blocks.values()].map((b) => b.el)
-            .filter((el) => el.parentElement === this.doc).slice(-1)[0];
-        const end = last ? last.getBoundingClientRect().bottom - base : 0;
-        const bottom = Math.max(0, ...tops.map((t, k) => t + heights[k]));
-        this.bubbleOverflow = Math.max(0, bottom - end);
-        this.bubbleFocused = focus.index >= 0;
-        this.shiftGutter();
+            .filter((el) => el.parentElement === doc).slice(-1)[0];
+        const end = last ? topIn(last) + last.offsetHeight : 0;
+        const [c, t] = placed.knots[placed.knots.length - 1];
+        gutter.style.minHeight = `${Math.max(0, end + c - t)}px`;
+        this.keepPace();
+    }
+
+    /**
+     * The text kept level with the comment column as it scrolls: moved
+     * down by how far it lags the scroll, slower through a crowded run
+     * of comments (core.textAt).
+     */
+    keepPace() {
+        const doc = this.doc;
+        if (!doc) return;
+        const knots = this.showComments && this.commentKnots;
+        const lag = knots ? doc.scrollTop - core.textAt(doc.scrollTop,
+                                                         knots) : 0;
+        doc.style.setProperty('--dendrite-lag', `${Math.round(lag)}px`);
+    }
+
+    /**
+     * Scroll so the text at `t`, from the top of the text, shows `y`
+     * below the preview's top; smooth, the comment column following.
+     */
+    scrollToText(t, y) {
+        const doc = this.doc;
+        const knots = this.commentKnots;
+        if (!doc || !knots || !doc.clientHeight || !doc.scrollTo) {
+            return false;
+        }
+        doc.scrollTo({ top: Math.max(0, core.scrollFor(t - y, knots)),
+                       behavior: 'smooth' });
+        return true;
     }
 
     /**
@@ -6479,21 +6551,6 @@ class DendritePreview extends ItemView {
         return k >= 0 ? { index: k, at: 'card' } : { index: -1, at: null };
     }
 
-    /**
-     * Move the comment column up by what it runs past the text's end, in
-     * proportion to the scroll, so its end comes with the text's; not
-     * while a comment or card is in focus, which it is aligned to.
-     */
-    shiftGutter() {
-        const gutter = this.gutterEl;
-        const doc = this.doc;
-        if (!gutter || !doc) return;
-        const shift = this.bubbleFocused ? 0 : core.gutterShift(
-            this.bubbleOverflow || 0, doc.scrollTop,
-            doc.scrollHeight - doc.clientHeight);
-        gutter.style.transform = shift ? `translateY(${-Math.round(shift)}px)`
-            : '';
-    }
 
     /**
      * A card selected: the other cards' comments fade, when it has
@@ -6516,7 +6573,11 @@ class DendritePreview extends ItemView {
      * resized moves them smoothly.
      */
     fitComments() {
-        if (!this.doc || !this.showComments) return;
+        if (!this.doc) return;
+        if (!this.showComments) {
+            this.keepPace();
+            return;
+        }
         this.layoutBubbles();
     }
 
@@ -6655,12 +6716,17 @@ class DendritePreview extends ItemView {
         this.fadeBubbles();
         this.scheduleBubbles();
         const b = this.blocks.get(id);
-        if (b && b.el.scrollIntoView) {
+        if (b) {
             // One taller than most of the preview shows from its start.
-            const tall = this.doc && this.doc.clientHeight &&
-                b.el.offsetHeight > this.doc.clientHeight * 0.8;
-            b.el.scrollIntoView({ block: tall ? 'start' : 'center',
-                                  behavior: 'smooth' });
+            const view = this.doc ? this.doc.clientHeight : 0;
+            const tall = view && b.el.offsetHeight > view * 0.8;
+            const y = tall ? 16 : (view - b.el.offsetHeight) / 2;
+            const done = this.showComments &&
+                this.scrollToText(b.el.offsetTop, y);
+            if (!done && b.el.scrollIntoView) {
+                b.el.scrollIntoView({ block: tall ? 'start' : 'center',
+                                      behavior: 'smooth' });
+            }
         }
     }
 }

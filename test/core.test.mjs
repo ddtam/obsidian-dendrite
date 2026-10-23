@@ -872,13 +872,32 @@ test('comment bubbles sit as near their marks as they can without ' +
     assert.deepEqual(stackNotes([], [], -1, 10), []);
 });
 
-test('a comment column longer than the text scrolls faster than it, so ' +
-     'its end comes with the text\'s', () => {
-    const { gutterShift } = c;
-    // 300 pixels of comments past the text's end, over 1000 of scroll.
-    assert.equal(gutterShift(300, 0, 1000), 0, 'at the top, none');
-    assert.equal(gutterShift(300, 500, 1000), 150, 'halfway, half');
-    assert.equal(gutterShift(300, 1000, 1000), 300, 'at the end, all');
-    assert.equal(gutterShift(0, 500, 1000), 0, 'none past it, none');
-    assert.equal(gutterShift(300, 50, 0), 0, 'nothing to scroll');
+test('comments are placed level with their passages, a crowded run ' +
+     'pushed down, and the text keeps pace with them, slower where ' +
+     'they are crowded', () => {
+    const { placeComments, textAt, scrollFor } = c;
+    // Apart: each level with its passage; the text moves with them.
+    let p = placeComments([0, 100, 300], [40, 40, 40], 10);
+    assert.deepEqual(p.tops, [0, 100, 300]);
+    assert.equal(textAt(150, p.knots), 150);
+    // Crowded at 100: the second and third pushed down, and the text
+    // slows while they pass, then keeps their distance.
+    p = placeComments([100, 110, 120, 400], [40, 40, 40, 40], 10);
+    assert.deepEqual(p.tops, [100, 150, 200, 480]);
+    assert.equal(textAt(100, p.knots), 100);
+    assert.equal(textAt(150, p.knots), 110);
+    assert.equal(textAt(200, p.knots), 120);
+    assert.equal(textAt(340, p.knots), 260, 'past them, one to one');
+    assert.equal(textAt(480, p.knots), 400, 'level again at the next');
+    assert.equal(textAt(600, p.knots), 520, 'after the last, one to one');
+    // Several on one line: the text waits while they go by.
+    p = placeComments([50, 50], [40, 40], 10);
+    assert.equal(textAt(50, p.knots), 50);
+    assert.equal(textAt(100, p.knots), 50);
+    // Back the other way: where the scroll must be to show text.
+    p = placeComments([100, 110, 120, 400], [40, 40, 40, 40], 10);
+    assert.equal(scrollFor(110, p.knots), 150);
+    assert.equal(scrollFor(260, p.knots), 340);
+    assert.equal(scrollFor(50, p.knots), 50);
+    assert.deepEqual(placeComments([], [], 10).tops, []);
 });

@@ -486,3 +486,24 @@ test('a Word file saved by Google Docs gives each comment its Google ' +
     // A Word file not from Google Docs: no links.
     assert.ok(r.readReview(returned(), zlib).every((x) => !x.link));
 });
+
+test('a Google comment on several passages of a card is one comment: ' +
+     'one number for its passages, one callout, saying how many', () => {
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div id="root"></div>').window.document;
+    const url = 'https://docs.google.com/document/d/D/edit?disco=doco.W';
+    const n = (p, t, link) => `==${p}==%%[!review] J, 2026-10-23: ${t}` +
+        (link ? ` ${url}` : '') + '%%';
+    const md = `A ${n('one', 'Same.', true)} and ${n('two', 'Other.')} ` +
+        `then ${n('three', 'Same.', true)}.`;
+    const html = r.renderMarkdown(md);
+    assert.deepEqual([...html.matchAll(/review-n">(\d+)</g)].map((m) => m[1]),
+                     ['1', '2', '1'], 'its passages share its number');
+    const root = doc.getElementById('root');
+    root.innerHTML = `<p>${html}</p>`;
+    r.decorate(root, r.reviewItems(md), () => {});
+    const notes = [...root.querySelectorAll('.dendrite-review-note')];
+    assert.equal(notes.length, 2, 'one callout for the comment');
+    assert.match(notes[0].textContent, /2 passages/);
+    assert.equal(r.countComments(r.reviewItems(md)), 2);
+});

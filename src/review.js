@@ -871,28 +871,63 @@ function shortDate(iso) {
  * HTML Obsidian renders as it is: the passage marked, a suggestion's old
  * and new text side by side, and a number to find its callout by.
  */
+/** A review comment's Google comment, 'g:' and its id, or null. */
+function googleOf(it) {
+    if (it.kind === 'suggest' || it.kind === 'change') return null;
+    return reviewKeys(it).find((k) => k.startsWith('g:')) || null;
+}
+
+/**
+ * For each of a card's review items, the index of the first one that is
+ * the same Google comment, itself where it is the first or has none: a
+ * Google comment on several passages comes in as one per passage.
+ */
+function firstOfComment(items) {
+    const seen = new Map();
+    return items.map((it, i) => {
+        const g = googleOf(it);
+        if (!g) return i;
+        if (!seen.has(g)) seen.set(g, i);
+        return seen.get(g);
+    });
+}
+
+/** How many comments and changes, a Google comment counted once. */
+function countComments(items) {
+    return firstOfComment(items).filter((f, i) => f === i).length;
+}
+
 function renderMarkdown(md) {
     let n = 0;
+    // A Google comment on several passages keeps one number for them.
+    const numbers = new Map();
     ITEM.lastIndex = 0;
     return md.replace(ITEM, (m, passage, kind, body) => {
-        n++;
+        const g = kind === 'review' ? googleOf({ kind, text:
+            (HEAD.exec(body.replace(/^\s+/, '')) || [])[3] || body }) : null;
+        let num;
+        if (g && numbers.has(g)) num = numbers.get(g);
+        else {
+            num = ++n;
+            if (g) numbers.set(g, num);
+        }
         const h = HEAD.exec(body.replace(/^\s+/, ''));
         const text = h ? h[3] : body.trim();
         const cls = kind === 'suggest' ? ' is-suggest' : '';
-        const num = `<sup class="dendrite-review-n${cls}">${n}</sup>`;
+        const sup = `<sup class="dendrite-review-n${cls}">${num}</sup>`;
         if (kind === 'suggest' && !passage) {
             // An insertion's leading space is the text's, not the tint's.
             const lead = /^\s*/.exec(text)[0];
             return `${lead}<span class="dendrite-review-new">` +
-                `${text.slice(lead.length)}</span>${num}`;
+                `${text.slice(lead.length)}</span>${sup}`;
         }
-        if (!passage) return num;
+        if (!passage) return sup;
         if (kind === 'suggest') {
             return `<span class="dendrite-review-old">${passage}</span>` +
                 (text ? `<span class="dendrite-review-new">${text}</span>`
-                    : '') + num;
+                    : '') + sup;
         }
-        return `<mark class="dendrite-review-mark">${passage}</mark>${num}`;
+        return `<mark class="dendrite-review-mark">${passage}</mark>${sup}`;
     });
 }
 
@@ -936,7 +971,11 @@ function decorate(root, items, act, onMenu = null) {
         }
         return b.parentElement === root ? b : null;
     };
+    // One callout for a Google comment on several passages: at its first.
+    const first = firstOfComment(items);
+    const passages = (i) => first.filter((f) => f === i).length;
     items.forEach((it, i) => {
+        if (first[i] !== i) return;
         const sup = nums[i];
         const b = sup ? blockOf(sup) : null;
         if (!blocks.has(b)) blocks.set(b, []);
@@ -952,7 +991,7 @@ function decorate(root, items, act, onMenu = null) {
                 (it.kind === 'suggest' ? ' is-suggest' : '');
             const n = doc.createElement('span');
             n.className = 'dendrite-review-n';
-            n.textContent = String(i + 1);
+            n.textContent = nums[i] ? nums[i].textContent : String(i + 1);
             const main = doc.createElement('div');
             main.className = 'dendrite-review-main';
             const meta = doc.createElement('div');
@@ -960,6 +999,7 @@ function decorate(root, items, act, onMenu = null) {
             const who = doc.createElement('b');
             who.textContent = it.author || 'Reviewer';
             meta.append(who, ` · ${shortDate(it.date)}`);
+            if (passages(i) > 1) meta.append(` · ${passages(i)} passages`);
             const text = doc.createElement('div');
             text.className = 'dendrite-review-text';
             const { text: said, url } = noteLink(it.text);
@@ -1008,7 +1048,8 @@ function decorate(root, items, act, onMenu = null) {
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    plainMap, normalise, locate, reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
-                   commentActions, commentMenu, googleData,
+                   commentActions, commentMenu, googleData, googleOf,
+                   firstOfComment, countComments,
                    itemText,
                    addItems, removeItem,
                    stripReview, canHighlight, renderMarkdown, decorate,
