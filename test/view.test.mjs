@@ -3096,8 +3096,13 @@ test('the preview can show review comments as bubbles beside the text, ' +
                '2026-10-23: Say when.%%');
     const focused = [];
     const acted = [];
+    // Selecting a card on the board marks it active in the preview, as
+    // the board does.
     const plugin = { settings: { headingTop: 1 },
-        focusCard: (f, id, edit) => focused.push(id),
+        focusCard: (f, id, edit) => {
+            focused.push(id);
+            view.highlight(id);
+        },
         reviewFromPreview: async (f, id, n, what) =>
             acted.push([id, n, what]) };
     const view = new DendritePreview({ app, updateHeader() {} }, plugin);
@@ -3122,10 +3127,15 @@ test('the preview can show review comments as bubbles beside the text, ' +
         x.closest('.dendrite-pgutter') && !x.closest('.dendrite-pblock')));
     assert.ok([...view.blocks.values()].every((x) =>
         x.el.style.minHeight === ''));
-    // A card selected: the other cards' comments fade.
+    // A card selected: the other cards' comments fade, and its own are
+    // drawn from the card's top.
     view.highlight('G-ccccc');
     assert.deepEqual(bubbles().map((x) => x.hasClass('is-faded')),
                      [true, true, false]);
+    assert.deepEqual(view.bubbleFocus(bubbles()), { index: 2, at: 'card' });
+    view.highlight('G-bbbbb');
+    assert.deepEqual(view.bubbleFocus(bubbles()), { index: 0, at: 'card' },
+                     'its first comment');
     view.highlight('G-aaaaa');
     assert.deepEqual(bubbles().map((x) => x.hasClass('is-faded')),
                      [false, false, false], 'one with none fades none');
@@ -3146,6 +3156,12 @@ test('the preview can show review comments as bubbles beside the text, ' +
     await nav('Next comment').onclick();
     assert.equal(label(), '1 of 3');
     assert.deepEqual(focused, ['G-bbbbb'], 'its card is selected');
+    assert.deepEqual(view.bubbleFocus(bubbles()), { index: 0, at: 'mark' },
+                     'the comment gone to, at its mark');
+    view.highlight('G-ccccc');
+    assert.deepEqual(view.bubbleFocus(bubbles()), { index: 2, at: 'card' },
+                     'a card clicked since takes over');
+    view.highlight('G-bbbbb');
     assert.ok(bubbles()[0].hasClass('is-current'));
     // Its passage in the text is marked as the one gone to; hovering a
     // bubble marks its passage too.
@@ -3166,6 +3182,24 @@ test('the preview can show review comments as bubbles beside the text, ' +
     await nav('Next comment').onclick();
     assert.equal(label(), '1 of 3', 'round to the first');
     await nav('Previous comment').onclick();
+    assert.equal(label(), '3 of 3');
+    // Clicking a bubble goes to its comment: its passage brought into
+    // view, its card selected, the count where it is.
+    focused.length = 0;
+    const passageNow = view.passageOf(view.blocks.get('G-bbbbb').el, 1)[0];
+    let scrolledTo = null;
+    passageNow.scrollIntoView = (o) => { scrolledTo = o; };
+    bubbles()[1].dispatchEvent(new h.window.MouseEvent('click',
+                                                       { bubbles: true }));
+    await tick(10);
+    assert.equal(label(), '2 of 3');
+    assert.deepEqual(focused, ['G-bbbbb']);
+    assert.ok(bubbles()[1].hasClass('is-current'));
+    assert.equal(scrolledTo && scrolledTo.block, 'center',
+                 'out of view, brought to the middle');
+    bubbles()[2].dispatchEvent(new h.window.MouseEvent('click',
+                                                       { bubbles: true }));
+    await tick(10);
     assert.equal(label(), '3 of 3');
     // Acting on a bubble acts on its card's comment, on the board.
     await [...bubbles()[1].querySelectorAll('button')]
@@ -3559,11 +3593,15 @@ test('a table card is edited with its caption, its table as it prints, ' +
     const { view, text } = await open(FLOAT_INDEX, floatCards());
     await view.startEdit('G-bbbbb');
     const form = view.contentEl.querySelector('.dendrite-float-edit');
-    const [cap, table] = form.querySelectorAll('textarea');
+    // Both in the card editor, Obsidian's where it has one, whose live
+    // preview edits a table as a grid; the text box in the tests.
+    const [cap, table] = form.querySelectorAll('textarea.dendrite-editor');
     assert.equal(cap.value, 'Per year.');
     assert.equal(table.value, '| A | B |\n| --- | --- |\n| 1 | 2 |');
-    assert.match(form.querySelector('.dendrite-float-shown').textContent,
-                 /Table 1\.\*\* Per year\./, 'drawn as it prints');
+    assert.equal(form.querySelector('.dendrite-float-number').textContent,
+                 'Table 1.', 'its number above the table');
+    assert.ok(!form.querySelector('.dendrite-float-shown'),
+              'shown once, in the editor, not again above it');
     table.value = '| A | B |\n| --- | --- |\n| 3 | 4 |';
     table.dispatchEvent(new h.window.Event('input'));
     await view.endEdit();
@@ -3601,4 +3639,31 @@ test('a card set to Table starts with a table, in one step to undo, and ' +
     const face = view.cardEls.get('G-aaaaa').textContent;
     assert.match(face, /No image: paste, drop or link one/);
     assert.match(face, /No caption/);
+});
+
+test('pulling again links comments already in the cards that came ' +
+     'without their Google Docs link, on Add, in one step to undo',
+     async () => {
+    const { view, text } = await open(
+        '---\ndendrite_prefix: G\ndendrite_gdoc: https://docs.google.com/' +
+        'document/d/D/edit\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'The ==cohort==%%[!review] Joshua Bridgers, ' +
+          '2026-10-22: How many?%% was large.' });
+    const url = 'https://docs.google.com/document/d/D/edit?disco=AAA1';
+    view.plugin.gdocReview = async () => ({ title: 'RAC', resolved: 0,
+        items: [{ kind: 'comment', author: 'Joshua Bridgers',
+                  date: '2026-10-22', text: 'How many?', quote: 'cohort',
+                  before: '', after: '', gid: 'AAA1', link: url }] });
+    const before = text(cardPath('G-aaaaa'));
+    const m = await view.pullGdoc();
+    assert.equal(m.rows[0].dup, true);
+    assert.equal(m.rows[0].relink, true);
+    assert.match(m.contentEl.textContent,
+                 /1 already in the cards will get its Google Docs link/);
+    assert.equal(text(cardPath('G-aaaaa')), before, 'nothing written yet');
+    await m.contentEl.querySelector('.mod-cta').onclick();
+    assert.equal(text(cardPath('G-aaaaa')), 'The ==cohort==%%[!review] ' +
+        `Joshua Bridgers, 2026-10-22: How many? ${url}%% was large.`);
+    await view.doUndo();
+    assert.equal(text(cardPath('G-aaaaa')), before);
 });

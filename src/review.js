@@ -618,6 +618,37 @@ function reviewKeys(it) {
 }
 
 /**
+ * The note in a card's markdown that an imported comment is, when it has
+ * no Google Docs link and the comment brings one; null otherwise.
+ */
+function linkless(md, item) {
+    if (!item.link || item.kind === 'change') return null;
+    const author = clean(item.author) || 'Reviewer';
+    const text = flat(item.text);
+    return reviewItems(md).find((x) => {
+        if (x.kind === 'suggest' || x.author !== author) return false;
+        const { text: said, url } = noteLink(x.text);
+        if (url) return false;
+        const had = flat(said);
+        return had === text || had.endsWith(`: ${text}`);
+    }) || null;
+}
+
+/** Whether a comment already in `md` would gain its Google Docs link. */
+function needsLink(md, item) {
+    return !!linkless(md, item);
+}
+
+/** `md` with an imported comment's Google Docs link on its note. */
+function addLink(md, item) {
+    const x = linkless(md, item);
+    if (!x) return md;
+    const seg = md.slice(x.start, x.end);
+    return md.slice(0, x.start) + seg.slice(0, -2) + ` ${item.link}%%` +
+        md.slice(x.end);
+}
+
+/**
  * Whether an imported item, a comment or change, is already in a card's
  * markdown `md`: one by the same reviewer saying the same, as it would
  * have been written, a comment with its passage quoted included.
@@ -832,7 +863,7 @@ function decorate(root, items, act) {
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    plainMap, normalise, locate, reviewItems, alreadyIn,
-                   noteLink, reviewKeys,
+                   noteLink, reviewKeys, needsLink, addLink,
                    itemText,
                    addItems, removeItem,
                    stripReview, canHighlight, renderMarkdown, decorate,

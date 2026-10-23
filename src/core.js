@@ -941,6 +941,18 @@ function stackNotes(anchors, heights, current, gap) {
     return top[0] < 0 ? down(0, Math.max(0, anchors[0])) : top;
 }
 
+/**
+ * How far a column of comments longer than the text it sits beside is
+ * moved up, at a scroll of `scrollTop` out of `maxScroll`: the part past
+ * the text's end, `overflow`, in proportion, so the column scrolls a
+ * little faster than the text and its end comes into view with the
+ * text's.
+ */
+function gutterShift(overflow, scrollTop, maxScroll) {
+    if (!(overflow > 0) || !(maxScroll > 0)) return 0;
+    return overflow * Math.min(1, Math.max(0, scrollTop / maxScroll));
+}
+
 // ---- splitting and merging card text -------------------------------------
 
 /**
@@ -1530,7 +1542,7 @@ module.exports = {
     splitText, mergeText,
     mergeIntoAbove, mergeIntoParent, moveNode,
     flowPath, threadPath, exportSegments, roleFor, cardRole, ROLES, KINDS,
-    stackNotes,
+    stackNotes, gutterShift,
     withKinds, floatLabels, countManuscript,
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,

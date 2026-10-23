@@ -2,8 +2,8 @@
 // Table and figure cards. A card's text stays plain markdown, its table
 // or image and, around it, its caption; here it is split into the two to
 // edit apart, and put back together, and edited in the card in a form
-// as wide as the page's text, with the table as it prints above its
-// markdown, or the figure's image shown large.
+// as wide as the page's text: a table in the card editor, whose live
+// preview edits it as a grid, or the figure's image shown large.
 
 const TABLE_LINE = /^\s*\|/;
 const IMAGE = /!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\)/;
@@ -77,8 +77,9 @@ function textWidthPt(st) {
  * The editor for a table or figure card, behind the card editor's
  * interface (see editor.js). `opts`: value, kind, label ('Table 1'),
  * onChange, onBlur, onEscape, onAsText, render(md, el) to draw markdown,
- * and image(file) resolving to a saved image's embed, for one pasted or
- * dropped.
+ * image(file) resolving to a saved image's embed, for one pasted or
+ * dropped, and makeEditor(value, { onChange, onBlur, onEscape }) giving
+ * a card editor for each field.
  */
 function floatEditor(opts) {
     const kind = opts.kind;
@@ -95,12 +96,31 @@ function floatEditor(opts) {
         if (opts.onAsText) opts.onAsText();
     });
     const changed = () => opts.onChange();
-    const field = (label, cls, mono) => {
-        const wrap = root.createDiv({ cls: 'dendrite-float-field' });
+    // A field: the card editor, Obsidian's where it has one, whose live
+    // preview edits a table as a grid, given by `opts.makeEditor`; else a
+    // text box. Answers { el, value, set(text), focus(atStart) }.
+    const field = (label, cls, value, onInput) => {
+        const wrap = root.createDiv({ cls: 'dendrite-float-field' +
+            (cls ? ` ${cls}` : '') });
         wrap.createDiv({ cls: 'dendrite-float-label', text: label });
-        const ta = wrap.createEl('textarea', { cls: 'dendrite-float-input' +
-            (mono ? ' is-mono' : '') + (cls ? ` ${cls}` : '') });
-        ta.rows = mono ? 6 : 2;
+        if (opts.makeEditor) {
+            const ed = opts.makeEditor(value, { onChange: () => {
+                onInput(ed.value);
+                changed();
+            }, onBlur: () => opts.onBlur(), onEscape: () => opts.onEscape() });
+            wrap.appendChild(ed.el);
+            return { get value() { return ed.value; },
+                     set(text) { ed.replace(text, 0); },
+                     focus(atStart) { ed.focus(atStart); },
+                     destroy() { ed.destroy(); } };
+        }
+        const ta = wrap.createEl('textarea', { cls: 'dendrite-float-input' });
+        ta.rows = cls ? 6 : 2;
+        ta.value = value;
+        ta.addEventListener('input', () => {
+            onInput(ta.value);
+            changed();
+        });
         ta.addEventListener('blur', () => opts.onBlur());
         ta.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
@@ -108,25 +128,21 @@ function floatEditor(opts) {
                 opts.onEscape();
             }
         });
-        return ta;
+        return { get value() { return ta.value; },
+                 set(text) { ta.value = text; },
+                 focus(atStart) {
+                     ta.focus();
+                     const at = atStart ? 0 : ta.value.length;
+                     ta.setSelectionRange(at, at);
+                 },
+                 destroy() {} };
     };
     let cap = null;
     let table = null;
     let shown = null;
-    let refreshTimer = null;
     const draw = () => {
         if (!shown) return;
         shown.empty();
-        if (kind === 'table') {
-            if (!content.trim()) {
-                shown.createDiv({ cls: 'dendrite-float-missing',
-                                  text: 'No table yet: write one below.' });
-                return;
-            }
-            opts.render(`**${opts.label || 'Table'}.** ${caption}` +
-                        `\n\n${content}`, shown);
-            return;
-        }
         if (!content) {
             shown.createDiv({ cls: 'dendrite-float-missing',
                 text: 'No image: paste one, drop a file, or link one with ' +
@@ -135,32 +151,21 @@ function floatEditor(opts) {
         }
         opts.render(content, shown);
     };
-    const later = () => {
-        clearTimeout(refreshTimer);
-        refreshTimer = setTimeout(draw, 250);
-    };
     if (kind === 'table') {
-        cap = field('Caption, printed above the table');
-        shown = root.createDiv({ cls: 'dendrite-float-shown' });
-        table = field('Table', 'dendrite-float-table', true);
-        table.value = content;
-        table.addEventListener('input', () => {
-            content = table.value;
-            later();
-            changed();
-        });
+        cap = field('Caption, printed above the table', null, caption,
+                    (v) => { caption = v; });
+        // The table as it prints, under its number, edited in place.
+        root.createDiv({ cls: 'dendrite-float-number',
+                         text: `${opts.label || 'Table'}.` });
+        table = field('', 'dendrite-float-table', content,
+                      (v) => { content = v; });
     } else {
         shown = root.createDiv({ cls: 'dendrite-float-shown is-image' });
         root.createDiv({ cls: 'dendrite-float-hint', text: 'Paste an image, ' +
             'drop a file, or link one with ![[…]]; a new one replaces it.' });
-        cap = field('Caption, printed below the figure');
+        cap = field('Caption, printed below the figure', null, caption,
+                    (v) => { caption = v; });
     }
-    cap.value = caption;
-    cap.addEventListener('input', () => {
-        caption = cap.value;
-        if (kind === 'table') later();
-        changed();
-    });
     // A figure's image: one, replaced by what is pasted or dropped.
     const take = async (dt) => {
         if (kind !== 'figure' || !dt) return false;
@@ -202,25 +207,22 @@ function floatEditor(opts) {
         el: root,
         ta: null,
         get value() { return compose(kind, caption, content); },
-        focus(atStart) {
-            cap.focus();
-            const at = atStart ? 0 : cap.value.length;
-            cap.setSelectionRange(at, at);
-        },
+        focus(atStart) { cap.focus(atStart); },
         selection() { return [0, 0]; },
         replace(text) {
             ({ caption, content } = split(text, kind));
-            cap.value = caption;
-            if (table) table.value = content;
+            cap.set(caption);
+            if (table) table.set(content);
             draw();
         },
-        focusAt() { cap.focus(); },
+        focusAt() { cap.focus(false); },
         caretRect() { return null; },
         rangeAt() { return null; },
         // For the tests: an image taken as if pasted or dropped.
         take,
         destroy() {
-            clearTimeout(refreshTimer);
+            cap.destroy();
+            if (table) table.destroy();
             root.remove();
         },
     };

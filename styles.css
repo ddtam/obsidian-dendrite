@@ -1854,3 +1854,21 @@ button.dendrite-review-btn:hover {
     text-align: center;
     margin-bottom: 6px;
 }
+
+/* A table edited in place: its number above it, and the editor's text,
+   the table's grid included, in the manuscript's font and size. */
+.dendrite-float-number {
+    font-family: var(--dendrite-float-font, inherit);
+    font-size: var(--dendrite-float-size, inherit);
+    font-weight: var(--font-bold);
+    margin: 10px 0 4px;
+}
+.dendrite-float-table {
+    --font-text: var(--dendrite-float-font, var(--font-text-theme));
+    --font-text-size: var(--dendrite-float-size, var(--font-text-size));
+    font-family: var(--dendrite-float-font, inherit);
+    font-size: var(--dendrite-float-size, inherit);
+}
+.dendrite-float-table .dendrite-float-label:empty {
+    display: none;
+}

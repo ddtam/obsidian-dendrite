@@ -871,3 +871,14 @@ test('comment bubbles sit as near their marks as they can without ' +
                      [0, 50, 100]);
     assert.deepEqual(stackNotes([], [], -1, 10), []);
 });
+
+test('a comment column longer than the text scrolls faster than it, so ' +
+     'its end comes with the text\'s', () => {
+    const { gutterShift } = c;
+    // 300 pixels of comments past the text's end, over 1000 of scroll.
+    assert.equal(gutterShift(300, 0, 1000), 0, 'at the top, none');
+    assert.equal(gutterShift(300, 500, 1000), 150, 'halfway, half');
+    assert.equal(gutterShift(300, 1000, 1000), 300, 'at the end, all');
+    assert.equal(gutterShift(0, 500, 1000), 0, 'none past it, none');
+    assert.equal(gutterShift(300, 50, 0), 0, 'nothing to scroll');
+});

@@ -382,3 +382,20 @@ test('a comment\'s Google Docs link rides at the end of its text, and a ' +
     assert.notDeepEqual(r.reviewKeys({ ...change, insert: 'huge' }),
                         r.reviewKeys(change));
 });
+
+test('a comment already in a card without its Google Docs link gets it, ' +
+     'and nothing else changes', () => {
+    const url = 'https://docs.google.com/document/d/D/edit?disco=AAA1';
+    const md = 'The ==cohort==%%[!review] Joshua Bridgers, 2026-10-22: ' +
+        'How many?%% was large.';
+    const item = { kind: 'comment', author: 'Joshua Bridgers',
+                   text: 'How many?', gid: 'AAA1', link: url };
+    assert.ok(r.needsLink(md, item));
+    const out = r.addLink(md, item);
+    assert.equal(out, 'The ==cohort==%%[!review] Joshua Bridgers, ' +
+        `2026-10-22: How many? ${url}%% was large.`);
+    assert.ok(!r.needsLink(out, item), 'linked once');
+    assert.equal(r.addLink(out, item), out);
+    assert.ok(!r.needsLink(md, { ...item, link: '' }), 'no link to give');
+    assert.ok(!r.needsLink('Other text.', item), 'not in this card');
+});

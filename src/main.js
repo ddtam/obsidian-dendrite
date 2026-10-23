@@ -2367,6 +2367,15 @@ class DendriteView extends ItemView {
             onAsText: () => this.editAsText(id),
             render: (md, el) => this.renderInto(md, el, f.path),
             image: (file) => this.saveFigureImage(id, file),
+            // Each field in the card editor: Obsidian's live preview
+            // edits a table as a grid, rows, columns and alignment from
+            // its own menu.
+            makeEditor: (value, h) => cardEditor(this.app, this, {
+                value, file: f, onChange: h.onChange, onBlur: h.onBlur,
+                onEscape: h.onEscape, onFind: () => this.openFind(),
+                onRedraw: () => {}, onUndo: () => false,
+                onRedo: () => false,
+            }, this.plugin.settings.obsidianEditor !== false),
         })) : cardEditor(this.app, this, handlers,
                          this.plugin.settings.obsidianEditor !== false);
         ed.editor = editor;
@@ -4623,7 +4632,19 @@ class DendriteView extends ItemView {
             // still holding it open would otherwise bring back.
             const done = !dup && review.reviewKeys(item)
                 .some((k) => doneKeys.has(k));
-            rows.push({ item, at, dup, done, use: !!at && !dup && !done });
+            // Already in, from before links were kept: it gains its link.
+            let relink = null;
+            if (dup && at && item.link) {
+                for (const cid of [at.id, ...this.stackOf(at.id)
+                    .map((v) => v.id)]) {
+                    if (review.needsLink(await body(cid), item)) {
+                        relink = cid;
+                        break;
+                    }
+                }
+            }
+            rows.push({ item, at, dup, done, relink: !!relink,
+                        relinkId: relink, use: !!at && !dup && !done });
         }
         const modal = new ReviewImportModal(this, name, rows, inbox);
         modal.open();
@@ -4650,7 +4671,7 @@ class DendriteView extends ItemView {
      * their text to revise; one step to undo. A change goes in as one to
      * apply only where its passage is still exactly as it was sent.
      */
-    async addReview(rows, fallback) {
+    async addReview(rows, fallback, relinks = []) {
         const cards = await this.reviewCards();
         const byId = new Map();
         let placed = 0;
@@ -4700,13 +4721,36 @@ class DendriteView extends ItemView {
             placed++;
         }
         const restores = [];
-        for (const [id, adds] of byId) {
+        // Comments already in, given their Google Docs links.
+        const linked = new Map();
+        for (const row of relinks) {
+            if (!linked.has(row.relinkId)) linked.set(row.relinkId, []);
+            linked.get(row.relinkId).push(row.item);
+        }
+        for (const [id, items] of linked) {
+            if (byId.has(id)) continue;
             const f = this.cardFile(id);
             if (!f) continue;
             const data = await this.app.vault.read(f);
             const out = await this.writeCard(f, (d) => {
                 const { fm, body } = core.splitFrontmatter(d);
-                return fm + review.addItems(body, adds);
+                return fm + items.reduce((md, it) => review.addLink(md, it),
+                                         body);
+            });
+            restores.push({ path: f.path, text: data,
+                            ifBody: core.splitFrontmatter(out).body });
+            this.invalidate(id);
+            if (this.cardEls.has(id)) await this.renderCard(id);
+        }
+        for (const [id, adds] of byId) {
+            const f = this.cardFile(id);
+            if (!f) continue;
+            const data = await this.app.vault.read(f);
+            const relinked = linked.get(id) || [];
+            const out = await this.writeCard(f, (d) => {
+                const { fm, body } = core.splitFrontmatter(d);
+                return fm + relinked.reduce((md, it) =>
+                    review.addLink(md, it), review.addItems(body, adds));
             });
             restores.push({ path: f.path, text: data,
                             ifBody: core.splitFrontmatter(out).body });
@@ -5958,6 +6002,15 @@ class DendritePreview extends ItemView {
         this.doc = el.createDiv({ cls: 'dendrite-preview-doc ' +
                                        'markdown-preview-view ' +
                                        'markdown-rendered' });
+        // Scrolling moves a comment column longer than the text.
+        this.doc.addEventListener('scroll', () => {
+            if (this.shiftFrame) return;
+            const win = this.doc.ownerDocument.defaultView;
+            this.shiftFrame = win.requestAnimationFrame(() => {
+                this.shiftFrame = null;
+                this.shiftGutter();
+            });
+        });
         // A change of width reflows the text under the bubbles.
         if (this.resizer) this.resizer.disconnect();
         if (typeof ResizeObserver !== 'undefined') {
@@ -6156,6 +6209,14 @@ class DendritePreview extends ItemView {
         await this.goComment();
     }
 
+    /** Whether an element is wholly within the preview's view. */
+    inView(el) {
+        if (!this.doc) return false;
+        const v = this.doc.getBoundingClientRect();
+        const r = el.getBoundingClientRect();
+        return v.height > 0 && r.top >= v.top && r.bottom <= v.bottom;
+    }
+
     /** Bring the comment gone to into view, and select its card. */
     async goComment() {
         const cur = this.reviewList[this.reviewAt];
@@ -6163,10 +6224,10 @@ class DendritePreview extends ItemView {
         const b = this.blocks.get(cur.id);
         if (b && b.el.hasClass('is-pending')) await this.renderBlock(cur.id);
         this.showPos();
-        // The passage brought to the middle; its bubble is placed level
-        // with it.
+        // The passage brought to the middle unless it is in view; its
+        // bubble is placed level with it.
         const at = b && this.passageOf(b.el, cur.n)[0];
-        if (at && at.scrollIntoView) {
+        if (at && at.scrollIntoView && !this.inView(at)) {
             at.scrollIntoView({ block: 'center', behavior: 'smooth' });
         }
         if (this.file) this.plugin.focusCard(this.file, cur.id, false);
@@ -6203,9 +6264,19 @@ class DendritePreview extends ItemView {
                 (it.kind === 'suggest' ? ' is-suggest' : '') });
             el.dataset.id = id;
             el.dataset.n = String(n);
-            // Pointing at a bubble shows its passage in the text.
+            // Pointing at a bubble shows its passage in the text; clicking
+            // it goes to its comment, as stepping to it does.
             el.addEventListener('mouseenter', () => mark(n, true));
             el.addEventListener('mouseleave', () => mark(n, false));
+            el.addEventListener('click', (e) => {
+                if (e.target.closest('button, a')) return;
+                e.stopPropagation();
+                const k = this.reviewList.findIndex((x) => x.id === id &&
+                                                     x.n === n);
+                if (k < 0) return;
+                this.reviewAt = k;
+                this.goComment();
+            });
             const meta = el.createDiv({ cls: 'dendrite-review-meta' });
             meta.createEl('b', { text: it.author || 'Reviewer' });
             meta.appendText(` · ${review.shortDate(it.date)}`);
@@ -6277,12 +6348,59 @@ class DendritePreview extends ItemView {
             const at = sup || (b && b.el);
             return at ? at.getBoundingClientRect().top - base : 0;
         });
-        const cur = this.reviewList[this.reviewAt];
-        const current = cur ? bubbles.findIndex((el) =>
-            el.dataset.id === cur.id && Number(el.dataset.n) === cur.n) : -1;
-        const tops = core.stackNotes(anchors,
-            bubbles.map((el) => el.offsetHeight), current, 8);
+        // The comment gone to, at its mark; else a selected card's first
+        // comment, at the card's top.
+        const focus = this.bubbleFocus(bubbles);
+        if (focus.at === 'card') {
+            const b = this.blocks.get(this.active);
+            if (b) anchors[focus.index] = b.el.getBoundingClientRect().top -
+                base;
+        }
+        const heights = bubbles.map((el) => el.offsetHeight);
+        const tops = core.stackNotes(anchors, heights, focus.index, 8);
         bubbles.forEach((el, k) => { el.style.top = `${tops[k]}px`; });
+        // How far the column runs past the text's end, which scrolling
+        // makes up for while nothing is in focus.
+        const last = [...this.blocks.values()].map((b) => b.el)
+            .filter((el) => el.parentElement === this.doc).slice(-1)[0];
+        const end = last ? last.getBoundingClientRect().bottom - base : 0;
+        const bottom = Math.max(0, ...tops.map((t, k) => t + heights[k]));
+        this.bubbleOverflow = Math.max(0, bottom - end);
+        this.bubbleFocused = focus.index >= 0;
+        this.shiftGutter();
+    }
+
+    /**
+     * Which bubble the column is laid out from: the comment gone to,
+     * level with its mark; else the selected card's first comment, level
+     * with the card's top; else none, -1.
+     */
+    bubbleFocus(bubbles) {
+        const cur = this.reviewList[this.reviewAt];
+        // A card clicked since takes over from the comment gone to.
+        if (cur && (!this.active || cur.id === this.active)) {
+            const k = bubbles.findIndex((el) => el.dataset.id === cur.id &&
+                Number(el.dataset.n) === cur.n);
+            if (k >= 0) return { index: k, at: 'mark' };
+        }
+        const k = bubbles.findIndex((el) => el.dataset.id === this.active);
+        return k >= 0 ? { index: k, at: 'card' } : { index: -1, at: null };
+    }
+
+    /**
+     * Move the comment column up by what it runs past the text's end, in
+     * proportion to the scroll, so its end comes with the text's; not
+     * while a comment or card is in focus, which it is aligned to.
+     */
+    shiftGutter() {
+        const gutter = this.gutterEl;
+        const doc = this.doc;
+        if (!gutter || !doc) return;
+        const shift = this.bubbleFocused ? 0 : core.gutterShift(
+            this.bubbleOverflow || 0, doc.scrollTop,
+            doc.scrollHeight - doc.clientHeight);
+        gutter.style.transform = shift ? `translateY(${-Math.round(shift)}px)`
+            : '';
     }
 
     /**
@@ -6443,6 +6561,7 @@ class DendritePreview extends ItemView {
             b.el.toggleClass('is-active', bid === id);
         }
         this.fadeBubbles();
+        this.scheduleBubbles();
         const b = this.blocks.get(id);
         if (b && b.el.scrollIntoView) {
             // One taller than most of the preview shows from its start.
@@ -7198,11 +7317,15 @@ class ReviewImportModal extends Modal {
         const found = rows.filter((x) => x.at).length;
         const dups = rows.filter((x) => x.dup).length;
         const done = rows.filter((x) => x.done).length;
+        const relinks = rows.filter((x) => x.relink).length;
         contentEl.createEl('p', { text: `${rows.length} comment` +
             `${rows.length === 1 ? '' : 's'} and suggested change` +
             `${rows.length === 1 ? '' : 's'}; ${found} found in the cards` +
             (dups ? `, ${dups} already in the cards` : '') +
             (done ? `, ${done} resolved here before` : '') + '. ' +
+            (relinks ? `${relinks} already in the cards will get ` +
+                `${relinks === 1 ? 'its' : 'their'} Google Docs link. ` :
+                '') +
             'Each goes after its passage in the card, which is set to ' +
             'revise. A change still made on the text as it was sent can ' +
             'be applied from its card later; one whose passage has ' +
@@ -7211,6 +7334,10 @@ class ReviewImportModal extends Modal {
         const list = contentEl.createDiv({ cls: 'dendrite-review-rows' });
         const active = view.active && view.byId.get(view.active);
         const count = () => rows.filter((x) => x.use).length;
+        // Comments already in that gain their link go with the others.
+        const linking = rows.filter((x) => x.relink).length;
+        const addLabel = () => `Add ${count()}` +
+            (linking ? ` and link ${linking}` : '');
         let go = null;
         for (const row of rows) {
             const it = row.item;
@@ -7221,7 +7348,7 @@ class ReviewImportModal extends Modal {
             box.disabled = !row.at && !active;
             box.onchange = () => {
                 row.use = box.checked;
-                go.setText(`Add ${count()}`);
+                go.setText(addLabel());
             };
             const main = el.createDiv({ cls: 'dendrite-review-main' });
             const meta = main.createDiv({ cls: 'dendrite-review-meta' });
@@ -7279,10 +7406,11 @@ class ReviewImportModal extends Modal {
         const buttons = contentEl.createDiv(
             { cls: 'dendrite-version-choices' });
         go = buttons.createEl('button', { cls: 'mod-cta',
-                                          text: `Add ${count()}` });
+                                          text: addLabel() });
         go.onclick = async () => {
             this.close();
-            await view.addReview(rows.filter((x) => x.use), active);
+            await view.addReview(rows.filter((x) => x.use), active,
+                                 rows.filter((x) => x.relink));
             if (this.inbox) await view.takeInbox(this.inbox, 'added');
         };
         if (this.inbox) {
