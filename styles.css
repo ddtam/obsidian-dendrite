@@ -1259,6 +1259,7 @@
    paragraph. A suggested change is in the revise flag's colour: the text
    it would take out faded and struck through, its new text tinted. */
 .dendrite-board,
+.dendrite-preview,
 .modal {
     --dendrite-review: var(--interactive-accent);
     --dendrite-suggest: var(--dendrite-revise, var(--color-orange));
@@ -1586,8 +1587,10 @@ button.dendrite-review-btn:hover {
 /* Review comments in the preview: the text keeps its width, and the
    comments sit in a margin to its right, each level with its number,
    as Word and Google Docs show them. */
+/* Spaced by the view, which keeps the text's readable width and puts
+   the comments in the gutter to its right. */
 .dendrite-preview-doc.has-comments {
-    padding-right: 300px;
+    max-width: none;
 }
 .dendrite-pblock.has-bubbles {
     position: relative;
@@ -1595,8 +1598,8 @@ button.dendrite-review-btn:hover {
 .dendrite-pbubbles {
     position: absolute;
     top: 0;
-    right: -290px;
-    width: 270px;
+    left: calc(100% + 18px);
+    width: calc(var(--dendrite-comment-margin, 300px) - 30px);
 }
 .dendrite-pbubble {
     position: absolute;
@@ -1679,4 +1682,24 @@ button.dendrite-review-btn:hover {
    an icon lines up with those that have one. */
 .menu.dendrite-menu:not(.mod-no-icon) .menu-item-icon {
     min-width: var(--icon-size, 18px);
+}
+
+/* In the preview, the passage of the comment gone to, or of the bubble
+   pointed at, stands out from the rest. */
+.dendrite-preview-doc mark.dendrite-review-mark.is-current,
+.dendrite-preview-doc mark.dendrite-review-mark.is-hover {
+    background: color-mix(in srgb, var(--dendrite-review) 45%,
+                          transparent);
+    box-shadow: 0 0 0 1px var(--dendrite-review);
+}
+.dendrite-preview-doc .dendrite-review-old.is-current,
+.dendrite-preview-doc .dendrite-review-new.is-current,
+.dendrite-preview-doc .dendrite-review-old.is-hover,
+.dendrite-preview-doc .dendrite-review-new.is-hover {
+    box-shadow: 0 0 0 1px var(--dendrite-suggest);
+    border-radius: 2px;
+}
+.dendrite-preview-doc sup.dendrite-review-n.is-current,
+.dendrite-preview-doc sup.dendrite-review-n.is-hover {
+    font-weight: var(--font-bold);
 }

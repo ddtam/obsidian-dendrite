@@ -928,8 +928,12 @@ test('the preview prints by role, follows edits, and links to the board',
     b.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
     b.dispatchEvent(new h.window.MouseEvent('dblclick', { bubbles: true }));
     assert.deepEqual(focused, [['G-bbbbb', false], ['G-bbbbb', true]]);
+    const scrolled = [];
+    view.blocks.get('G-ccccc').el.scrollIntoView = (o) => scrolled.push(o);
     view.highlight('G-ccccc');
     assert.ok(view.blocks.get('G-ccccc').el.hasClass('is-active'));
+    assert.equal(scrolled[0].block, 'center',
+                 'the card selected is brought to the middle');
     assert.ok(!b.hasClass('is-active'));
 });
 
@@ -3117,6 +3121,19 @@ test('the preview can show review comments as bubbles beside the text, ' +
     assert.match(first.textContent, /Aly Karsan/);
     assert.equal(first.querySelector('a').href, url);
     assert.ok(view.doc.hasClass('has-comments'));
+    // In a wide pane the text keeps its width and centre, the comments in
+    // the gutter; in a narrow one it moves left, then narrows.
+    const fit = (w) => {
+        Object.defineProperty(view.doc.parentElement, 'clientWidth',
+                              { value: w, configurable: true });
+        view.fitComments();
+        const st = view.doc.style;
+        return [parseInt(st.paddingLeft, 10), w -
+            parseInt(st.paddingLeft, 10) - parseInt(st.paddingRight, 10)];
+    };
+    assert.deepEqual(fit(1800), [550, 700], 'centred, as without comments');
+    assert.deepEqual(fit(1100), [100, 700], 'moved left for the gutter');
+    assert.deepEqual(fit(800), [28, 484], 'narrowed only when it must');
     const label = () => view.contentEl.querySelector(
         '.dendrite-pcomments-pos').textContent;
     assert.equal(label(), '3 comments');
@@ -3127,6 +3144,18 @@ test('the preview can show review comments as bubbles beside the text, ' +
     assert.equal(label(), '1 of 3');
     assert.deepEqual(focused, ['G-bbbbb'], 'its card is selected');
     assert.ok(bubbles()[0].hasClass('is-current'));
+    // Its passage in the text is marked as the one gone to; hovering a
+    // bubble marks its passage too.
+    const block = view.blocks.get('G-bbbbb').el;
+    const passage = (n) => view.passageOf(block, n);
+    assert.deepEqual(passage(0).map((e) => e.textContent), ['cohort', '1'],
+                     'the marked text and its number');
+    assert.ok(passage(0).every((e) => e.hasClass('is-current')));
+    assert.ok(!passage(1).some((e) => e.hasClass('is-current')));
+    bubbles()[1].dispatchEvent(new h.window.MouseEvent('mouseenter'));
+    assert.ok(passage(1).every((e) => e.hasClass('is-hover')));
+    bubbles()[1].dispatchEvent(new h.window.MouseEvent('mouseleave'));
+    assert.ok(!passage(1).some((e) => e.hasClass('is-hover')));
     await nav('Next comment').onclick();
     await nav('Next comment').onclick();
     assert.equal(label(), '3 of 3');
@@ -3162,6 +3191,13 @@ test('the preview can show review comments as bubbles beside the text, ' +
     await tick(30);
     assert.equal(bubbles().length, 0);
     assert.ok(!view.doc.hasClass('has-comments'));
+    assert.equal(view.doc.style.paddingLeft, '', 'spaced as before');
+    // Off, each card's part is as tall as its text again: none keeps the
+    // room its bubbles took.
+    for (const b of view.blocks.values()) {
+        assert.equal(b.el.style.minHeight, '', `${b.el.dataset.id} held`);
+        assert.ok(!b.el.hasClass('has-bubbles'));
+    }
 });
 
 test('the board\'s Preview button opens the preview and closes it again, ' +

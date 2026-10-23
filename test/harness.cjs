@@ -408,8 +408,17 @@ const obsidian = {
         return obsidian.respond(req);
     },
     respond: () => ({ status: 200, json: {} }),
+    // Markdown stays its text, but Dendrite's own inline review markup
+    // becomes elements, as Obsidian renders it.
     MarkdownRenderer: {
-        async render(app, md, el) { el.textContent = md; },
+        async render(app, md, el) {
+            const esc = String(md).replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            el.innerHTML = esc.replace(
+                /&lt;(mark|span|sup) class="(dendrite-review-[^"]*)"&gt;/g,
+                '<$1 class="$2">').replace(/&lt;\/(mark|span|sup)&gt;/g,
+                '</$1>');
+        },
     },
     Notice: class {
         constructor(m) { notices.push(m); }

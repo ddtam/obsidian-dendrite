@@ -8890,6 +8890,8 @@ var DendritePreview = class extends ItemView {
   }
   async onClose() {
     if (this.observer) this.observer.disconnect();
+    if (this.resizer) this.resizer.disconnect();
+    clearTimeout(this.fitTimer);
     for (const b of this.blocks.values()) {
       if (b.comp) b.comp.unload();
     }
@@ -8966,6 +8968,14 @@ var DendritePreview = class extends ItemView {
     );
     notes.addClass("dendrite-bar-gap-before");
     this.doc = el.createDiv({ cls: "dendrite-preview-doc markdown-preview-view markdown-rendered" });
+    if (this.resizer) this.resizer.disconnect();
+    if (typeof ResizeObserver !== "undefined") {
+      this.resizer = new ResizeObserver(() => {
+        clearTimeout(this.fitTimer);
+        this.fitTimer = setTimeout(() => this.fitComments(), 100);
+      });
+      this.resizer.observe(this.doc);
+    }
   }
   scheduleRefresh() {
     clearTimeout(this.refreshTimer);
@@ -9072,6 +9082,7 @@ var DendritePreview = class extends ItemView {
     }
     if (this.reviewAt >= list.length) this.reviewAt = list.length - 1;
     this.doc.toggleClass("has-comments", this.showComments);
+    this.fitComments();
     this.navEl.toggleClass("is-hidden", !this.showComments);
     this.showPos();
     if (moved && this.reviewAt >= 0) this.goComment();
@@ -9079,10 +9090,29 @@ var DendritePreview = class extends ItemView {
   showPos() {
     const n = this.reviewList.length;
     this.posEl.setText(!n ? "No comments" : this.reviewAt < 0 ? `${n} comment${n === 1 ? "" : "s"}` : `${this.reviewAt + 1} of ${n}`);
-    for (const b of this.doc.querySelectorAll(".dendrite-pbubble")) {
-      const cur = this.reviewList[this.reviewAt];
-      b.toggleClass("is-current", !!cur && b.dataset.id === cur.id && Number(b.dataset.n) === cur.n);
+    const cur = this.reviewList[this.reviewAt];
+    for (const el of this.doc.querySelectorAll(".is-current")) {
+      el.removeClass("is-current");
     }
+    if (!cur) return;
+    const b = this.blocks.get(cur.id);
+    if (!b) return;
+    const bubble = b.el.querySelector(
+      `.dendrite-pbubble[data-n="${cur.n}"]`
+    );
+    if (bubble) bubble.addClass("is-current");
+    for (const el of this.passageOf(b.el, cur.n)) el.addClass("is-current");
+  }
+  /**
+   * A comment's passage in a card's rendered text, `n` its index in the
+   * card: the marked text before its number, with the number.
+   */
+  passageOf(el, n) {
+    const sup = [...el.querySelectorAll("sup.dendrite-review-n")].find((x) => x.textContent === String(n + 1));
+    if (!sup) return [];
+    const out = [sup];
+    for (let p = sup.previousElementSibling; p && /\bdendrite-review-(mark|old|new)\b/.test(p.className); p = p.previousElementSibling) out.unshift(p);
+    return out;
   }
   /**
    * Go to the next comment, or the one before, round from the end:
@@ -9122,13 +9152,19 @@ var DendritePreview = class extends ItemView {
     if (!mine.length) return;
     b.el.addClass("has-bubbles");
     const box = b.el.createDiv({ cls: "dendrite-pbubbles" });
-    const nums = [...b.el.querySelectorAll("sup.dendrite-review-n")];
-    let below = 0;
     for (const { n } of mine) {
       const it = items[n];
       const el = box.createDiv({ cls: "dendrite-pbubble" + (it.kind === "suggest" ? " is-suggest" : "") });
       el.dataset.id = id;
       el.dataset.n = String(n);
+      el.addEventListener("mouseenter", () => {
+        for (const p of this.passageOf(b.el, n)) p.addClass("is-hover");
+      });
+      el.addEventListener("mouseleave", () => {
+        for (const p of this.passageOf(b.el, n)) {
+          p.removeClass("is-hover");
+        }
+      });
       const meta = el.createDiv({ cls: "dendrite-review-meta" });
       meta.createEl("b", { text: it.author || "Reviewer" });
       meta.appendText(` \xB7 ${review.shortDate(it.date)}`);
@@ -9161,13 +9197,68 @@ var DendritePreview = class extends ItemView {
           }
         };
       }
+    }
+    this.layoutBubbles(b);
+    this.showPos();
+  }
+  /**
+   * Place a card's bubbles, each level with its number in the text and
+   * below the one before, and keep the card's part tall enough for
+   * them, so they do not run into the next card's. Done again when the
+   * preview changes width, since the text reflows.
+   */
+  layoutBubbles(b) {
+    const bubbles = [...b.el.querySelectorAll(".dendrite-pbubble")];
+    if (!bubbles.length) return;
+    b.el.style.minHeight = "";
+    const nums = [...b.el.querySelectorAll("sup.dendrite-review-n")];
+    let below = 0;
+    for (const el of bubbles) {
+      const n = Number(el.dataset.n);
       const sup = nums.find((x) => x.textContent === String(n + 1));
       const top = Math.max(sup ? sup.offsetTop : 0, below);
       el.style.top = `${top}px`;
       below = top + el.offsetHeight + 6;
     }
     if (below > b.el.offsetHeight) b.el.style.minHeight = `${below}px`;
-    this.showPos();
+  }
+  /**
+   * Room for the comments in the gutter right of the text: the preview
+   * spans the pane, the text keeps its readable width, centred while
+   * the gutter holds the comments, moved left as far as it must, and
+   * narrowed only when even that is short. The comments take up to 300
+   * pixels, less in a narrow pane. Every card's bubbles are then laid
+   * out again for the text as it now runs.
+   */
+  fitComments() {
+    const doc = this.doc;
+    if (!doc) return;
+    if (!this.showComments) {
+      for (const k of ["maxWidth", "paddingLeft", "paddingRight"]) {
+        doc.style[k] = "";
+      }
+      doc.style.removeProperty("--dendrite-comment-margin");
+      return;
+    }
+    const pane = doc.parentElement;
+    const w = pane && pane.clientWidth || doc.clientWidth || 0;
+    if (!w) return;
+    const win = doc.ownerDocument.defaultView;
+    const line = parseFloat(win.getComputedStyle(doc).getPropertyValue("--file-line-width")) || 700;
+    const pad = 28;
+    const margin = Math.round(Math.min(300, Math.max(170, w * 0.36)));
+    const text = Math.max(200, Math.min(line, w - pad - margin));
+    const left = Math.max(pad, Math.min(
+      (w - text) / 2,
+      w - text - margin
+    ));
+    doc.style.maxWidth = "none";
+    doc.style.paddingLeft = `${Math.round(left)}px`;
+    doc.style.paddingRight = `${Math.round(w - left - text)}px`;
+    doc.style.setProperty("--dendrite-comment-margin", `${margin}px`);
+    for (const b of this.blocks.values()) {
+      if (b.el.hasClass("has-bubbles")) this.layoutBubbles(b);
+    }
   }
   renderSegments(segs) {
     this.segs = new Map(segs.map((s) => [s.id, s]));
@@ -9229,6 +9320,8 @@ var DendritePreview = class extends ItemView {
     b.comp = new Component();
     b.comp.load();
     b.el.empty();
+    b.el.removeClass("has-bubbles");
+    b.el.style.minHeight = "";
     const f = this.cardFile(id);
     const path = f ? f.path : this.file.path;
     if (s.gathered) {
@@ -9282,7 +9375,10 @@ var DendritePreview = class extends ItemView {
       if (p && !p.closest(".footnotes")) p.remove();
     }
   }
-  /** Highlight the board's active card here, and bring it into view. */
+  /**
+   * Highlight the board's active card here, and bring it to the middle
+   * of the preview, where the text around it can be read.
+   */
   highlight(id) {
     this.active = id;
     for (const [bid, b2] of this.blocks) {
@@ -9290,7 +9386,11 @@ var DendritePreview = class extends ItemView {
     }
     const b = this.blocks.get(id);
     if (b && b.el.scrollIntoView) {
-      b.el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      const tall = this.doc && this.doc.clientHeight && b.el.offsetHeight > this.doc.clientHeight * 0.8;
+      b.el.scrollIntoView({
+        block: tall ? "start" : "center",
+        behavior: "smooth"
+      });
     }
   }
 };
