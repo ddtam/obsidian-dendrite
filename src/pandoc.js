@@ -12,6 +12,8 @@
  * export and is named, rather than rendering as "???" in the output.
  */
 
+const docx = require('./docx.js');
+
 /** Every citation key in the text, once each, in order of first use. */
 function citekeys(md) {
     const out = [];
@@ -340,14 +342,14 @@ local function rules(t, latex)
   end
 end
 
-local HEAD = '\\begin{minipage}[b]{\\linewidth}\\raggedright\n'
+local HEAD = '\\begin{minipage}%[b%]{\\linewidth}\\%a+\n'
 
 local function write(t)
   if not pandoc.write then return t end
   local tex = pandoc.write(pandoc.Pandoc({ t }), 'latex')
   -- A header cell is set bottom-aligned in a box, so a header of two
   -- lines rises to the rule above it; its first line is given a row's.
-  tex = tex:gsub(HEAD:gsub('%p', '%%%0'), '%0\\dendriteheadstrut\n')
+  tex = tex:gsub(HEAD, '%0\\dendriteheadstrut\n')
   local rows = 0
   for _, b in ipairs(t.bodies) do rows = rows + #b.body end
   if rows <= KEEP_ROWS then tex = tex:gsub(' \\\\\n', ' \\\\*\n') end
@@ -375,14 +377,28 @@ const UNIT_PT = { pt: 1, mm: 2.8453, cm: 28.453, in: 72.27 };
 
 /**
  * About how many characters a PDF's line holds: the text width over half
- * an em, a proportional font's average letter. A margin not given as one
- * length is taken as 2.5cm.
+ * an em, a proportional font's average letter.
  */
 function lineChars(st) {
-    const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec(st.margin || '');
-    const margin = m ? Number(m[1]) * UNIT_PT[m[2]] : 2.5 * UNIT_PT.cm;
     const width = PAPER_PT[st.paper] || PAPER_PT.letter;
-    return Math.round((width - 2 * margin) / ((st.fontSize || 10) / 2));
+    return Math.round((width - 2 * marginPt(st)) / ((st.fontSize || 10) / 2));
+}
+
+/**
+ * Pandoc's reference .docx, `buf`, with a manuscript's font, size, line
+ * spacing, margins and paper, and black text.
+ */
+function restyledReference(buf, style, zlib) {
+    return docx.reference(buf, {
+        font: style.font, fontSize: style.fontSize || 10,
+        lineSpacing: style.lineSpacing, paper: style.paper,
+        marginPt: marginPt(style) }, zlib);
+}
+
+/** The margin in points; one not given as one length is taken as 2.5cm. */
+function marginPt(st) {
+    const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec(st.margin || '');
+    return m ? Number(m[1]) * UNIT_PT[m[2]] : 2.5 * UNIT_PT.cm;
 }
 
 /**
@@ -538,19 +554,48 @@ async function exportDocument(o, deps) {
         tables = deps.join(dir, `dendrite-${Date.now()}-tables.lua`);
         await deps.writeFile(tables, TABLES_LUA);
     }
+    // Word's styles: the manuscript's own reference document if it sets
+    // one, else Pandoc's, restyled with the manuscript's font, size,
+    // spacing, margins and paper, and black text.
+    let style = o.style || {};
+    let reference = null;
+    if (o.format === 'docx' && !style.referenceDocx && deps.zlib) {
+        reference = deps.join(dir, `dendrite-${Date.now()}-reference.docx`);
+        try {
+            await deps.run(o.pandoc || 'pandoc', ['-o', reference,
+                '--print-default-data-file', 'reference.docx']);
+            await deps.writeFile(reference, restyledReference(
+                await deps.readFile(reference), style, deps.zlib));
+            style = Object.assign({}, style, { referenceDocx: reference });
+        } catch (err) {
+            // Pandoc's own styles, unchanged; the export itself says
+            // whether Pandoc runs.
+            deps.remove(reference);
+            reference = null;
+        }
+    }
     await deps.writeFile(input, text);
     const args = pandocArgs({ input, output: o.output, format: o.format,
                               engine: o.engine, bibliography, csl: o.csl,
                               resourcePath: o.resourcePath, header,
-                              tables, style: o.style });
+                              tables, style });
     try {
         await deps.run(o.pandoc || 'pandoc', args);
+        // Word has no setting for it, so short tables are kept on one
+        // page in the finished file; failing that, Pandoc's file stands.
+        if (o.format === 'docx' && deps.zlib) {
+            try {
+                await deps.writeFile(o.output, docx.keepDocument(
+                    await deps.readFile(o.output), deps.zlib));
+            } catch (err) { /* kept as Pandoc wrote it */ }
+        }
     } catch (err) {
         return { error: pandocError(err, o.pandoc || 'pandoc') };
     } finally {
         deps.remove(input);
         if (header) deps.remove(header);
         if (tables) deps.remove(tables);
+        if (reference) deps.remove(reference);
         if (bibliography && bibliography !== o.fallbackBib) {
             deps.remove(bibliography);
         }
@@ -628,5 +673,5 @@ function condaBins(names, home) {
 
 module.exports = { citekeys, pandocCaptions, pandocError, searchPath,
                    condaBins, toPandoc, TABLES_LUA, lineChars,
-                   fetchBib, pandocArgs, exportDocument, pdfPages,
-                   measuredRate, footnoteGap, preamble, BODY_END };
+                   restyledReference, fetchBib, pandocArgs, exportDocument,
+                   pdfPages, measuredRate, footnoteGap, preamble, BODY_END };

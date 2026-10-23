@@ -426,7 +426,7 @@ test('the table filter draws a rule for a row of dashes, widens a ' +
     const lua = path.join(dir, 'tables.lua');
     fs.writeFileSync(lua, p.TABLES_LUA);
     const md = '| Data | Patients | Libraries |\n' +
-        '| ----------------------------- | -------- | ' +
+        '| ----------------------------- | -------: | ' +
         '------------------------------------------------------------ |\n' +
         '| --- | --- | --- |\n' +
         '| WGS CRAMs | 175 | 534 (175 normal, 175 pre-, 175 post) |\n' +
@@ -452,7 +452,8 @@ test('the table filter draws a rule for a row of dashes, widens a ' +
     assert.match(tex, /RNA CRAMs & - & 318 \\\\\*\n\\midrule\n\\textbf/,
                  'one dash is a value; seven are a rule');
     assert.match(tex, /WGS CRAMs & 175 & .* \\\\\*\n/, 'no break after');
-    assert.match(tex, /\\raggedright\n\\dendriteheadstrut\nPatients/);
+    assert.match(tex, /\\raggedleft\n\\dendriteheadstrut\nPatients/,
+                 'a right-aligned header too');
     const widths = [...tex.matchAll(/\\real\{([\d.]+)\}/g)]
         .map((m) => Number(m[1]));
     // 'Patients' at 1.2 letters each, plus one, of 94 less three gaps.
@@ -462,4 +463,121 @@ test('the table filter draws a rule for a row of dashes, widens a ' +
         assert.match(xml, /w:lastRow="1"/, 'Word: the total row');
         assert.ok(!/>-------</.test(xml), 'Word: no row of dashes');
     }
+});
+
+test('a .docx is read and written as a zip', () => {
+    const d = require('../src/docx.js');
+    const zlib = require('zlib');
+    assert.equal(d.crc32(Buffer.from('123456789')), 0xcbf43926);
+    const files = [{ name: 'word/styles.xml', data: Buffer.from('<a/>') },
+                   { name: 'é.txt', data: Buffer.from('x'.repeat(500)) }];
+    const back = d.readZip(d.writeZip(files, zlib), zlib);
+    assert.deepEqual(back.map((f) => [f.name, f.data.toString()]),
+                     files.map((f) => [f.name, f.data.toString()]));
+});
+
+test('Word\'s styles take the manuscript\'s font, size, spacing and ' +
+     'page, with all text black', () => {
+    const d = require('../src/docx.js');
+    const styles = '<w:docDefaults><w:rPrDefault><w:rPr>' +
+        '<w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" />' +
+        '<w:sz w:val="24" /><w:szCs w:val="24" /></w:rPr></w:rPrDefault>' +
+        '<w:pPrDefault>\n  <w:pPr>\n    <w:spacing w:after="200" />' +
+        '</w:pPr></w:pPrDefault></w:docDefaults>' +
+        '<w:style w:type="paragraph" w:styleId="Heading1"><w:rPr>' +
+        '<w:rFonts w:asciiTheme="majorHAnsi" />' +
+        '<w:color w:val="345A8A" w:themeColor="accent1" />' +
+        '<w:sz w:val="32" /></w:rPr></w:style>' +
+        '<w:style w:type="paragraph" w:styleId="Compact"><w:pPr>' +
+        '<w:spacing w:before="36" w:after="36" /></w:pPr></w:style>' +
+        '<w:style w:type="character" w:styleId="VerbatimChar"><w:rPr>' +
+        '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" /></w:rPr>' +
+        '</w:style>';
+    const out = d.styleXml(styles, { font: 'Arial', fontSize: 10,
+                                     lineSpacing: 1.5 });
+    assert.ok(!/asciiTheme/.test(out), 'theme fonts replaced');
+    assert.equal((out.match(/w:ascii="Arial"/g) || []).length, 2);
+    assert.match(out, /w:ascii="Consolas"/, 'code keeps its own font');
+    assert.match(out, /<w:color w:val="000000" \/>/);
+    assert.ok(!/345A8A|themeColor/.test(out), 'no colour left');
+    assert.match(out, /<w:sz w:val="20" \/>/, '12pt body becomes 10pt');
+    assert.match(out, /<w:sz w:val="27" \/>/, 'a heading in proportion');
+    assert.match(out, /<w:spacing w:line="360" w:lineRule="auto" w:after/,
+                 'one and a half lines');
+    assert.match(out, /styleId="Compact"><w:pPr><w:spacing w:line="240"/,
+                 'table cells single spaced');
+    const doc = d.pageXml('<w:body><w:p/><w:sectPr><w:pgSz/></w:sectPr>' +
+                          '</w:body>', { marginPt: 70.9, paper: 'a4' });
+    assert.equal(doc, '<w:body><w:p/><w:sectPr>' +
+        '<w:pgSz w:w="11906" w:h="16838" /><w:pgMar w:top="1418" ' +
+        'w:right="1418" w:bottom="1418" w:left="1418" w:header="720" ' +
+        'w:footer="720" w:gutter="0" /></w:sectPr></w:body>');
+});
+
+test('Word export uses a reference document made from the manuscript\'s ' +
+     'settings, unless the manuscript sets its own', async () => {
+    const d = require('../src/docx.js');
+    const zlib = require('zlib');
+    const deps = fakeDeps(null);
+    deps.zlib = zlib;
+    const plain = d.writeZip([
+        { name: 'word/styles.xml',
+          data: Buffer.from('<w:color w:val="4F81BD" />') },
+        { name: 'word/document.xml',
+          data: Buffer.from('<w:body></w:body>') }], zlib);
+    const run = deps.run;
+    const row = (t) => `<w:tr><w:tc><w:p><w:r><w:t>${t}</w:t></w:r></w:p>` +
+        '</w:tc></w:tr>';
+    deps.run = async (cmd, args) => {
+        if (args.includes('--print-default-data-file')) {
+            deps.files[args[args.indexOf('-o') + 1]] = plain;
+            return;
+        }
+        await run(cmd, args);
+        deps.files[args[args.indexOf('-o') + 1]] = d.writeZip([
+            { name: 'word/document.xml',
+              data: Buffer.from(`<w:body><w:tbl>${row('a')}${row('b')}` +
+                                '</w:tbl></w:body>') }], zlib);
+    };
+    deps.readFile = async (f) => deps.files[f];
+    const r = await p.exportDocument({
+        md: 'Text.', format: 'docx', output: '/v/G.docx',
+        style: { font: 'Arial', margin: '1in' } }, deps);
+    assert.equal(r.ok, true);
+    const [, args, files] = deps.runs[0];
+    const ref = args.find((a) => a.startsWith('--reference-doc='))
+        .slice('--reference-doc='.length);
+    const made = d.readZip(files[ref], zlib);
+    assert.equal(made[0].data.toString(), '<w:color w:val="000000" />');
+    assert.match(made[1].data.toString(), /w:left="1445"/, 'one inch');
+    assert.deepEqual(Object.keys(deps.files), ['/v/G.docx'],
+                     'and it is removed');
+    const doc = d.readZip(deps.files['/v/G.docx'], zlib)[0].data.toString();
+    assert.equal(doc, '<w:body><w:tbl><w:tr><w:trPr><w:cantSplit />' +
+        '</w:trPr><w:tc><w:p><w:pPr><w:keepNext /></w:pPr><w:r><w:t>a' +
+        '</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:cantSplit />' +
+        '</w:trPr><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr>' +
+        '</w:tbl></w:body>', 'a short table is kept on one page');
+    deps.runs.length = 0;
+    await p.exportDocument({ md: 'Text.', format: 'docx',
+                             output: '/v/G.docx',
+                             style: { referenceDocx: '/v/mine.docx' } },
+                           deps);
+    assert.ok(deps.runs[0][1].includes('--reference-doc=/v/mine.docx'));
+    assert.equal(deps.runs.length, 1, 'nothing made');
+});
+
+test('in Word, keep-with-next follows the paragraph\'s style, and a ' +
+     'table longer than 30 rows may break', () => {
+    const d = require('../src/docx.js');
+    const p1 = '<w:p><w:pPr><w:pStyle w:val="Compact" /><w:jc w:val="left" />' +
+        '</w:pPr></w:p>';
+    const tbl = (n) => '<w:tbl>' +
+        `<w:tr><w:trPr><w:tblHeader w:val="true" /></w:trPr>${p1}</w:tr>` +
+        `<w:tr>${p1}</w:tr>`.repeat(n - 1) + '</w:tbl>';
+    const out = d.keepTables(tbl(3));
+    assert.equal((out.match(/<w:pStyle w:val="Compact" \/><w:keepNext \/>/g)
+                  || []).length, 2, 'all rows but the last');
+    assert.match(out, /<w:trPr><w:cantSplit \/><w:tblHeader/);
+    assert.equal(d.keepTables(tbl(31)), tbl(31));
 });

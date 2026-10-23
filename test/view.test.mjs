@@ -448,6 +448,31 @@ test('vim keys move, insert, rearrange and delete in normal mode',
     assert.equal(view.active, fresh);
 });
 
+test('Ctrl+J, K and L make cards when the view\'s scope is not the ' +
+     'active one, as Ctrl+arrows do', async () => {
+    // Obsidian can leave the view's scope inactive after a card's editor
+    // closes; the pane's own keydown then has to handle these keys.
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n', { 'G-aaaaa': 'A' });
+    const key = async (k) => {
+        view.contentEl.dispatchEvent(new h.window.KeyboardEvent(
+            'keydown', { key: k, ctrlKey: true, bubbles: true,
+                         cancelable: true }));
+        await tick(5);
+        if (view.editing) await view.endEdit();
+    };
+    view.active = 'G-aaaaa';
+    await key('l');
+    assert.equal(view.byId.get('G-aaaaa').children.length, 1, 'Ctrl+L');
+    view.active = 'G-aaaaa';
+    await key('j');
+    assert.equal(view.root.children.length, 2, 'Ctrl+J');
+    view.active = 'G-aaaaa';
+    await key('k');
+    assert.equal(view.root.children.length, 3, 'Ctrl+K');
+    assert.equal(view.root.children[1].id, 'G-aaaaa', 'above it');
+});
+
 test('in edit mode the Ctrl shortcuts reach the text, not the view',
      async () => {
     const { view } = await open(

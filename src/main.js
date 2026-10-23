@@ -1728,10 +1728,10 @@ class DendriteView extends ItemView {
     onNavKey(e) {
         if (this.editing || e.defaultPrevented) return;
         if (e.target.closest('input, textarea, select, .dendrite-cm')) return;
-        // Arrows and Enter are bound in the view's scope too, but that
-        // scope is not always the active one after Obsidian's editor
-        // closes, so they are also read here; defaultPrevented means the
-        // scope already handled the key.
+        // Arrows, Enter, and Ctrl with J, K or L are bound in the view's
+        // scope too, but that scope is not always the active one after
+        // Obsidian's editor closes, so they are also read here;
+        // defaultPrevented means the scope already handled the key.
         if (this.arrowKey(e)) return;
         // Escape closes find here too, for when that scope is not active,
         // and otherwise goes no further, as in the scope.
@@ -1825,6 +1825,13 @@ class DendriteView extends ItemView {
         if (e.key === 'Enter' && !mod && !e.altKey && !e.shiftKey) {
             e.preventDefault();
             if (this.active) this.startEdit(this.active);
+            return true;
+        }
+        // Ctrl with J, K or L makes a card as Ctrl with an arrow does.
+        const vim = { j: 'below', k: 'above', l: 'child' }[e.key];
+        if (vim && mod && !e.altKey && !e.shiftKey) {
+            e.preventDefault();
+            this.insert(vim);
             return true;
         }
         const dir = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left',
@@ -3741,8 +3748,10 @@ class DendriteView extends ItemView {
     }
 
     /**
-     * Write Pandoc's default reference.docx beside the index, never over
-     * one that exists. Returns its path from the vault root, or null.
+     * Write a reference.docx beside the index, never over one that
+     * exists: Pandoc's, with the manuscript's font, size, spacing and page
+     * and black text, as an export without one uses. Returns its path
+     * from the vault root, or null.
      */
     async makeReferenceDocx() {
         const nodePath = require('path');
@@ -3755,11 +3764,15 @@ class DendriteView extends ItemView {
             new Notice(`Dendrite: ${rel} already exists; it is used as is.`);
             return rel;
         }
+        const deps = this.plugin.pandocDeps();
+        const out = nodePath.join(base, rel);
         try {
-            await this.plugin.pandocDeps().run(
-                this.plugin.settings.pandocPath || 'pandoc',
-                ['-o', nodePath.join(base, rel),
-                 '--print-default-data-file', 'reference.docx']);
+            await deps.run(this.plugin.settings.pandocPath || 'pandoc',
+                           ['-o', out, '--print-default-data-file',
+                            'reference.docx']);
+            await deps.writeFile(out, pandoc.restyledReference(
+                await deps.readFile(out), this.manuscript().style,
+                deps.zlib));
         } catch (err) {
             new Notice('Dendrite: could not write reference.docx. ' +
                 pandoc.pandocError(err,
@@ -5220,6 +5233,7 @@ module.exports = class DendritePlugin extends Plugin {
             writeFile: (f, t) => fs.promises.writeFile(f, t),
             readFile: (f) => fs.promises.readFile(f),
             inflate: (b) => require('zlib').inflateSync(b),
+            zlib: require('zlib'),
             remove: (f) => {
                 try { fs.unlinkSync(f); } catch (e) { /* already gone */ }
             },

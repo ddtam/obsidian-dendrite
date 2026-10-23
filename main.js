@@ -1483,10 +1483,170 @@ var require_editor = __commonJS({
   }
 });
 
+// src/docx.js
+var require_docx = __commonJS({
+  "src/docx.js"(exports2, module2) {
+    "use strict";
+    var CRC_TABLE = (() => {
+      const t = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) {
+          c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+        }
+        t[n] = c >>> 0;
+      }
+      return t;
+    })();
+    function crc32(buf) {
+      let c = 4294967295;
+      for (const b of buf) c = CRC_TABLE[(c ^ b) & 255] ^ c >>> 8;
+      return (c ^ 4294967295) >>> 0;
+    }
+    function readZip(buf, zlib) {
+      let end = -1;
+      for (let i = buf.length - 22; i >= 0; i--) {
+        if (buf.readUInt32LE(i) === 101010256) {
+          end = i;
+          break;
+        }
+      }
+      if (end < 0) throw new Error("not a zip file");
+      const count = buf.readUInt16LE(end + 10);
+      let at = buf.readUInt32LE(end + 16);
+      const out = [];
+      for (let k = 0; k < count; k++) {
+        if (buf.readUInt32LE(at) !== 33639248) {
+          throw new Error("damaged zip directory");
+        }
+        const method = buf.readUInt16LE(at + 10);
+        const size = buf.readUInt32LE(at + 20);
+        const nameLen = buf.readUInt16LE(at + 28);
+        const extraLen = buf.readUInt16LE(at + 30);
+        const noteLen = buf.readUInt16LE(at + 32);
+        const local = buf.readUInt32LE(at + 42);
+        const name = buf.toString("utf8", at + 46, at + 46 + nameLen);
+        const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+        const raw = buf.subarray(start, start + size);
+        out.push({
+          name,
+          data: method === 8 ? zlib.inflateRawSync(raw) : Buffer.from(raw)
+        });
+        at += 46 + nameLen + extraLen + noteLen;
+      }
+      return out;
+    }
+    function writeZip(files, zlib) {
+      const parts = [];
+      const dir = [];
+      let offset = 0;
+      for (const f of files) {
+        const name = Buffer.from(f.name, "utf8");
+        const packed = zlib.deflateRawSync(f.data);
+        const crc = crc32(f.data);
+        const head = Buffer.alloc(30);
+        head.writeUInt32LE(67324752, 0);
+        head.writeUInt16LE(20, 4);
+        head.writeUInt16LE(2048, 6);
+        head.writeUInt16LE(8, 8);
+        head.writeUInt32LE(crc, 14);
+        head.writeUInt32LE(packed.length, 18);
+        head.writeUInt32LE(f.data.length, 22);
+        head.writeUInt16LE(name.length, 26);
+        parts.push(head, name, packed);
+        const entry = Buffer.alloc(46);
+        entry.writeUInt32LE(33639248, 0);
+        entry.writeUInt16LE(20, 4);
+        entry.writeUInt16LE(20, 6);
+        entry.writeUInt16LE(2048, 8);
+        entry.writeUInt16LE(8, 10);
+        entry.writeUInt32LE(crc, 16);
+        entry.writeUInt32LE(packed.length, 20);
+        entry.writeUInt32LE(f.data.length, 24);
+        entry.writeUInt16LE(name.length, 28);
+        entry.writeUInt32LE(offset, 42);
+        dir.push(entry, name);
+        offset += head.length + name.length + packed.length;
+      }
+      const dirBuf = Buffer.concat(dir);
+      const end = Buffer.alloc(22);
+      end.writeUInt32LE(101010256, 0);
+      end.writeUInt16LE(files.length, 8);
+      end.writeUInt16LE(files.length, 10);
+      end.writeUInt32LE(dirBuf.length, 12);
+      end.writeUInt32LE(offset, 16);
+      return Buffer.concat([...parts, dirBuf, end]);
+    }
+    var PAGE_TWIPS = { letter: [12240, 15840], a4: [11906, 16838] };
+    var escapeXml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    function styleXml(xml, st) {
+      let out = xml.replace(/<w:color [^>]*\/>/g, '<w:color w:val="000000" />');
+      if (st.font) {
+        const f = escapeXml(st.font);
+        out = out.replace(
+          /<w:rFonts [^>]*w:asciiTheme="[^"]*"[^>]*\/>/g,
+          `<w:rFonts w:ascii="${f}" w:hAnsi="${f}" w:eastAsia="${f}" w:cs="${f}" />`
+        );
+      }
+      if (st.fontSize && st.fontSize !== 12) {
+        out = out.replace(
+          /(<w:sz(?:Cs)? w:val=")(\d+)(")/g,
+          (m, a, n, b) => a + Math.round(n * st.fontSize / 12) + b
+        );
+      }
+      if (st.lineSpacing && Number(st.lineSpacing) !== 1) {
+        const line = Math.round(240 * Number(st.lineSpacing));
+        out = out.replace(
+          /(<w:pPrDefault>\s*<w:pPr>\s*<w:spacing )/,
+          `$1w:line="${line}" w:lineRule="auto" `
+        );
+        out = out.replace(
+          /(<w:style [^>]*w:styleId="Compact"[^]*?<w:spacing )/,
+          '$1w:line="240" w:lineRule="auto" '
+        );
+      }
+      return out;
+    }
+    function pageXml(xml, st) {
+      const [w, h] = PAGE_TWIPS[st.paper] || PAGE_TWIPS.letter;
+      const m = Math.round((st.marginPt || 70.9) * 20);
+      const sect = `<w:sectPr><w:pgSz w:w="${w}" w:h="${h}" /><w:pgMar w:top="${m}" w:right="${m}" w:bottom="${m}" w:left="${m}" w:header="720" w:footer="720" w:gutter="0" /></w:sectPr>`;
+      const bare = xml.replace(/<w:sectPr[^]*?<\/w:sectPr>/g, "");
+      return bare.replace(/<\/w:body>/, sect + "</w:body>");
+    }
+    function reference(buf, st, zlib) {
+      const files = readZip(buf, zlib).map((f) => {
+        if (f.name === "word/styles.xml") {
+          return {
+            name: f.name,
+            data: Buffer.from(
+              styleXml(f.data.toString("utf8"), st),
+              "utf8"
+            )
+          };
+        }
+        if (f.name === "word/document.xml") {
+          return {
+            name: f.name,
+            data: Buffer.from(
+              pageXml(f.data.toString("utf8"), st),
+              "utf8"
+            )
+          };
+        }
+        return f;
+      });
+      return writeZip(files, zlib);
+    }
+    module2.exports = { crc32, readZip, writeZip, styleXml, pageXml, reference };
+  }
+});
+
 // src/pandoc.js
 var require_pandoc = __commonJS({
   "src/pandoc.js"(exports2, module2) {
     "use strict";
+    var docx = require_docx();
     function citekeys(md) {
       const out = [];
       const seen = /* @__PURE__ */ new Set();
@@ -1741,14 +1901,14 @@ local function rules(t, latex)
   end
 end
 
-local HEAD = '\\begin{minipage}[b]{\\linewidth}\\raggedright\n'
+local HEAD = '\\begin{minipage}%[b%]{\\linewidth}\\%a+\n'
 
 local function write(t)
   if not pandoc.write then return t end
   local tex = pandoc.write(pandoc.Pandoc({ t }), 'latex')
   -- A header cell is set bottom-aligned in a box, so a header of two
   -- lines rises to the rule above it; its first line is given a row's.
-  tex = tex:gsub(HEAD:gsub('%p', '%%%0'), '%0\\dendriteheadstrut\n')
+  tex = tex:gsub(HEAD, '%0\\dendriteheadstrut\n')
   local rows = 0
   for _, b in ipairs(t.bodies) do rows = rows + #b.body end
   if rows <= KEEP_ROWS then tex = tex:gsub(' \\\\\n', ' \\\\*\n') end
@@ -1773,10 +1933,21 @@ return {
     var PAPER_PT = { letter: 612, a4: 595.3 };
     var UNIT_PT = { pt: 1, mm: 2.8453, cm: 28.453, in: 72.27 };
     function lineChars(st) {
-      const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec(st.margin || "");
-      const margin = m ? Number(m[1]) * UNIT_PT[m[2]] : 2.5 * UNIT_PT.cm;
       const width = PAPER_PT[st.paper] || PAPER_PT.letter;
-      return Math.round((width - 2 * margin) / ((st.fontSize || 10) / 2));
+      return Math.round((width - 2 * marginPt(st)) / ((st.fontSize || 10) / 2));
+    }
+    function restyledReference(buf, style, zlib) {
+      return docx.reference(buf, {
+        font: style.font,
+        fontSize: style.fontSize,
+        lineSpacing: style.lineSpacing,
+        paper: style.paper,
+        marginPt: marginPt(style)
+      }, zlib);
+    }
+    function marginPt(st) {
+      const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec(st.margin || "");
+      return m ? Number(m[1]) * UNIT_PT[m[2]] : 2.5 * UNIT_PT.cm;
     }
     function pandocArgs(o) {
       const st = o.style || {};
@@ -1901,6 +2072,28 @@ return {
         tables = deps.join(dir, `dendrite-${Date.now()}-tables.lua`);
         await deps.writeFile(tables, TABLES_LUA);
       }
+      let style = o.style || {};
+      let reference = null;
+      if (o.format === "docx" && !style.referenceDocx && deps.zlib) {
+        reference = deps.join(dir, `dendrite-${Date.now()}-reference.docx`);
+        try {
+          await deps.run(o.pandoc || "pandoc", [
+            "-o",
+            reference,
+            "--print-default-data-file",
+            "reference.docx"
+          ]);
+          await deps.writeFile(reference, restyledReference(
+            await deps.readFile(reference),
+            style,
+            deps.zlib
+          ));
+          style = Object.assign({}, style, { referenceDocx: reference });
+        } catch (err) {
+          deps.remove(reference);
+          reference = null;
+        }
+      }
       await deps.writeFile(input, text);
       const args = pandocArgs({
         input,
@@ -1912,7 +2105,7 @@ return {
         resourcePath: o.resourcePath,
         header,
         tables,
-        style: o.style
+        style
       });
       try {
         await deps.run(o.pandoc || "pandoc", args);
@@ -1922,6 +2115,7 @@ return {
         deps.remove(input);
         if (header) deps.remove(header);
         if (tables) deps.remove(tables);
+        if (reference) deps.remove(reference);
         if (bibliography && bibliography !== o.fallbackBib) {
           deps.remove(bibliography);
         }
@@ -1971,6 +2165,7 @@ return {
       toPandoc,
       TABLES_LUA,
       lineChars,
+      restyledReference,
       fetchBib,
       pandocArgs,
       exportDocument,
@@ -3856,6 +4051,12 @@ var DendriteView = class extends ItemView {
       if (this.active) this.startEdit(this.active);
       return true;
     }
+    const vim = { j: "below", k: "above", l: "child" }[e.key];
+    if (vim && mod && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      this.insert(vim);
+      return true;
+    }
     const dir = {
       ArrowUp: "up",
       ArrowDown: "down",
@@ -5686,8 +5887,10 @@ var DendriteView = class extends ItemView {
     new Notice(`Dendrite: exported to ${path}`);
   }
   /**
-   * Write Pandoc's default reference.docx beside the index, never over
-   * one that exists. Returns its path from the vault root, or null.
+   * Write a reference.docx beside the index, never over one that
+   * exists: Pandoc's, with the manuscript's font, size, spacing and page
+   * and black text, as an export without one uses. Returns its path
+   * from the vault root, or null.
    */
   async makeReferenceDocx() {
     const nodePath = require("path");
@@ -5698,16 +5901,23 @@ var DendriteView = class extends ItemView {
       new Notice(`Dendrite: ${rel} already exists; it is used as is.`);
       return rel;
     }
+    const deps = this.plugin.pandocDeps();
+    const out = nodePath.join(base, rel);
     try {
-      await this.plugin.pandocDeps().run(
+      await deps.run(
         this.plugin.settings.pandocPath || "pandoc",
         [
           "-o",
-          nodePath.join(base, rel),
+          out,
           "--print-default-data-file",
           "reference.docx"
         ]
       );
+      await deps.writeFile(out, pandoc.restyledReference(
+        await deps.readFile(out),
+        this.manuscript().style,
+        deps.zlib
+      ));
     } catch (err) {
       new Notice("Dendrite: could not write reference.docx. " + pandoc.pandocError(
         err,
@@ -6989,6 +7199,7 @@ module.exports = class DendritePlugin extends Plugin {
       writeFile: (f, t) => fs.promises.writeFile(f, t),
       readFile: (f) => fs.promises.readFile(f),
       inflate: (b) => require("zlib").inflateSync(b),
+      zlib: require("zlib"),
       remove: (f) => {
         try {
           fs.unlinkSync(f);
