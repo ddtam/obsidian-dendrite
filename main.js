@@ -319,6 +319,11 @@ var require_core = __commonJS({
       return cols;
     }
     var ROLES = ["section", "prose", "notes", "scaffolding"];
+    function cardRole(fm) {
+      if (!fm) return null;
+      if (fm.dendrite_superseded) return "notes";
+      return ROLES.includes(fm.dendrite_role) ? fm.dendrite_role : null;
+    }
     function roleFor(node, roleOf) {
       const set = roleOf ? roleOf(node.id) : null;
       if (ROLES.includes(set)) return set;
@@ -1094,6 +1099,7 @@ var require_core = __commonJS({
       threadPath,
       exportSegments,
       roleFor,
+      cardRole,
       ROLES,
       KINDS,
       withKinds,
@@ -3169,6 +3175,88 @@ var require_history = __commonJS({
   }
 });
 
+// src/reviewapi.js
+var require_reviewapi = __commonJS({
+  "src/reviewapi.js"(exports2, module2) {
+    "use strict";
+    var MAX_BODY = 1 << 20;
+    function send(res, status, json) {
+      const body = JSON.stringify(json);
+      res.writeHead(status, {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body)
+      });
+      res.end(body);
+    }
+    function readBody(req) {
+      return new Promise((resolve, reject) => {
+        let size = 0;
+        const parts = [];
+        req.on("data", (c) => {
+          size += c.length;
+          if (size <= MAX_BODY) parts.push(c);
+        });
+        req.on("end", () => resolve(size > MAX_BODY ? null : Buffer.concat(parts).toString("utf8")));
+        req.on("error", reject);
+      });
+    }
+    async function handle(opts, req, res) {
+      if (req.headers.origin) {
+        return send(res, 403, { error: "requests from web pages are refused" });
+      }
+      if (req.headers.authorization !== `Bearer ${opts.token}`) {
+        return send(res, 401, { error: "missing or wrong key; it is in the discovery file" });
+      }
+      const url = new URL(req.url, "http://127.0.0.1");
+      if (url.pathname === "/dendrite/review" && req.method === "POST") {
+        if (!/^application\/json\b/.test(req.headers["content-type"] || "")) {
+          return send(res, 415, { error: "send application/json" });
+        }
+        const text = await readBody(req);
+        if (text === null) {
+          return send(res, 413, { error: "over 1 MB" });
+        }
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (err) {
+          return send(res, 400, { error: `not JSON: ${err.message}` });
+        }
+        const out = await opts.submit(data);
+        return send(res, out.status, out.json);
+      }
+      const m = /^\/dendrite\/review\/([\w-]+)$/.exec(url.pathname);
+      if (m && req.method === "GET") {
+        const out = await opts.status(m[1]);
+        return send(res, out.status, out.json);
+      }
+      return send(res, 404, { error: "not found" });
+    }
+    function start(opts, http = require("http")) {
+      return new Promise((resolve, reject) => {
+        let server;
+        try {
+          server = http.createServer((req, res) => {
+            handle(opts, req, res).catch((err) => {
+              if (!res.headersSent) {
+                send(res, 500, { error: String(err.message) });
+              }
+            });
+          });
+          server.once("error", reject);
+          server.listen(opts.port, "127.0.0.1", () => {
+            server.off("error", reject);
+            resolve(server);
+          });
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+    module2.exports = { start, MAX_BODY };
+  }
+});
+
 // src/main.js
 var {
   ItemView,
@@ -3252,7 +3340,15 @@ var DEFAULTS = {
   cardType: "dendrite card",
   // The Linter ignore entry Dendrite added itself, if any, so that only
   // that entry is ever removed again.
-  linterAdded: null
+  linterAdded: null,
+  // Reviews from programs on this computer, over a local port with a
+  // key; off until turned on. Desktop only.
+  reviewApi: false,
+  reviewApiPort: 27130,
+  reviewApiKey: "",
+  // Reviews submitted, pending until added or ignored on the board,
+  // and the latest ones decided, so a submitter can ask.
+  reviewQueue: []
 };
 var LINTER_ID = "obsidian-linter";
 var CARD_UNSAFE_RULES = ["file-name-heading", "capitalize-headings"];
@@ -3299,6 +3395,20 @@ var PATH_PROPS = [
   "dendrite_pandoc_defaults",
   "dendrite_reference_docx"
 ];
+function discoveryPath() {
+  let os;
+  let path;
+  try {
+    os = require("os");
+    path = require("path");
+  } catch (err) {
+    return "~/.config/dendrite/review-api.json";
+  }
+  return typeof process !== "undefined" && process.env && process.env.DENDRITE_REVIEW_API_FILE || path.join(os.homedir(), ".config", "dendrite", "review-api.json");
+}
+function reviewAuthors(items) {
+  return [...new Set(items.map((x) => x.author || "Reviewer"))].join(", ");
+}
 function safeName(s) {
   return String(s).replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -3338,6 +3448,7 @@ var DendriteView = class extends ItemView {
     this.oldCopies = [];
     this.renameTimer = null;
     this.copiesTimer = null;
+    this.inbox = [];
     this.history = plugin.history || new History();
     this.scope = new Scope(this.app.scope);
     this.registerKeys();
@@ -3490,6 +3601,7 @@ var DendriteView = class extends ItemView {
     this.checkArriving(false);
     this.scheduleOldCopies();
     this.render();
+    this.refreshInbox();
     this.versionsChecked = this.checkVersions().catch((err) => console.error("Dendrite: version check failed", err));
   }
   /**
@@ -3563,6 +3675,13 @@ var DendriteView = class extends ItemView {
     const walk = (n, under) => {
       const out = [];
       for (const c of n.children) {
+        if (!this.printOnly) {
+          if (this.isSuperseded(c.id)) continue;
+          parent.set(c.id, under);
+          kids.set(c.id, walk(c, c));
+          out.push(c);
+          continue;
+        }
         const role = core.roleFor(c, roleOf);
         if (role === "notes") continue;
         if (role === "scaffolding") {
@@ -3697,7 +3816,7 @@ var DendriteView = class extends ItemView {
     }
     this.renderOrphans(stage);
     board.toggleClass("is-print-only", this.printOnly);
-    this.shown = this.printOnly ? this.shownTree() : null;
+    this.shown = this.shownTree();
     if (this.shown && this.active && !this.shown.parent.has(this.active)) {
       this.active = this.nearestShown(this.active);
     }
@@ -4435,6 +4554,26 @@ var DendriteView = class extends ItemView {
       () => new CardModal(this, this.active).open()
     );
     item("Copy reference", "link", () => this.copyRef(this.active));
+    {
+      const node = this.byId.get(this.active);
+      const sid = this.active;
+      item(
+        "New version of this card",
+        "layers",
+        () => this.promote(sid)
+      );
+      if (node && node.parent && node.parent.id) {
+        const up = node.parent.id;
+        item(
+          "Replace the parent card with this one",
+          "layers",
+          () => this.promote(up, sid)
+        );
+      }
+      if (this.stackOf(sid).length) {
+        item("Versions\u2026", "layers", () => this.openStack(sid));
+      }
+    }
     const id = this.active;
     const info = this.statusInfo && this.statusInfo.get(id);
     if (info && info.prints) {
@@ -4470,22 +4609,19 @@ var DendriteView = class extends ItemView {
     this.addRoleItems(m, id);
     m.addSeparator();
     const branch = this.byId.get(this.active);
-    item(
-      "Export this branch to markdown",
-      "file-output",
-      () => this.exportTo(branch, "md")
-    );
+    let sub = null;
+    m.addItem((i) => {
+      i.setTitle("Export this branch").setIcon("file-output");
+      if (typeof i.setSubmenu === "function") sub = i.setSubmenu();
+    });
+    const into = sub || m;
+    const lead = sub ? "" : "Export this branch to ";
+    const formats = [["Markdown", "md"]];
     if (Platform.isDesktopApp) {
-      item(
-        "Export this branch to PDF",
-        "file-output",
-        () => this.exportTo(branch, "pdf")
-      );
-      item(
-        "Export this branch to Word",
-        "file-output",
-        () => this.exportTo(branch, "docx")
-      );
+      formats.push(["PDF", "pdf"], ["Word", "docx"]);
+    }
+    for (const [title, fmt] of formats) {
+      into.addItem((i) => i.setTitle(lead + title).setIcon("file-output").onClick(() => this.exportTo(branch, fmt)));
     }
     item("Open card note", "file", () => {
       const f = this.cardFile(this.active);
@@ -5470,9 +5606,19 @@ var DendriteView = class extends ItemView {
     if (!node) return;
     if (this.editing) await this.endEdit();
     const before = core.serialiseTree(this.root);
+    const past = (d) => {
+      const sibs = node.parent.children;
+      let j = sibs.indexOf(node) + d;
+      while (sibs[j] && this.isSuperseded(sibs[j].id)) j += d;
+      if (!sibs[j]) return false;
+      const to = sibs[j];
+      core.remove(node);
+      core.insertSibling(to, node, d > 0);
+      return true;
+    };
     const fn = {
-      up: () => core.moveWithin(node, -1),
-      down: () => core.moveWithin(node, 1),
+      up: () => past(-1),
+      down: () => past(1),
       indent: () => core.indent(node),
       outdent: () => core.outdent(node)
     }[op];
@@ -5481,6 +5627,133 @@ var DendriteView = class extends ItemView {
     await this.writeIndex();
     await this.sweepStatuses();
     this.render();
+  }
+  // ---- stacks: a card's old versions, kept under it -------------------
+  /** Whether a card is an old version, kept in another's stack. */
+  isSuperseded(id) {
+    return !!this.cardProps(id).dendrite_superseded;
+  }
+  /** A card's old versions, newest first. */
+  stackOf(id) {
+    const node = this.byId.get(id);
+    return node ? node.children.filter((c) => this.isSuperseded(c.id)) : [];
+  }
+  /**
+   * Put `byId`, a card under `topId` or one of its old versions, in
+   * its place, or with no `byId` a new empty card: it takes the place,
+   * the cards below and the stack, and the card it replaces goes to
+   * the top of the stack, hidden and printing nothing. One step to
+   * undo.
+   */
+  async promote(topId, byId = null) {
+    if (this.refuseWhileArriving() || this.refuseInPrintView()) return;
+    const top = this.byId.get(topId);
+    if (!top || this.isSuperseded(topId)) return;
+    let by = byId ? this.byId.get(byId) : null;
+    if (byId && (!by || by.parent !== top)) return;
+    if (this.editing) await this.endEdit();
+    const set = this.cardProps(topId).dendrite_role;
+    const shownBelow = top.children.filter((c) => c !== by && !this.isSuperseded(c.id));
+    const role = core.ROLES.includes(set) ? set : shownBelow.length ? "section" : "prose";
+    const kind = this.kindOf(topId);
+    let made = null;
+    if (!by) {
+      const prefix = this.prefix();
+      if (!prefix || !core.validPrefix(prefix)) {
+        new Notice("Dendrite: set a valid dendrite_prefix first.");
+        return;
+      }
+      const id = core.newId(prefix, (x) => this.taken(x));
+      made = await this.createCardFile(id);
+      by = core.makeNode(id, "", null);
+    }
+    const restores = [];
+    for (const n of made ? [top] : [top, by]) {
+      const f = this.cardFile(n.id);
+      if (!f) continue;
+      const data = await this.app.vault.read(f);
+      restores.push({
+        path: f.path,
+        text: data,
+        ifBody: core.splitFrontmatter(data).body
+      });
+    }
+    const before = core.serialiseTree(this.root);
+    if (by.parent) core.remove(by);
+    core.insertSibling(top, by, false);
+    const shown = top.children.filter((c) => !this.isSuperseded(c.id));
+    const stacked = top.children.filter((c) => this.isSuperseded(c.id));
+    core.remove(top);
+    top.children = [];
+    for (const c of [...shown, top, ...stacked]) core.appendChild(by, c);
+    this.reindex();
+    this.active = by.id;
+    this.pushUndo({
+      tree: before,
+      active: topId,
+      files: [],
+      created: made ? [made.path] : [],
+      restores,
+      text: false
+    });
+    if (!await this.writeIndex()) {
+      this.undo.pop();
+      if (made) await this.app.fileManager.trashFile(made);
+      return;
+    }
+    const d = /* @__PURE__ */ new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    await writeProps(
+      this.app,
+      this.cardFile(topId),
+      { dendrite_superseded: today }
+    );
+    const props = { dendrite_superseded: null };
+    if (!core.ROLES.includes(this.cardProps(by.id).dendrite_role)) {
+      props.dendrite_role = role;
+    }
+    if (kind && !this.kindOf(by.id)) props.dendrite_kind = kind;
+    await writeProps(this.app, this.cardFile(by.id), props);
+    this.invalidate(topId);
+    this.invalidate(by.id);
+    await this.sweepStatuses();
+    this.render();
+    if (made) {
+      await this.startEdit(by.id);
+      if (this.editing && this.editing.id === by.id) {
+        this.editing.fresh = true;
+      }
+    }
+  }
+  /** An old version taken out of a stack, its note to the trash. */
+  async deleteVersion(id) {
+    const node = this.byId.get(id);
+    if (!node || !this.isSuperseded(id) || this.refuseWhileArriving()) return;
+    const doomed = [node, ...core.descendants(node)];
+    const files = [];
+    for (const n of doomed) {
+      const f = this.cardFile(n.id);
+      if (f) files.push({
+        path: f.path,
+        data: await this.app.vault.read(f)
+      });
+    }
+    this.snapshot(files);
+    core.remove(node);
+    this.reindex();
+    if (!await this.writeIndex()) {
+      this.undo.pop();
+      return;
+    }
+    for (const n of doomed) {
+      const f = this.cardFile(n.id);
+      this.invalidate(n.id);
+      if (f) await this.app.fileManager.trashFile(f);
+    }
+    this.render();
+  }
+  openStack(id) {
+    new StackModal(this, id).open();
   }
   async deleteActive() {
     const node = this.active && this.byId.get(this.active);
@@ -6277,8 +6550,7 @@ var DendriteView = class extends ItemView {
    */
   /** A card's role, if set: section, prose or notes. */
   roleOf(id) {
-    const r = this.cardProps(id).dendrite_role;
-    return core.ROLES.includes(r) ? r : null;
+    return core.cardRole(this.cardProps(id));
   }
   /** A card's kind, if set: table or figure. */
   kindOf(id) {
@@ -6352,6 +6624,27 @@ var DendriteView = class extends ItemView {
     };
     input.click();
   }
+  /** Submitted reviews for this manuscript, waiting on the bar. */
+  refreshInbox() {
+    const q = this.plugin.reviewQueue ? this.plugin.reviewQueue() : [];
+    const prefixes = [this.prefix(), ...this.formers()].filter(Boolean);
+    const out = q.filter((r) => r.state === "pending" && prefixes.includes(r.manuscript));
+    const key = (l) => l.map((r) => r.id).join(" ");
+    const changed = key(out) !== key(this.inbox);
+    this.inbox = out;
+    if (changed) this.updateStatuses();
+  }
+  /** Show a submitted review's comments to add, or ignore it. */
+  async openInbox(entry) {
+    return this.reviewModal(entry.title, entry.items, entry);
+  }
+  /** A submitted review added or ignored: not offered again. */
+  async takeInbox(entry, state) {
+    if (this.plugin.settleReview) {
+      await this.plugin.settleReview(entry.id, state);
+    }
+    this.refreshInbox();
+  }
   /** Show the review in a file, `data` its bytes, to choose from. */
   async reviewFrom(name, data) {
     const buf = require("buffer").Buffer.from(data);
@@ -6367,12 +6660,19 @@ var DendriteView = class extends ItemView {
       new Notice(`Dendrite: ${name} has no comments${json ? "" : " or tracked changes"}.`);
       return null;
     }
+    return this.reviewModal(name, items);
+  }
+  /**
+   * Show review items, each with where in the cards it was found, to
+   * choose which to add; `inbox`, the submitted review they came from.
+   */
+  async reviewModal(name, items, inbox = null) {
     const cards = await this.reviewCards();
     const rows = items.map((item) => {
       const at = review.locate(item, cards);
       return { item, at, use: !!at };
     });
-    const modal = new ReviewImportModal(this, name, rows);
+    const modal = new ReviewImportModal(this, name, rows, inbox);
     modal.open();
     return modal;
   }
@@ -6579,6 +6879,15 @@ var DendriteView = class extends ItemView {
       } else if (!info.prints && info.derived === "done" && !info.own) {
         show("done", "done \u2713");
       }
+      const stack = this.stackOf(id).length;
+      if (stack) {
+        const s = show("stack", `${stack + 1} versions`);
+        s.setAttr("aria-label", "Earlier versions of this card, kept and not printed. Click to see them");
+        s.onclick = (e) => {
+          e.stopPropagation();
+          this.openStack(id);
+        };
+      }
       if (core.isFlag(info.own)) card.addClass("is-flagged");
       if (!chip.childElementCount) continue;
       card.appendChild(chip);
@@ -6606,6 +6915,14 @@ var DendriteView = class extends ItemView {
         });
         s.setAttr("aria-label", "Renamed on another device; some card notes have not arrived under their new names. The board changes nothing until they do");
         s.onclick = () => this.refuseWhileArriving();
+      }
+      for (const entry of this.inbox) {
+        const s = this.statusEl.createSpan({
+          cls: "dendrite-status-chip is-revise",
+          text: `review: ${entry.items.length} from ` + reviewAuthors(entry.items)
+        });
+        s.setAttr("aria-label", `${entry.title}, submitted ${entry.received.slice(0, 10)}. Click to see its comments and choose which to add; nothing is written until you do`);
+        s.onclick = () => this.openInbox(entry);
       }
       if (this.oldCopies.length) {
         const n = this.oldCopies.length;
@@ -7667,10 +7984,10 @@ var DendritePreview = class extends ItemView {
       const k = props(id).dendrite_kind;
       return core.KINDS.includes(k) ? k : null;
     };
-    const roleOf = core.withKinds((id) => {
-      const r = props(id).dendrite_role;
-      return core.ROLES.includes(r) ? r : null;
-    }, kindOf);
+    const roleOf = core.withKinds(
+      (id) => core.cardRole(props(id)),
+      kindOf
+    );
     const hasHeading = (id) => {
       const f = this.cardFile(id);
       const s = f && this.app.metadataCache.getFileCache(f)?.sections;
@@ -8372,11 +8689,12 @@ var SuggestModal = class extends VersionModal {
   }
 };
 var ReviewImportModal = class extends Modal {
-  constructor(view, name, rows) {
+  constructor(view, name, rows, inbox = null) {
     super(view.app);
     this.view = view;
     this.name = name;
     this.rows = rows;
+    this.inbox = inbox;
   }
   onOpen() {
     const { contentEl, view, rows } = this;
@@ -8431,8 +8749,73 @@ var ReviewImportModal = class extends Modal {
     go.onclick = async () => {
       this.close();
       await view.addReview(rows.filter((x) => x.use), active);
+      if (this.inbox) await view.takeInbox(this.inbox, "added");
     };
+    if (this.inbox) {
+      buttons.createEl("button", { text: "Ignore this review" }).onclick = async () => {
+        this.close();
+        await view.takeInbox(this.inbox, "ignored");
+      };
+    }
     buttons.createEl("button", { text: "Cancel" }).onclick = () => this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var StackModal = class extends Modal {
+  constructor(view, id) {
+    super(view.app);
+    this.view = view;
+    this.id = id;
+  }
+  onOpen() {
+    this.ready = this.fill();
+  }
+  async fill() {
+    const { contentEl, view } = this;
+    contentEl.empty();
+    this.modalEl.addClass("dendrite-wide");
+    const node = view.byId.get(this.id);
+    this.titleEl.setText("Versions of " + (node && node.label ? node.label : core.shortId(this.id)));
+    contentEl.createEl("p", { text: "The newest first. Old versions are kept under the card, hidden on the board and left out of the manuscript. Making one current puts this card at the top of the stack; Ctrl+Z on the board undoes either." });
+    const text = async (id) => {
+      const f = view.cardFile(id);
+      return f ? core.splitFrontmatter(
+        await view.app.vault.read(f)
+      ).body.trim() : "";
+    };
+    const list = contentEl.createDiv({ cls: "dendrite-stack" });
+    const row = async (id, label) => {
+      const el = list.createDiv({ cls: "dendrite-stack-row" });
+      el.createDiv({ cls: "dendrite-review-meta", text: label });
+      el.createDiv({
+        cls: "dendrite-stack-text",
+        text: await text(id) || "(empty)"
+      });
+      return el;
+    };
+    await row(this.id, "Current");
+    for (const old of view.stackOf(this.id)) {
+      const when = view.cardProps(old.id).dendrite_superseded;
+      const el = await row(old.id, `Replaced ${when}, card ` + core.shortId(old.id));
+      const buttons = el.createDiv({ cls: "dendrite-version-choices" });
+      buttons.createEl("button", {
+        cls: "mod-cta",
+        text: "Make current"
+      }).onclick = async () => {
+        this.close();
+        await view.promote(this.id, old.id);
+      };
+      buttons.createEl("button", {
+        cls: "mod-warning",
+        text: "Delete"
+      }).onclick = async () => {
+        await view.deleteVersion(old.id);
+        if (view.stackOf(this.id).length) await this.fill();
+        else this.close();
+      };
+    }
   }
   onClose() {
     this.contentEl.empty();
@@ -8586,6 +8969,7 @@ var DendriteSettings = class extends PluginSettingTab {
   // are closed, not on every keystroke while the folder is typed.
   hide() {
     this.plugin.syncLinter();
+    this.plugin.syncReviewApi();
   }
   display() {
     const { containerEl } = this;
@@ -8657,6 +9041,22 @@ var DendriteSettings = class extends PluginSettingTab {
       s.fallbackBib = v.trim();
       save();
     }));
+    heading("Review");
+    new Setting(containerEl).setName("Accept reviews from programs on this computer").setDesc(`Listens on 127.0.0.1 for review comments sent by a program, such as an agent, with a key. Each waits on its manuscript's board, and nothing is written until you add it there. The port and key are in ${discoveryPath()} while Dendrite listens. Desktop only.`).addToggle((tg) => tg.setValue(!!s.reviewApi).onChange(async (v) => {
+      s.reviewApi = v;
+      await save();
+      await this.plugin.syncReviewApi();
+    }));
+    new Setting(containerEl).setName("Review port").setDesc("Applied when settings are closed.").addText((t) => t.setValue(String(s.reviewApiPort)).onChange((v) => {
+      const n = Number(v);
+      s.reviewApiPort = Number.isInteger(n) && n > 0 && n < 65536 ? n : 27130;
+      save();
+    })).addButton((b) => b.setButtonText("New key").onClick(async () => {
+      s.reviewApiKey = "";
+      await save();
+      await this.plugin.syncReviewApi(true);
+      new Notice(`Dendrite: a new review key is in ${discoveryPath()}; the old one no longer works.`);
+    }));
     heading("Other plugins");
     new Setting(containerEl).setName("Keep Linter out of the writing folder").setDesc("Adds the writing folder to the Linter plugin's folders to ignore, so its rules never rewrite a card. Off removes the entry, if Dendrite added it.").addToggle((tg) => tg.setValue(s.manageLinter).onChange((v) => {
       s.manageLinter = v;
@@ -8669,6 +9069,9 @@ var DendriteSettings = class extends PluginSettingTab {
   }
 };
 module.exports = class DendritePlugin extends Plugin {
+  onunload() {
+    this.stopReviewApi();
+  }
   async onload() {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
     this.history = new History(idbStore());
@@ -8709,6 +9112,7 @@ module.exports = class DendritePlugin extends Plugin {
       callback: () => new NewManuscriptModal(this).open()
     });
     this.markdownLeaves = /* @__PURE__ */ new WeakMap();
+    this.app.workspace.onLayoutReady(() => this.syncReviewApi());
     this.registerEvent(this.app.workspace.on(
       "file-open",
       (f) => this.onFileOpen(f)
@@ -8792,6 +9196,196 @@ module.exports = class DendritePlugin extends Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+  // ---- reviews submitted by programs ---------------------------------
+  /**
+   * Listen for reviews when the setting is on, on its port and key,
+   * and stop when it is off; `force` restarts, as for a new key.
+   */
+  async syncReviewApi(force = false) {
+    const s = this.settings;
+    const want = s.reviewApi && Platform.isDesktopApp && Number.isInteger(s.reviewApiPort) ? s.reviewApiPort : null;
+    if (!force && this.reviewServer && want === this.reviewPort && s.reviewApiKey === this.reviewKey) return;
+    if (!force && !this.reviewServer && want === null) return;
+    await this.stopReviewApi();
+    if (want === null) return;
+    if (!s.reviewApiKey) {
+      s.reviewApiKey = require("crypto").randomBytes(24).toString("hex");
+      await this.saveSettings();
+    }
+    try {
+      this.reviewServer = await require_reviewapi().start({
+        port: want,
+        token: s.reviewApiKey,
+        submit: (d) => this.submitReview(d),
+        status: (id) => this.reviewStatus(id)
+      });
+    } catch (err) {
+      new Notice(`Dendrite: could not listen for reviews on port ${want} (${err.message}). Another program, or Dendrite in another vault, may have it; choose another port in settings.`, 1e4);
+      return;
+    }
+    this.reviewPort = want;
+    this.reviewKey = s.reviewApiKey;
+    const fs = require("fs");
+    const file = discoveryPath();
+    fs.mkdirSync(require("path").dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      url: `http://127.0.0.1:${this.reviewServer.address().port}/dendrite/review`,
+      key: s.reviewApiKey,
+      vault: this.app.vault.getName(),
+      pid: process.pid
+    }, null, 2) + "\n", { mode: 384 });
+  }
+  async stopReviewApi() {
+    const server = this.reviewServer;
+    if (!server) return;
+    this.reviewServer = null;
+    this.reviewPort = null;
+    await new Promise((r) => server.close(() => r()));
+    try {
+      const fs = require("fs");
+      const file = discoveryPath();
+      const d = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (d.pid === process.pid && d.key === this.reviewKey) {
+        fs.unlinkSync(file);
+      }
+    } catch (err) {
+    }
+  }
+  reviewQueue() {
+    return this.settings.reviewQueue || [];
+  }
+  openViews() {
+    return this.app.workspace.getLeavesOfType(VIEW).map((l) => l.view).filter((v) => v instanceof DendriteView);
+  }
+  /** The index with `prefix`, or the one it was renamed to. */
+  indexWithPrefix(prefix) {
+    return this.app.vault.getMarkdownFiles().find((f) => prefixOf(this.app, f) === prefix) || successorOf(this.app, prefix);
+  }
+  /**
+   * What each card of a manuscript prints, for finding passages in: the
+   * open board's own when there is one, so unsaved typing counts.
+   */
+  async reviewCardsOf(file) {
+    const open = this.openViews().find((v) => v.file === file);
+    if (open) return open.reviewCards();
+    const app = this.app;
+    const text = await app.vault.cachedRead(file);
+    const root = core.parseIndex(core.splitFrontmatter(text).body).root;
+    const cardOf = (id) => {
+      const f = app.metadataCache.getFirstLinkpathDest(id, file.path);
+      return f instanceof TFile ? f : null;
+    };
+    const props = (id) => {
+      const f = cardOf(id);
+      return f && app.metadataCache.getFileCache(f)?.frontmatter || {};
+    };
+    const kindOf = (id) => {
+      const k = props(id).dendrite_kind;
+      return core.KINDS.includes(k) ? k : null;
+    };
+    const roleOf = core.withKinds(
+      (id) => core.cardRole(props(id)),
+      kindOf
+    );
+    const out = [];
+    for (const n of core.allNodes(root)) {
+      const f = cardOf(n.id);
+      if (!f) continue;
+      const body = core.splitFrontmatter(await app.vault.cachedRead(f)).body;
+      out.push({
+        id: n.id,
+        text: core.printedOnly(body, core.roleFor(n, roleOf))
+      });
+    }
+    return out;
+  }
+  /**
+   * Queue a review for its manuscript's board, where it is added or
+   * ignored; nothing is written to a card here. `data`: { manuscript,
+   * title?, items }, items as an imported JSON review's. Answers
+   * { status, json } with where its passages were found. Other plugins
+   * may call this directly; programs reach it over the local port.
+   */
+  async submitReview(data) {
+    const bad = (status, error) => ({ status, json: { error } });
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      return bad(400, "send { manuscript, title, items }");
+    }
+    const prefix = typeof data.manuscript === "string" ? data.manuscript.trim() : "";
+    if (!prefix) {
+      return bad(400, 'say which manuscript, by its prefix, as "manuscript"');
+    }
+    const file = this.indexWithPrefix(prefix);
+    if (!file) return bad(404, `no manuscript has the prefix ${prefix}`);
+    let items;
+    try {
+      items = review.readReviewJson(JSON.stringify(data));
+    } catch (err) {
+      return bad(400, err.message);
+    }
+    if (!items.length) return bad(400, "no items");
+    const current = prefixOf(this.app, file);
+    const title = String(data.title || "").trim() || "Review";
+    const key = String(require_docx().crc32(Buffer.from(
+      JSON.stringify([current, title, items]),
+      "utf8"
+    )));
+    const cards = await this.reviewCardsOf(file);
+    let found = 0;
+    const missing = [];
+    items.forEach((it, k) => {
+      if (review.locate(it, cards)) found++;
+      else missing.push({
+        n: k + 1,
+        card: it.card || null,
+        quote: it.quote
+      });
+    });
+    const queue = this.settings.reviewQueue = this.settings.reviewQueue || [];
+    let entry = queue.find((r) => r.key === key && r.state === "pending");
+    if (!entry) {
+      entry = {
+        id: Math.random().toString(16).slice(2, 10),
+        key,
+        received: (/* @__PURE__ */ new Date()).toISOString(),
+        manuscript: current,
+        title,
+        items,
+        state: "pending"
+      };
+      queue.push(entry);
+      const decided = queue.filter((r) => r.state !== "pending");
+      const drop = new Set(decided.slice(0, -50));
+      this.settings.reviewQueue = queue.filter((r) => !drop.has(r));
+      await this.saveSettings();
+      new Notice(`Dendrite: ${title}: ${items.length} comment${items.length === 1 ? "" : "s"} from ${reviewAuthors(items)}, for ${file.basename}. Click "review" on its board's bar to choose which to add.`, 0);
+      for (const v of this.openViews()) v.refreshInbox();
+    }
+    return { status: 202, json: {
+      id: entry.id,
+      state: entry.state,
+      manuscript: current,
+      found,
+      missing
+    } };
+  }
+  async reviewStatus(id) {
+    const r = this.reviewQueue().find((x) => x.id === id);
+    return r ? { status: 200, json: {
+      id,
+      state: r.state,
+      manuscript: r.manuscript,
+      title: r.title
+    } } : { status: 404, json: { error: "no such review" } };
+  }
+  async settleReview(id, state) {
+    const r = this.reviewQueue().find((x) => x.id === id);
+    if (!r) return;
+    r.state = state;
+    r.decided = (/* @__PURE__ */ new Date()).toISOString();
+    await this.saveSettings();
+    for (const v of this.openViews()) v.refreshInbox();
   }
   linter() {
     const p = this.app.plugins && this.app.plugins.plugins;

@@ -448,6 +448,16 @@ function columns(root, kids = (n) => n.children) {
  */
 const ROLES = ['section', 'prose', 'notes', 'scaffolding'];
 
+/**
+ * A card's set role from its properties, or null. A card superseded by
+ * another, kept in its stack, prints nothing, as a left-out card.
+ */
+function cardRole(fm) {
+    if (!fm) return null;
+    if (fm.dendrite_superseded) return 'notes';
+    return ROLES.includes(fm.dendrite_role) ? fm.dendrite_role : null;
+}
+
 function roleFor(node, roleOf) {
     const set = roleOf ? roleOf(node.id) : null;
     if (ROLES.includes(set)) return set;
@@ -1491,7 +1501,7 @@ module.exports = {
     alignColumns, tallTop, caretOffset, parseAmount, convert, quotas, fmtNum,
     splitText, mergeText,
     mergeIntoAbove, mergeIntoParent, moveNode,
-    flowPath, threadPath, exportSegments, roleFor, ROLES, KINDS,
+    flowPath, threadPath, exportSegments, roleFor, cardRole, ROLES, KINDS,
     withKinds, floatLabels, countManuscript,
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,

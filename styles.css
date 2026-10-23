@@ -1340,3 +1340,15 @@ button.dendrite-review-btn:hover {
     overflow-y: auto;
     margin-bottom: 12px;
 }
+
+/* A card's old versions, in the versions dialog. */
+.dendrite-stack-row {
+    border-top: 1px solid var(--background-modifier-border);
+    padding: 8px 0;
+}
+.dendrite-stack-text {
+    white-space: pre-wrap;
+    max-height: 12em;
+    overflow-y: auto;
+    color: var(--text-muted);
+}

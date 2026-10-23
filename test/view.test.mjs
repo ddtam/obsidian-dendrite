@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const h = require('./harness.cjs');
 const { DendriteView } = require('../src/main.js');
+const core = require('../src/core.js');
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 const INDEX = 'W/Grant/Grant.md';
@@ -1071,6 +1072,8 @@ test('settings are grouped under headings by what they affect', () => {
         'Typewriter scrolling', 'Autosave delay',
         '## PDF and Word export', 'Pandoc', 'PDF engine', 'Zotero port',
         'Fallback .bib',
+        '## Review', 'Accept reviews from programs on this computer',
+        'Review port',
         '## Other plugins', 'Keep Linter out of the writing folder',
         'Clean up cards with Linter',
     ]);
@@ -2387,4 +2390,267 @@ test('a JSON review list opens the same dialog, each comment found in the ' +
     assert.equal(text(cardPath('G-bbbbb')), B);
     assert.equal(await view.reviewFrom('bad.json', Buffer.from('{')),
                  null, 'unreadable: a notice, no dialog');
+});
+
+test('a review submitted for a manuscript is queued with where its ' +
+     'passages are, offered on its board, and taken only by adding or ' +
+     'ignoring it', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'The cohort is composed of paired samples.';
+    const B = 'Each patient gave paired samples.';
+    const { app, view, text } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': A, 'G-bbbbb': B });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    let saved = 0;
+    p.saveData = async () => { saved++; };
+    p.openViews = () => [view];
+    view.plugin = Object.assign(view.plugin, {
+        settings: p.settings, reviewQueue: () => p.reviewQueue(),
+        settleReview: (id, st) => p.settleReview(id, st) });
+    const item = (card, quote, text) => ({ card, quote, text,
+        author: 'Claude', date: '2026-10-23' });
+    h.notices.length = 0;
+    const bad = await p.submitReview({ manuscript: 'X', items: [] });
+    assert.equal(bad.status, 404);
+    assert.match(bad.json.error, /no manuscript has the prefix X/);
+    assert.equal((await p.submitReview({ manuscript: 'G',
+        items: [{ quote: 'q' }] })).status, 400);
+    assert.equal((await p.submitReview({ items: [] })).status, 400);
+    const sent = { manuscript: 'G', title: 'RAC review', items: [
+        item('aaaaa', 'paired samples', 'How many?'),
+        item('bbbbb', 'not in the card', 'Lost.')] };
+    const out = await p.submitReview(sent);
+    assert.equal(out.status, 202);
+    assert.equal(out.json.state, 'pending');
+    assert.equal(out.json.found, 1);
+    assert.deepEqual(out.json.missing, [{ n: 2, card: 'bbbbb',
+                                          quote: 'not in the card' }]);
+    assert.equal((await p.submitReview(sent)).json.id, out.json.id,
+                 'the same review again is not queued twice');
+    assert.equal(p.settings.reviewQueue.length, 1);
+    assert.ok(saved >= 1, 'kept until decided');
+    assert.equal(h.notices.length, 1);
+    assert.match(h.notices[0], /RAC review: 2 comments from Claude/);
+    const chips = () => [...view.statusEl.querySelectorAll(
+        '.dendrite-status-chip')].filter((s) =>
+        /^review/.test(s.textContent)).map((s) => s.textContent);
+    assert.deepEqual(chips(), ['review: 2 from Claude']);
+    // Cancel leaves it; Add takes it.
+    await view.openInbox(view.inbox[0]);
+    const m = h.obsidian.lastModal;
+    assert.match(m.titleEl.textContent, /RAC review/);
+    [...m.contentEl.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Cancel').onclick();
+    assert.equal(view.inbox.length, 1);
+    await view.openInbox(view.inbox[0]);
+    await h.obsidian.lastModal.contentEl.querySelector('.mod-cta').onclick();
+    assert.match(text(cardPath('G-aaaaa')),
+                 /==paired samples==%%\[!review\] Claude/);
+    assert.deepEqual(chips(), []);
+    assert.deepEqual((await p.reviewStatus(out.json.id)).json.state,
+                     'added');
+    assert.equal((await p.reviewStatus('nope')).status, 404);
+    // Ignored: nothing written.
+    const two = await p.submitReview({ manuscript: 'G', items: [
+        item('bbbbb', 'paired samples', 'Which?')] });
+    await view.openInbox(view.inbox[0]);
+    await [...h.obsidian.lastModal.contentEl.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Ignore this review').onclick();
+    assert.equal(text(cardPath('G-bbbbb')), B);
+    assert.equal((await p.reviewStatus(two.json.id)).json.state,
+                 'ignored');
+    assert.deepEqual(chips(), []);
+});
+
+test('the card menu keeps its exports in one submenu', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'Text.' });
+    view.active = 'G-aaaaa';
+    view.cardMenu(view.cardEls.get('G-aaaaa'), null);
+    const titles = h.obsidian.lastMenu.items.map((i) => i.title);
+    assert.ok(!titles.some((t) => /to (markdown|PDF|Word)/.test(t)));
+    const exp = h.obsidian.lastMenu.items.find((i) =>
+        i.title === 'Export this branch');
+    assert.ok(exp && exp.submenu, 'a submenu');
+    assert.deepEqual(exp.submenu.items.map((i) => i.title),
+                     ['Markdown', 'PDF', 'Word']);
+});
+
+test('turned on, Dendrite listens for reviews with a key it writes to the ' +
+     'discovery file, and removes the file when it stops', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dendrite-api-'));
+    const file = path.join(dir, 'review-api.json');
+    process.env.DENDRITE_REVIEW_API_FILE = file;
+    const { app } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'Each patient gave paired samples.' });
+    app.vault.getName = () => 'Vault';
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewApi: true, reviewApiPort: 0, reviewApiKey: '',
+                   reviewQueue: [] };
+    p.saveData = async () => {};
+    p.openViews = () => [];
+    try {
+        await p.syncReviewApi();
+        const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.equal(d.key.length, 48, 'a key was made');
+        assert.equal(d.key, p.settings.reviewApiKey);
+        assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+        const res = await fetch(d.url, { method: 'POST', headers: {
+            authorization: `Bearer ${d.key}`,
+            'content-type': 'application/json' },
+            body: JSON.stringify({ manuscript: 'G', items: [
+                { card: 'aaaaa', quote: 'paired samples', text: 'How?',
+                  author: 'Claude' }] }) });
+        assert.equal(res.status, 202);
+        const out = await res.json();
+        assert.equal(out.found, 1, 'found without a board open');
+        assert.equal(p.settings.reviewQueue.length, 1);
+        const st = await fetch(`${d.url}/${out.id}`, { headers: {
+            authorization: `Bearer ${d.key}` } });
+        assert.equal((await st.json()).state, 'pending');
+        p.settings.reviewApi = false;
+        await p.syncReviewApi();
+        assert.ok(!fs.existsSync(file), 'stopped: the file is gone');
+        await assert.rejects(fetch(d.url, { method: 'POST' }));
+    } finally {
+        await p.stopReviewApi();
+        delete process.env.DENDRITE_REVIEW_API_FILE;
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+const STACK_INDEX = '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+    '    - [[G-ccccc|C]]\n- [[G-bbbbb|B]]\n';
+
+async function exported(view) {
+    const bodies = new Map();
+    for (const n of core.allNodes(view.root)) {
+        const f = view.cardFile(n.id);
+        if (f) {
+            bodies.set(n.id, core.splitFrontmatter(
+                await view.app.vault.read(f)).body);
+        }
+    }
+    return core.exportMarkdown(view.root.children, (id) => bodies.get(id),
+                               1, null, (id) => view.printRoleOf(id));
+}
+
+test('a card replaced by its child goes into a stack under it: hidden, ' +
+     'not printed, shown as versions, and brought back from there',
+     async () => {
+    const { view, read } = await open(STACK_INDEX, {
+        'G-aaaaa': '---\ndendrite_role: prose\n---\nOld paragraph.',
+        'G-ccccc': 'New paragraph.', 'G-bbbbb': 'Next.' });
+    assert.match(await exported(view), /Old paragraph[^]*New paragraph/,
+                 'before: both print');
+    await view.select('G-ccccc');
+    view.cardMenu(view.cardEls.get('G-ccccc'), null);
+    const replace = h.obsidian.lastMenu.items.find((i) =>
+        i.title === 'Replace the parent card with this one');
+    assert.ok(replace, 'offered on a child card');
+    await replace.click();
+    await tick();
+    assert.equal(core.serialiseTree(view.root).split('\n')
+        .filter(Boolean).length, 3);
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-ccccc', 'G-bbbbb'], 'the child takes its place');
+    assert.deepEqual(view.byId.get('G-ccccc').children.map((n) => n.id),
+                     ['G-aaaaa'], 'the old card is under it');
+    assert.match(read(cardPath('G-aaaaa')), /dendrite_superseded: \d{4}-/);
+    assert.match(read(cardPath('G-ccccc')), /dendrite_role: prose/,
+                 'the new card prints as the old one did');
+    assert.ok(!view.cardEls.has('G-aaaaa'), 'hidden from the board');
+    assert.ok(!view.cardEls.get('G-ccccc').classList
+        .contains('has-children'));
+    const out = await exported(view);
+    assert.match(out, /New paragraph/);
+    assert.doesNotMatch(out, /Old paragraph/, 'the old one does not print');
+    const chip = [...view.cardEls.get('G-ccccc')
+        .querySelectorAll('.dendrite-status-chip')]
+        .find((s) => /versions/.test(s.textContent));
+    assert.equal(chip && chip.textContent, '2 versions');
+    // Brought back from the stack.
+    chip.onclick({ stopPropagation() {} });
+    const m = h.obsidian.lastModal;
+    await m.ready;
+    assert.match(m.contentEl.textContent, /Old paragraph/);
+    await [...m.contentEl.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Make current').onclick();
+    await tick();
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-aaaaa', 'G-bbbbb']);
+    assert.deepEqual(view.byId.get('G-aaaaa').children.map((n) => n.id),
+                     ['G-ccccc']);
+    assert.doesNotMatch(read(cardPath('G-aaaaa')), /superseded/);
+    assert.match(read(cardPath('G-ccccc')), /dendrite_superseded/);
+    assert.match(await exported(view), /Old paragraph/);
+    assert.doesNotMatch(await exported(view), /New paragraph/);
+    // Each step undoes in one.
+    await view.doUndo();
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-ccccc', 'G-bbbbb']);
+    await view.doUndo();
+    assert.equal(core.serialiseTree(view.root), core.serialiseTree(
+        core.parseIndex(core.splitFrontmatter(STACK_INDEX).body).root));
+    assert.doesNotMatch(read(cardPath('G-aaaaa')), /superseded/);
+    assert.match(await exported(view), /Old paragraph[^]*New paragraph/);
+});
+
+test('a new version of a card starts empty in its place, with the old one ' +
+     'stacked under it and its children moved up to the new one',
+     async () => {
+    const { view, read } = await open(STACK_INDEX, {
+        'G-aaaaa': '# Aims\nOld.', 'G-ccccc': 'Child.', 'G-bbbbb': 'B.' });
+    await view.select('G-aaaaa');
+    view.cardMenu(view.cardEls.get('G-aaaaa'), null);
+    await h.obsidian.lastMenu.items.find((i) =>
+        i.title === 'New version of this card').click();
+    await tick();
+    const top = view.root.children[0];
+    assert.notEqual(top.id, 'G-aaaaa');
+    assert.equal(view.editing && view.editing.id, top.id, 'editing it');
+    assert.deepEqual(top.children.map((n) => n.id), ['G-ccccc', 'G-aaaaa'],
+                     'its children, then the old card');
+    assert.match(read(cardPath(top.id)), /dendrite_role: section/,
+                 'prints as the old card did');
+    assert.deepEqual(view.kidsOf(top).map((n) => n.id), ['G-ccccc']);
+    // Moving the last shown child down passes no hidden card.
+    await view.endEdit();
+    await view.select('G-ccccc');
+    await view.structural('down');
+    assert.deepEqual(top.children.map((n) => n.id),
+                     ['G-ccccc', 'G-aaaaa'], 'nothing to move past');
+    // Undone while still empty, the new card goes.
+    await view.doUndo();
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-aaaaa', 'G-bbbbb']);
+    assert.equal(read(cardPath(top.id)), undefined, 'its note is gone');
+});
+
+test('an old version can be deleted from the stack, undoably',
+     async () => {
+    const { view, read } = await open(STACK_INDEX, {
+        'G-aaaaa': '---\ndendrite_role: prose\n---\nOld.',
+        'G-ccccc': 'New.', 'G-bbbbb': 'B.' });
+    await view.promote('G-aaaaa', 'G-ccccc');
+    await view.openStack('G-ccccc');
+    await h.obsidian.lastModal.ready;
+    await [...h.obsidian.lastModal.contentEl.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Delete').onclick();
+    assert.equal(read(cardPath('G-aaaaa')), undefined);
+    assert.deepEqual(view.byId.get('G-ccccc').children, []);
+    await view.doUndo();
+    assert.match(read(cardPath('G-aaaaa')), /Old\./);
+    assert.deepEqual(view.byId.get('G-ccccc').children.map((n) => n.id),
+                     ['G-aaaaa']);
 });

@@ -268,3 +268,65 @@ test('a review file in JSON gives comments, each searched for only in ' +
                   /item 1 has no text/);
     assert.throws(() => r.readReviewJson('{"a": 1}'), /a list of items/);
 });
+
+test('the review endpoint takes JSON only with its key, refuses web ' +
+     'pages, and answers with what the plugin says', async () => {
+    const api = require('../src/reviewapi.js');
+    const got = [];
+    const server = await api.start({
+        port: 0, token: 'k3y',
+        async submit(body) {
+            got.push(body);
+            return { status: 202, json: { id: 'r1', state: 'pending' } };
+        },
+        async status(id) {
+            return id === 'r1' ? { status: 200, json: { state: 'added' } } :
+                { status: 404, json: { error: 'no such review' } };
+        } });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const auth = { authorization: 'Bearer k3y' };
+    const json = { 'content-type': 'application/json' };
+    const call = async (path, init = {}) => {
+        const res = await fetch(base + path, init);
+        return [res.status, await res.json()];
+    };
+    try {
+        const body = JSON.stringify({ manuscript: 'G', items: [] });
+        assert.deepEqual(await call('/dendrite/review', {
+            method: 'POST', headers: { ...auth, ...json }, body }),
+            [202, { id: 'r1', state: 'pending' }]);
+        assert.deepEqual(got, [{ manuscript: 'G', items: [] }]);
+        assert.equal((await call('/dendrite/review', {
+            method: 'POST', headers: json, body }))[0], 401, 'no key');
+        assert.equal((await call('/dendrite/review', {
+            method: 'POST', headers: { authorization: 'Bearer no', ...json },
+            body }))[0], 401, 'wrong key');
+        assert.equal((await call('/dendrite/review', {
+            method: 'POST', headers: { ...auth, ...json,
+                                       origin: 'https://example.com' },
+            body }))[0], 403, 'a web page');
+        assert.equal((await call('/dendrite/review', {
+            method: 'OPTIONS', headers: { origin: 'https://example.com' } }))
+            [0], 403, 'no cross-origin preflight');
+        assert.equal((await call('/dendrite/review', {
+            method: 'POST', headers: { ...auth,
+                                       'content-type': 'text/plain' },
+            body }))[0], 415);
+        assert.equal((await call('/dendrite/review', {
+            method: 'POST', headers: { ...auth, ...json }, body: '{' }))
+            [0], 400);
+        assert.equal((await call('/dendrite/review', {
+            method: 'POST', headers: { ...auth, ...json },
+            body: 'x'.repeat((1 << 20) + 1) }))[0], 413);
+        assert.deepEqual(await call('/dendrite/review/r1',
+                                    { headers: auth }),
+                         [200, { state: 'added' }]);
+        assert.equal((await call('/dendrite/review/zz',
+                                 { headers: auth }))[0], 404);
+        assert.equal((await call('/elsewhere', { headers: auth }))[0], 404);
+        assert.equal(got.length, 1, 'only the good request reached it');
+    } finally {
+        await new Promise((r) => server.close(r));
+    }
+    await assert.rejects(api.start({ port: -1, token: 'k' }));
+});

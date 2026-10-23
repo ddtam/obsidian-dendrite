@@ -118,10 +118,7 @@ export function loadManuscript(indexPath, opts = {}) {
     };
     const props = (id) => (cards.get(id) || {}).props || {};
     const bodyOf = (id) => (cards.has(id) ? cards.get(id).body : '');
-    const roleOf = (id) => {
-        const r = props(id).dendrite_role;
-        return core.ROLES.includes(r) ? r : null;
-    };
+    const roleOf = (id) => core.cardRole(props(id));
     const quotaOf = (id) => {
         const q = core.parseLimit(props(id).dendrite_limit);
         return q ? Object.assign(q, {
