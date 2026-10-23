@@ -2596,6 +2596,9 @@ test('a card replaced by its child goes into a stack under it: hidden, ' +
         .querySelectorAll('.dendrite-status-chip')]
         .find((s) => /versions/.test(s.textContent));
     assert.equal(chip && chip.textContent, '2 versions');
+    assert.ok(view.cardEls.get('G-ccccc').classList.contains('has-stack'),
+              'drawn with a card behind it');
+    assert.ok(!view.cardEls.get('G-bbbbb').classList.contains('has-stack'));
     // Brought back from the stack.
     view.openStack('G-ccccc');
     const m = h.obsidian.lastModal;
@@ -2787,6 +2790,18 @@ test('a card\'s old versions fan out in the column to its right, read ' +
     await chip().onclick({ stopPropagation() {} });
     await tick();
     assert.equal(fanned().length, 0, 'folded away');
+    // Drawn as a card, its text in a card's body; Escape folds it away.
+    await chip().onclick({ stopPropagation() {} });
+    assert.ok(fanned()[0].querySelector(
+        ':scope > .dendrite-card-body .dendrite-md'));
+    assert.ok(!fanned()[0].classList.contains('dendrite-card'),
+              'not a card the board selects or edits');
+    view.contentEl.dispatchEvent(new view.contentEl.ownerDocument
+        .defaultView.KeyboardEvent('keydown', { key: 'Escape',
+                                                bubbles: true }));
+    await tick();
+    assert.equal(fanned().length, 0, 'Escape folds it away');
+    assert.equal(view.fannedId, null);
 });
 
 test('a review comment on wording only in an old version goes on the ' +

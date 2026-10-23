@@ -102,18 +102,37 @@ test('the picker page is served at a secret path with the token, key ' +
         const u = new URL(url);
         assert.equal((await fetch(`${u.origin}/picked?id=x`)).status, 404,
                      'not without the secret path');
+        // What the picker says on the way is passed on as it happens.
+        await fetch(`${url}/event?what=loaded`);
+        await fetch(`${url}/event?what=${encodeURIComponent(
+            'error: The API developer key is invalid.')}`);
         await fetch(`${url}/picked?id=DOC1&name=${encodeURIComponent(
             'RAC draft')}`);
     };
+    const events = [];
+    let base = '';
+    const opened = (url) => {
+        base = new URL(url).origin;
+        return openUrl(url);
+    };
     const got = await g.pick({ token: 'A', apiKey: 'K', client: CLIENT,
-                               openUrl, http, crypto });
+                               openUrl: opened, http, crypto, port: 27199,
+                               onEvent: (e) => events.push(e) });
+    assert.equal(base, 'http://localhost:27199',
+                 'served from the one origin registered with Google');
     assert.deepEqual(got, { id: 'DOC1', name: 'RAC draft' });
+    assert.deepEqual(events, ['loaded', 'error: The API developer key ' +
+                              'is invalid.']);
     assert.match(page, /"token":"A"/);
     assert.match(page, /"key":"K"/);
     assert.match(page, /"app":"9519"/);
     assert.match(page, /apis\.google\.com\/js\/api\.js/);
+    assert.match(page, /\/event\?what=/, 'the page reports what happens');
+    assert.match(page, /setOrigin\(O\.origin\)/);
+    assert.match(page, /"origin":"http:\/\/localhost:27199"/);
+    assert.match(page, /Select/, 'and says to press Select');
     const cancelled = await g.pick({ token: 'A', apiKey: 'K',
-        client: CLIENT, http, crypto,
+        client: CLIENT, http, crypto, port: 0,
         openUrl: (url) => { fetch(`${url}/cancel`); } });
     assert.equal(cancelled, null);
 });
@@ -194,4 +213,16 @@ test('a doc\'s review is its comments, every page, then its suggested ' +
         message: 'File not found' } } });
     await assert.rejects(g.fetchReview({ docId: 'D', token: 'T',
         request: missing }), /404: File not found/);
+});
+
+test('a second try at the picker closes the first, which wanted the same ' +
+     'port', async () => {
+    const first = g.pick({ token: 'A', apiKey: 'K', client: CLIENT, http,
+                           crypto, port: 27198, openUrl: () => {} });
+    await new Promise((r) => setTimeout(r, 30));
+    const second = g.pick({ token: 'A', apiKey: 'K', client: CLIENT, http,
+        crypto, port: 27198,
+        openUrl: (url) => { fetch(`${url}/picked?id=D2&name=N`); } });
+    await assert.rejects(first, /replaced by a new try/);
+    assert.deepEqual(await second, { id: 'D2', name: 'N' });
 });

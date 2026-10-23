@@ -13,6 +13,11 @@ const DOCS = 'https://docs.googleapis.com/v1/documents/';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files/';
 const REVOKE = 'https://oauth2.googleapis.com/revoke';
 const WAIT_MS = 10 * 60 * 1000;
+// Where the picker page is served: Google grants a picked file only to
+// a page from an origin registered on the Cloud project, and a
+// registered origin names its port.
+const PICKER_PORT = 27131;
+const pickerOrigin = (port) => `http://localhost:${port}`;
 
 /** The OAuth client from the JSON file Google Cloud gives. */
 function readClient(text) {
@@ -59,7 +64,7 @@ function form(obj) {
  * res)` answers each request and returns a value to finish with, or
  * undefined to keep waiting. Resolves with { base, done }.
  */
-function loopback(http, route) {
+function loopback(http, route, port = 0) {
     return new Promise((resolve, reject) => {
         let finish;
         let fail;
@@ -87,9 +92,10 @@ function loopback(http, route) {
             server.close();
         });
         server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => {
+        server.listen(port, '127.0.0.1', () => {
             resolve({ base: `http://127.0.0.1:${server.address().port}`,
-                      done });
+                      done, close: () => fail(new Error('replaced by a ' +
+                                                        'new try')) });
         });
     });
 }
@@ -191,55 +197,99 @@ function pickerPage(o) {
 <title>Dendrite: link a Google Doc</title>
 <style>body { font-family: sans-serif; margin: 2em; }</style>
 </head><body>
-<p id="m">Opening Google's file picker. Choose the manuscript's doc.</p>
+<p id="m">Opening Google's file picker. Click the manuscript's doc, then
+press Select, or double-click it.</p>
 <script>
 const O = ${j(o)};
 function say(t) { document.getElementById('m').textContent = t; }
-function tell(path) {
-  fetch(path).finally(() => say('Done. You can close this tab and go ' +
-                                'back to Obsidian.'));
+// Each step is told to Dendrite, which shows it in Obsidian.
+function report(what) {
+  fetch(O.back + '/event?what=' + encodeURIComponent(what))
+    .catch(() => {});
+}
+window.addEventListener('error', (e) => report('error: ' + e.message));
+function tell(path, text) {
+  say(text);
+  fetch(path).catch(() => say(text + ' Dendrite did not answer; is ' +
+                              'Obsidian still open?'));
 }
 function onCallback(d) {
   const P = google.picker;
-  if (d[P.Response.ACTION] === P.Action.PICKED) {
+  const action = d[P.Response.ACTION];
+  if (action === P.Action.PICKED) {
     const doc = d[P.Response.DOCUMENTS][0];
     tell(O.back + '/picked?id=' + encodeURIComponent(doc[P.Document.ID]) +
-         '&name=' + encodeURIComponent(doc[P.Document.NAME]));
-  } else if (d[P.Response.ACTION] === P.Action.CANCEL) {
-    tell(O.back + '/cancel');
+         '&name=' + encodeURIComponent(doc[P.Document.NAME]),
+         'Linked ' + doc[P.Document.NAME] + '. You can close this tab ' +
+         'and go back to Obsidian.');
+  } else if (action === P.Action.CANCEL) {
+    tell(O.back + '/cancel', 'Cancelled. You can close this tab.');
+  } else {
+    report(String(action));
   }
 }
 function onApi() {
-  gapi.load('picker', () => {
-    const P = google.picker;
-    const view = new P.DocsView(P.ViewId.DOCUMENTS)
-      .setMode(P.DocsViewMode.LIST);
-    new P.PickerBuilder().addView(view).setOAuthToken(O.token)
-      .setDeveloperKey(O.key).setAppId(O.app).setCallback(onCallback)
-      .build().setVisible(true);
-  });
+  try {
+    gapi.load('picker', { callback: () => {
+      try {
+        const P = google.picker;
+        const view = new P.DocsView(P.ViewId.DOCUMENTS)
+          .setMode(P.DocsViewMode.LIST);
+        new P.PickerBuilder().addView(view).setOAuthToken(O.token)
+          .setDeveloperKey(O.key).setAppId(O.app).setOrigin(O.origin)
+          .setCallback(onCallback).build().setVisible(true);
+      } catch (err) {
+        say('The picker failed: ' + err.message);
+        report('error: ' + err.message);
+      }
+    }, onerror: () => report('error: the picker library did not load') });
+  } catch (err) {
+    report('error: ' + err.message);
+  }
 }
 </script>
 <script async defer src="https://apis.google.com/js/api.js"
         onload="onApi()"
-        onerror="say('Google\\'s picker could not load.')"></script>
+        onerror="say('Google\\'s picker could not load.');
+                 report('error: apis.google.com did not load')"></script>
 </body></html>`;
 }
 
 /**
  * Open Google's picker in the browser to choose a doc, which grants
  * Dendrite that doc; answers { id, name }, or null when cancelled. The
- * page is served at an unguessable path, since it holds the token.
+ * page is served at an unguessable path, since it holds the token, and
+ * tells `onEvent(what)` each other thing the picker reports, its
+ * errors included.
  */
-async function pick({ token, apiKey, client, openUrl, http, crypto }) {
+// The picker page waiting for an answer, closed by a new try, since
+// both would want the one port.
+let picking = null;
+
+async function pick({ token, apiKey, client, openUrl, http, crypto,
+                      onEvent = () => {}, port = PICKER_PORT }) {
+    if (picking) {
+        picking();
+        picking = null;
+        // Its server closes once its wait has ended.
+        await new Promise((r) => setTimeout(r, 50));
+    }
     const secret = base64url(crypto.randomBytes(16));
     let back = '';
-    const { base, done } = await loopback(http, (url, res) => {
+    let origin = '';
+    const { base, done, close } = await loopback(http, (url, res) => {
         if (url.pathname === `/${secret}`) {
             res.writeHead(200, { 'content-type': 'text/html; ' +
                                  'charset=utf-8' });
             res.end(pickerPage({ token, key: apiKey,
-                                 app: client.projectNumber, back }));
+                                 app: client.projectNumber, back,
+                                 origin }));
+            return undefined;
+        }
+        if (url.pathname === `/${secret}/event`) {
+            onEvent(url.searchParams.get('what') || '');
+            res.writeHead(204);
+            res.end();
             return undefined;
         }
         if (url.pathname === `/${secret}/picked`) {
@@ -254,9 +304,16 @@ async function pick({ token, apiKey, client, openUrl, http, crypto }) {
         res.writeHead(404);
         res.end();
         return undefined;
+    }, port);
+    picking = close;
+    done.then(() => {}, () => {}).finally(() => {
+        if (picking === close) picking = null;
     });
     back = `/${secret}`;
-    openUrl(`${base}/${secret}`);
+    // Opened as localhost, the name the registered origin uses; the
+    // server answers on 127.0.0.1, where localhost leads.
+    origin = port ? pickerOrigin(port) : base;
+    openUrl(`${origin}/${secret}`);
     return done;
 }
 
@@ -403,6 +460,7 @@ async function fetchReview({ docId, token, request,
              resolved };
 }
 
-module.exports = { SCOPE, readClient, docIdFromUrl, docUrl, pkce, signIn,
+module.exports = { SCOPE, PICKER_PORT, pickerOrigin, readClient,
+                   docIdFromUrl, docUrl, pkce, signIn,
                    accessToken, revoke, pick, pickerPage, suggestionItems,
                    commentItems, fetchReview };

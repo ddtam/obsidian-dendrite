@@ -1661,6 +1661,10 @@ class DendriteView extends ItemView {
                 this.endEdit();
                 return false;
             }
+            if (this.fannedId) {
+                this.toggleFan(this.fannedId);
+                return false;
+            }
             if (this.find) {
                 this.closeFind();
                 return false;
@@ -2061,7 +2065,8 @@ class DendriteView extends ItemView {
         // and otherwise goes no further, as in the scope.
         if (e.key === 'Escape') {
             e.preventDefault();
-            if (this.find) this.closeFind();
+            if (this.fannedId) this.toggleFan(this.fannedId);
+            else if (this.find) this.closeFind();
             return;
         }
         // The number row by its physical key, since what a digit key types
@@ -2769,8 +2774,9 @@ class DendriteView extends ItemView {
     }
 
     /**
-     * Keep the fan in the column right of its card, its top level with
-     * the card's, as the columns move.
+     * Keep the fan in the column right of its card as the columns move:
+     * its newest version where a card of that column would sit, level
+     * with the card, of the card's width, so their text lines up.
      */
     placeFan() {
         const fan = this.fanEl;
@@ -2780,11 +2786,17 @@ class DendriteView extends ItemView {
         const r = card.getBoundingClientRect();
         const col = card.closest('.dendrite-col');
         const gap = col ? col.getBoundingClientRect().right - r.right : 12;
-        const top = Math.min(Math.max(8, r.top - stage.top),
-                             Math.max(8, stage.height - 160));
-        fan.style.left = `${r.right - stage.left + 2 * gap}px`;
+        // From the fan's edge to its first version's, which the outline,
+        // its padding and its heading take.
+        const first = fan.querySelector('.dendrite-version');
+        const f = fan.getBoundingClientRect();
+        const v = first ? first.getBoundingClientRect() : f;
+        const inX = v.left - f.left;
+        const inY = v.top - f.top;
+        const top = Math.max(8, r.top - stage.top - inY);
+        fan.style.left = `${r.right - stage.left + 2 * gap - inX}px`;
         fan.style.top = `${top}px`;
-        fan.style.width = `${r.width}px`;
+        fan.style.width = `${r.width + 2 * inX}px`;
         fan.style.maxHeight = `${Math.max(160, stage.height - top - 8)}px`;
     }
 
@@ -2794,12 +2806,14 @@ class DendriteView extends ItemView {
      * never selected or edited.
      */
     async renderVersion(group, id) {
+        // Drawn as a card, of a card's width and with its padding, so its
+        // text lines up with the card it was replaced by.
         const el = group.createDiv({ cls: 'dendrite-version' });
         el.dataset.id = id;
         el.createDiv({ cls: 'dendrite-version-head',
             text: `Replaced ${this.cardProps(id).dendrite_superseded}, ` +
                 `card ${core.shortId(id)}` });
-        const body = el.createDiv({ cls: 'dendrite-version-body' });
+        const body = el.createDiv({ cls: 'dendrite-card-body' });
         const f = this.cardFile(id);
         if (!f) return;
         const text = core.splitFrontmatter(
@@ -4149,6 +4163,9 @@ class DendriteView extends ItemView {
                 show('done', 'done ✓');
             }
             const stack = this.stackOf(id).length;
+            // Old versions show as card edges behind this one's top.
+            card.toggleClass('has-stack', stack > 0);
+            card.toggleClass('has-stacks', stack > 1);
             if (stack) {
                 const s = show('stack', `${stack + 1} versions`);
                 s.toggleClass('is-on', this.fannedId === id);
@@ -7164,8 +7181,15 @@ module.exports = class DendritePlugin extends Plugin {
         let picked;
         try {
             picked = await google.pick(Object.assign({ token, apiKey: key,
-                client: this.googleClient() }, this.googleDeps()));
+                client: this.googleClient(),
+                onEvent: (what) => new Notice(what === 'loaded' ?
+                    'Dendrite: Google\'s picker is open in the browser. ' +
+                    'Click the doc, then Select.' :
+                    `Dendrite: Google's picker reported ${what}.`, 10000) },
+                this.googleDeps()));
         } catch (err) {
+            // A newer try took its place, and reports for itself.
+            if (/replaced by a new try/.test(err.message)) return;
             new Notice(`Dendrite: the picker failed (${err.message}).`,
                        10000);
             return;

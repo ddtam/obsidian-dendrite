@@ -3031,6 +3031,8 @@ var require_google = __commonJS({
     var DRIVE = "https://www.googleapis.com/drive/v3/files/";
     var REVOKE = "https://oauth2.googleapis.com/revoke";
     var WAIT_MS = 10 * 60 * 1e3;
+    var PICKER_PORT = 27131;
+    var pickerOrigin = (port) => `http://localhost:${port}`;
     function readClient(text) {
       const d = JSON.parse(text);
       const c = d.installed || d.web;
@@ -3063,7 +3065,7 @@ var require_google = __commonJS({
     function form(obj) {
       return Object.entries(obj).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
     }
-    function loopback(http, route) {
+    function loopback(http, route, port = 0) {
       return new Promise((resolve, reject) => {
         let finish;
         let fail;
@@ -3094,10 +3096,11 @@ var require_google = __commonJS({
           server.close();
         });
         server.once("error", reject);
-        server.listen(0, "127.0.0.1", () => {
+        server.listen(port, "127.0.0.1", () => {
           resolve({
             base: `http://127.0.0.1:${server.address().port}`,
-            done
+            done,
+            close: () => fail(new Error("replaced by a new try"))
           });
         });
       });
@@ -3214,52 +3217,99 @@ var require_google = __commonJS({
 <title>Dendrite: link a Google Doc</title>
 <style>body { font-family: sans-serif; margin: 2em; }</style>
 </head><body>
-<p id="m">Opening Google's file picker. Choose the manuscript's doc.</p>
+<p id="m">Opening Google's file picker. Click the manuscript's doc, then
+press Select, or double-click it.</p>
 <script>
 const O = ${j(o)};
 function say(t) { document.getElementById('m').textContent = t; }
-function tell(path) {
-  fetch(path).finally(() => say('Done. You can close this tab and go ' +
-                                'back to Obsidian.'));
+// Each step is told to Dendrite, which shows it in Obsidian.
+function report(what) {
+  fetch(O.back + '/event?what=' + encodeURIComponent(what))
+    .catch(() => {});
+}
+window.addEventListener('error', (e) => report('error: ' + e.message));
+function tell(path, text) {
+  say(text);
+  fetch(path).catch(() => say(text + ' Dendrite did not answer; is ' +
+                              'Obsidian still open?'));
 }
 function onCallback(d) {
   const P = google.picker;
-  if (d[P.Response.ACTION] === P.Action.PICKED) {
+  const action = d[P.Response.ACTION];
+  if (action === P.Action.PICKED) {
     const doc = d[P.Response.DOCUMENTS][0];
     tell(O.back + '/picked?id=' + encodeURIComponent(doc[P.Document.ID]) +
-         '&name=' + encodeURIComponent(doc[P.Document.NAME]));
-  } else if (d[P.Response.ACTION] === P.Action.CANCEL) {
-    tell(O.back + '/cancel');
+         '&name=' + encodeURIComponent(doc[P.Document.NAME]),
+         'Linked ' + doc[P.Document.NAME] + '. You can close this tab ' +
+         'and go back to Obsidian.');
+  } else if (action === P.Action.CANCEL) {
+    tell(O.back + '/cancel', 'Cancelled. You can close this tab.');
+  } else {
+    report(String(action));
   }
 }
 function onApi() {
-  gapi.load('picker', () => {
-    const P = google.picker;
-    const view = new P.DocsView(P.ViewId.DOCUMENTS)
-      .setMode(P.DocsViewMode.LIST);
-    new P.PickerBuilder().addView(view).setOAuthToken(O.token)
-      .setDeveloperKey(O.key).setAppId(O.app).setCallback(onCallback)
-      .build().setVisible(true);
-  });
+  try {
+    gapi.load('picker', { callback: () => {
+      try {
+        const P = google.picker;
+        const view = new P.DocsView(P.ViewId.DOCUMENTS)
+          .setMode(P.DocsViewMode.LIST);
+        new P.PickerBuilder().addView(view).setOAuthToken(O.token)
+          .setDeveloperKey(O.key).setAppId(O.app).setOrigin(O.origin)
+          .setCallback(onCallback).build().setVisible(true);
+      } catch (err) {
+        say('The picker failed: ' + err.message);
+        report('error: ' + err.message);
+      }
+    }, onerror: () => report('error: the picker library did not load') });
+  } catch (err) {
+    report('error: ' + err.message);
+  }
 }
 <\/script>
 <script async defer src="https://apis.google.com/js/api.js"
         onload="onApi()"
-        onerror="say('Google\\'s picker could not load.')"><\/script>
+        onerror="say('Google\\'s picker could not load.');
+                 report('error: apis.google.com did not load')"><\/script>
 </body></html>`;
     }
-    async function pick({ token, apiKey, client, openUrl, http, crypto }) {
+    var picking = null;
+    async function pick({
+      token,
+      apiKey,
+      client,
+      openUrl,
+      http,
+      crypto,
+      onEvent = () => {
+      },
+      port = PICKER_PORT
+    }) {
+      if (picking) {
+        picking();
+        picking = null;
+        await new Promise((r) => setTimeout(r, 50));
+      }
       const secret = base64url(crypto.randomBytes(16));
       let back = "";
-      const { base, done } = await loopback(http, (url, res) => {
+      let origin = "";
+      const { base, done, close } = await loopback(http, (url, res) => {
         if (url.pathname === `/${secret}`) {
           res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
           res.end(pickerPage({
             token,
             key: apiKey,
             app: client.projectNumber,
-            back
+            back,
+            origin
           }));
+          return void 0;
+        }
+        if (url.pathname === `/${secret}/event`) {
+          onEvent(url.searchParams.get("what") || "");
+          res.writeHead(204);
+          res.end();
           return void 0;
         }
         if (url.pathname === `/${secret}/picked`) {
@@ -3276,9 +3326,16 @@ function onApi() {
         res.writeHead(404);
         res.end();
         return void 0;
+      }, port);
+      picking = close;
+      done.then(() => {
+      }, () => {
+      }).finally(() => {
+        if (picking === close) picking = null;
       });
       back = `/${secret}`;
-      openUrl(`${base}/${secret}`);
+      origin = port ? pickerOrigin(port) : base;
+      openUrl(`${origin}/${secret}`);
       return done;
     }
     var CONTEXT = 40;
@@ -3414,6 +3471,8 @@ function onApi() {
     }
     module2.exports = {
       SCOPE,
+      PICKER_PORT,
+      pickerOrigin,
       readClient,
       docIdFromUrl,
       docUrl,
@@ -5226,6 +5285,10 @@ var DendriteView = class extends ItemView {
         this.endEdit();
         return false;
       }
+      if (this.fannedId) {
+        this.toggleFan(this.fannedId);
+        return false;
+      }
       if (this.find) {
         this.closeFind();
         return false;
@@ -5590,7 +5653,8 @@ var DendriteView = class extends ItemView {
     if (this.arrowKey(e)) return;
     if (e.key === "Escape") {
       e.preventDefault();
-      if (this.find) this.closeFind();
+      if (this.fannedId) this.toggleFan(this.fannedId);
+      else if (this.find) this.closeFind();
       return;
     }
     const code = /^(?:Digit|Numpad)(\d)$/.exec(e.code || "");
@@ -6261,8 +6325,9 @@ var DendriteView = class extends ItemView {
     this.placeFan();
   }
   /**
-   * Keep the fan in the column right of its card, its top level with
-   * the card's, as the columns move.
+   * Keep the fan in the column right of its card as the columns move:
+   * its newest version where a card of that column would sit, level
+   * with the card, of the card's width, so their text lines up.
    */
   placeFan() {
     const fan = this.fanEl;
@@ -6272,13 +6337,15 @@ var DendriteView = class extends ItemView {
     const r = card.getBoundingClientRect();
     const col = card.closest(".dendrite-col");
     const gap = col ? col.getBoundingClientRect().right - r.right : 12;
-    const top = Math.min(
-      Math.max(8, r.top - stage.top),
-      Math.max(8, stage.height - 160)
-    );
-    fan.style.left = `${r.right - stage.left + 2 * gap}px`;
+    const first = fan.querySelector(".dendrite-version");
+    const f = fan.getBoundingClientRect();
+    const v = first ? first.getBoundingClientRect() : f;
+    const inX = v.left - f.left;
+    const inY = v.top - f.top;
+    const top = Math.max(8, r.top - stage.top - inY);
+    fan.style.left = `${r.right - stage.left + 2 * gap - inX}px`;
     fan.style.top = `${top}px`;
-    fan.style.width = `${r.width}px`;
+    fan.style.width = `${r.width + 2 * inX}px`;
     fan.style.maxHeight = `${Math.max(160, stage.height - top - 8)}px`;
   }
   /**
@@ -6293,7 +6360,7 @@ var DendriteView = class extends ItemView {
       cls: "dendrite-version-head",
       text: `Replaced ${this.cardProps(id).dendrite_superseded}, card ${core.shortId(id)}`
     });
-    const body = el.createDiv({ cls: "dendrite-version-body" });
+    const body = el.createDiv({ cls: "dendrite-card-body" });
     const f = this.cardFile(id);
     if (!f) return;
     const text = core.splitFrontmatter(
@@ -7530,6 +7597,8 @@ var DendriteView = class extends ItemView {
         show("done", "done \u2713");
       }
       const stack = this.stackOf(id).length;
+      card.toggleClass("has-stack", stack > 0);
+      card.toggleClass("has-stacks", stack > 1);
       if (stack) {
         const s = show("stack", `${stack + 1} versions`);
         s.toggleClass("is-on", this.fannedId === id);
@@ -10231,12 +10300,17 @@ module.exports = class DendritePlugin extends Plugin {
     new Notice("Dendrite: choose the doc in the browser that opened.");
     let picked;
     try {
-      picked = await google.pick(Object.assign({
-        token,
-        apiKey: key,
-        client: this.googleClient()
-      }, this.googleDeps()));
+      picked = await google.pick(Object.assign(
+        {
+          token,
+          apiKey: key,
+          client: this.googleClient(),
+          onEvent: (what) => new Notice(what === "loaded" ? "Dendrite: Google's picker is open in the browser. Click the doc, then Select." : `Dendrite: Google's picker reported ${what}.`, 1e4)
+        },
+        this.googleDeps()
+      ));
     } catch (err) {
+      if (/replaced by a new try/.test(err.message)) return;
       new Notice(
         `Dendrite: the picker failed (${err.message}).`,
         1e4
