@@ -33,6 +33,7 @@ const { cardEditor } = require('./editor.js');
 const pandoc = require('./pandoc.js');
 const review = require('./review.js');
 const google = require('./google.js');
+const float = require('./float.js');
 const { History, idbStore } = require('./history.js');
 
 const VIEW = 'dendrite-view';
@@ -1008,6 +1009,7 @@ class DendriteView extends ItemView {
         // Review comments render as marks in the text and callouts under
         // their paragraphs, where Obsidian alone would hide them.
         const notes = review.reviewItems(text);
+        const kind = this.kindOf(id);
         if (text.trim()) {
             await MarkdownRenderer.render(this.app,
                 notes.length ? review.renderMarkdown(text) : text, out,
@@ -1016,9 +1018,21 @@ class DendriteView extends ItemView {
                 review.decorate(out, notes,
                                 (n, what) => this.reviewAction(id, n, what));
             }
-        } else {
+        } else if (!kind) {
             out.createDiv({ cls: 'dendrite-placeholder',
                             text: 'Empty card' });
+        }
+        // A table or figure shows what it still lacks.
+        if (kind) {
+            const parts = float.split(text, kind);
+            const missing = (t) => createDiv({ cls: 'dendrite-float-missing',
+                                               text: t });
+            if (!parts.content) {
+                out.prepend(missing(kind === 'figure' ?
+                    'No image: paste, drop or link one' :
+                    'No table yet'));
+            }
+            if (!parts.caption) out.append(missing('No caption'));
         }
         this.invalidate(id);
         this.rendered.set(id, { el: out, comp, mtime: f.stat.mtime });
@@ -1099,6 +1113,7 @@ class DendriteView extends ItemView {
         const svg = this.flowSvg;
         if (!svg || !this.board) return;
         this.placeFan();
+        this.placeFloat();
         while (svg.firstChild) svg.firstChild.remove();
         for (const g of this.board.querySelectorAll('.is-flow')) {
             g.classList.remove('is-flow');
@@ -1711,7 +1726,8 @@ class DendriteView extends ItemView {
             return;
         }
         if (e.target.closest('.dendrite-toolbar, textarea, .dendrite-cm, ' +
-                             'button, .dendrite-quota, .dendrite-id')) {
+                             'button, .dendrite-quota, .dendrite-id, ' +
+                             '.dendrite-float-edit')) {
             return;
         }
         const grip = e.target.closest('.dendrite-grip');
@@ -2312,7 +2328,12 @@ class DendriteView extends ItemView {
                      saving: Promise.resolve(),
                      before: core.splitFrontmatter(raw).body };
         ed.saved = ed.before;
-        const editor = cardEditor(this.app, this, {
+        // A table or figure card is edited as its caption and its table
+        // or image, unless its text was asked for.
+        const kind = this.kindOf(id);
+        const asFloat = !!kind && this.asTextOnce !== id;
+        this.asTextOnce = null;
+        const handlers = {
             value: core.splitFrontmatter(raw).body,
             file: f,
             onChange: () => {
@@ -2338,14 +2359,25 @@ class DendriteView extends ItemView {
             onRedraw: () => { if (this.find) this.paintFind(); },
             onUndo: () => this.undoInEditor(),
             onRedo: () => this.redoInEditor(),
-        }, this.plugin.settings.obsidianEditor !== false);
+        };
+        const editor = asFloat ? float.floatEditor(Object.assign(handlers, {
+            kind,
+            label: this.floatOpts().floats.get(id) ||
+                (kind === 'table' ? 'Table' : 'Figure'),
+            onAsText: () => this.editAsText(id),
+            render: (md, el) => this.renderInto(md, el, f.path),
+            image: (file) => this.saveFigureImage(id, file),
+        })) : cardEditor(this.app, this, handlers,
+                         this.plugin.settings.obsidianEditor !== false);
         ed.editor = editor;
         // The text box's own commands (bold, Tab, lists) are Dendrite's;
         // Obsidian's editor brings its own.
         ed.ta = editor.ta || null;
         this.editing = ed;
         const card = this.cardEls.get(id);
-        if (card) {
+        if (card && editor.kind === 'float') {
+            this.mountFloat(card, editor);
+        } else if (card) {
             const body = card.querySelector('.dendrite-card-body');
             body.empty();
             body.appendChild(editor.el);
@@ -2413,12 +2445,118 @@ class DendriteView extends ItemView {
         if (card) {
             card.removeClass('is-editing');
             card.removeClass('has-obsidian-editor');
+            card.removeClass('is-float-editing');
             card.addClass('is-pending');
+            const body = card.querySelector('.dendrite-card-body');
+            if (body) body.style.minHeight = '';
         }
+        this.unmountFloat();
         await this.renderCard(ed.id);
         this.renderToolbar();
         this.showMode();
         this.contentEl.focus();
+    }
+
+    // ---- tables and figures, edited wide --------------------------------
+
+    /**
+     * A table or figure card's editor, drawn over the board where the card
+     * is, as wide as the page's text, since a column is narrower than what
+     * it holds. The card keeps its place and grows to the editor's height,
+     * so the cards below move down for it.
+     */
+    mountFloat(card, editor) {
+        const stage = this.board && this.board.parentElement;
+        if (!stage) return;
+        const st = this.manuscript().style || {};
+        const el = editor.el;
+        el.style.width = `${Math.round(float.textWidthPt(st))}pt`;
+        el.style.setProperty('--dendrite-float-size',
+                             `${st.fontSize || 10}pt`);
+        if (st.font) el.style.setProperty('--dendrite-float-font', st.font);
+        stage.appendChild(el);
+        card.addClass('is-editing');
+        card.addClass('is-float-editing');
+        card.removeClass('is-pending');
+        const body = card.querySelector('.dendrite-card-body');
+        if (body) body.empty();
+        this.floatEl = el;
+        this.floatCard = card;
+        if (typeof ResizeObserver !== 'undefined') {
+            this.floatSizer = new ResizeObserver(() => this.placeFloat());
+            this.floatSizer.observe(el);
+        }
+        this.placeFloat();
+    }
+
+    unmountFloat() {
+        if (this.floatSizer) this.floatSizer.disconnect();
+        this.floatSizer = null;
+        if (this.floatComp) this.floatComp.unload();
+        this.floatComp = null;
+        this.floatEl = null;
+        this.floatCard = null;
+    }
+
+    /** Keep the wide editor over its card as the columns move. */
+    placeFloat() {
+        const el = this.floatEl;
+        const card = this.floatCard;
+        if (!el || !card || !el.parentElement) return;
+        const stage = el.parentElement.getBoundingClientRect();
+        const r = card.getBoundingClientRect();
+        const left = Math.max(0, r.left - stage.left);
+        el.style.left = `${left}px`;
+        el.style.top = `${r.top - stage.top}px`;
+        el.style.maxWidth = `${Math.max(r.width,
+                                        stage.width - left - 12)}px`;
+        const body = card.querySelector('.dendrite-card-body');
+        const extra = r.height - (body ? body.offsetHeight : 0);
+        if (body && el.offsetHeight) {
+            body.style.minHeight = `${Math.max(0, el.offsetHeight - extra)}px`;
+        }
+    }
+
+    /** The card's text in the plain editor, for this visit. */
+    async editAsText(id) {
+        this.asTextOnce = id;
+        if (this.editing) await this.endEdit();
+        this.asTextOnce = id;
+        await this.startEdit(id);
+    }
+
+    /** Markdown drawn into a table or figure editor. */
+    async renderInto(md, el, path) {
+        if (!this.floatComp) {
+            this.floatComp = new Component();
+            this.floatComp.load();
+        }
+        await MarkdownRenderer.render(this.app, md, el, path,
+                                      this.floatComp);
+    }
+
+    /**
+     * An image pasted or dropped on a figure card, saved in figures/ in
+     * the manuscript's folder, named for the card, never over another
+     * file; answers its embed.
+     */
+    async saveFigureImage(id, file) {
+        const parent = this.file.parent ? this.file.parent.path : '';
+        const folder = normalizePath(`${parent}/figures`);
+        if (!this.app.vault.getAbstractFileByPath(folder)) {
+            await this.app.vault.createFolder(folder);
+        }
+        const ext = (/\.([a-z0-9]+)$/i.exec(file.name || '') ||
+            [null, (file.type || 'image/png').split('/')[1] || 'png'])[1]
+            .toLowerCase();
+        let name = `${id}.${ext}`;
+        for (let k = 2; this.app.vault.getAbstractFileByPath(
+            `${folder}/${name}`); k++) {
+            name = `${id}-${k}.${ext}`;
+        }
+        await this.app.vault.createBinary(`${folder}/${name}`,
+                                          await file.arrayBuffer());
+        return float.embedFor(`figures/${name}`);
     }
 
     showMode() {
@@ -4195,9 +4333,26 @@ class DendriteView extends ItemView {
         return opts;
     }
 
+    /**
+     * Set a card's kind; a card set to Table without one starts with a
+     * table to fill in. One step to undo.
+     */
     async setKind(id, kind) {
         const f = this.cardFile(id);
-        if (f) await writeProps(this.app, f, { dendrite_kind: kind });
+        if (!f) return;
+        const data = await this.app.vault.read(f);
+        await writeProps(this.app, f, { dendrite_kind: kind });
+        let body = core.splitFrontmatter(data).body;
+        if (kind === 'table' && !float.split(body, 'table').content) {
+            body = float.compose('table', body, float.STARTER_TABLE);
+            await this.writeCard(f, (d) => core.splitFrontmatter(d).fm +
+                                 body);
+        }
+        this.pushUndo({ active: this.active, files: [], created: [],
+                        restores: [{ path: f.path, text: data,
+                                     ifBody: body }], text: false });
+        this.invalidate(id);
+        await this.renderCard(id);
         await this.sweepStatuses();
     }
 

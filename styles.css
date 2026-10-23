@@ -1773,3 +1773,84 @@ button.dendrite-review-btn:hover {
 .dendrite-card.has-stack.is-fanned::after {
     display: none;
 }
+
+/* A table or figure card being edited: drawn over the board where the
+   card is, as wide as the page's text (set by the view), with the table
+   or image in the manuscript's font and size, as it prints. */
+.dendrite-float-edit {
+    position: absolute;
+    z-index: 6;
+    box-sizing: content-box;
+    background: var(--background-primary);
+    border: 1px solid var(--interactive-accent);
+    box-shadow: 0 0 0 1px var(--interactive-accent),
+                0 10px 30px rgba(0, 0, 0, 0.35);
+    border-radius: var(--radius-m);
+    padding: 30px 16px 14px;
+}
+.dendrite-float-head {
+    position: absolute;
+    top: 8px;
+    left: 16px;
+    right: 16px;
+    display: flex;
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+}
+.dendrite-float-astext {
+    margin-left: auto;
+    cursor: var(--cursor);
+    color: var(--text-muted);
+}
+.dendrite-float-label {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    margin: 10px 0 4px;
+}
+.dendrite-float-field:first-of-type .dendrite-float-label {
+    margin-top: 0;
+}
+.dendrite-float-input {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    font: inherit;
+}
+.dendrite-float-input.is-mono {
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-small);
+    white-space: pre;
+    overflow-x: auto;
+}
+.dendrite-float-shown {
+    font-family: var(--dendrite-float-font, inherit);
+    font-size: var(--dendrite-float-size, inherit);
+    margin: 10px 0;
+}
+.dendrite-float-shown table {
+    width: 100%;
+}
+.dendrite-float-shown.is-image img {
+    display: block;
+    max-width: 100%;
+    margin: 0 auto;
+}
+.dendrite-float-hint {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-faint);
+    margin: 4px 0 6px;
+}
+
+/* What a table or figure still lacks, on its card and in its editor. */
+.dendrite-float-missing {
+    color: var(--text-faint);
+    font-style: italic;
+    font-size: var(--font-ui-small);
+}
+.dendrite-float-missing:first-child {
+    border: 1px dashed var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    padding: 12px;
+    text-align: center;
+    margin-bottom: 6px;
+}

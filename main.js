@@ -3587,6 +3587,218 @@ function onApi() {
   }
 });
 
+// src/float.js
+var require_float = __commonJS({
+  "src/float.js"(exports2, module2) {
+    "use strict";
+    var TABLE_LINE = /^\s*\|/;
+    var IMAGE = /!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\)/;
+    var IMAGE_LINE = /^\s*(!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\))\s*$/;
+    var STARTER_TABLE = "| Column 1 | Column 2 |\n| --- | --- |\n|  |  |";
+    function split(body, kind) {
+      const lines = String(body || "").split("\n");
+      let content = [];
+      let rest = lines;
+      if (kind === "table") {
+        content = lines.filter((l) => TABLE_LINE.test(l));
+        rest = lines.filter((l) => !TABLE_LINE.test(l));
+      } else {
+        const k = lines.findIndex((l) => IMAGE_LINE.test(l));
+        if (k >= 0) {
+          content = [lines[k].trim()];
+          rest = lines.filter((l, i) => i !== k);
+        }
+      }
+      return { caption: rest.join("\n").trim(), content: content.join("\n") };
+    }
+    function compose(kind, caption, content) {
+      const c = String(caption || "").trim();
+      const t = String(content || "").trim();
+      const parts = kind === "table" ? [c, t] : [t, c];
+      return parts.filter(Boolean).join("\n\n");
+    }
+    function embedFor(path) {
+      return `![[${path}]]`;
+    }
+    function linkedImage(text) {
+      const s = String(text || "");
+      const m = IMAGE.exec(s);
+      if (m) return m[0];
+      const w = /\[\[([^\]]+)\]\]/.exec(s);
+      return w ? embedFor(w[1]) : null;
+    }
+    var PAPER_IN = { letter: 8.5, a4: 210 / 25.4 };
+    var UNIT_IN = { pt: 1 / 72.27, mm: 1 / 25.4, cm: 1 / 2.54, in: 1 };
+    function textWidthPt(st) {
+      const paper = PAPER_IN[st && st.paper] || PAPER_IN.letter;
+      const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec(st && st.margin || "");
+      const margin = m ? Number(m[1]) * UNIT_IN[m[2]] : 2.5 * UNIT_IN.cm;
+      return (paper - 2 * margin) * 72;
+    }
+    function floatEditor(opts) {
+      const kind = opts.kind;
+      let { caption, content } = split(opts.value, kind);
+      const root = createDiv({ cls: `dendrite-float-edit is-${kind}` });
+      const head = root.createDiv({ cls: "dendrite-float-head" });
+      head.createSpan({ text: `${opts.label || (kind === "table" ? "Table" : "Figure")} \xB7 editing` });
+      const asText = head.createEl("a", {
+        cls: "dendrite-float-astext",
+        text: "Edit as text"
+      });
+      asText.addEventListener("mousedown", (e) => e.preventDefault());
+      asText.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (opts.onAsText) opts.onAsText();
+      });
+      const changed = () => opts.onChange();
+      const field = (label, cls, mono) => {
+        const wrap = root.createDiv({ cls: "dendrite-float-field" });
+        wrap.createDiv({ cls: "dendrite-float-label", text: label });
+        const ta = wrap.createEl("textarea", { cls: "dendrite-float-input" + (mono ? " is-mono" : "") + (cls ? ` ${cls}` : "") });
+        ta.rows = mono ? 6 : 2;
+        ta.addEventListener("blur", () => opts.onBlur());
+        ta.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            opts.onEscape();
+          }
+        });
+        return ta;
+      };
+      let cap = null;
+      let table = null;
+      let shown = null;
+      let refreshTimer = null;
+      const draw = () => {
+        if (!shown) return;
+        shown.empty();
+        if (kind === "table") {
+          if (!content.trim()) {
+            shown.createDiv({
+              cls: "dendrite-float-missing",
+              text: "No table yet: write one below."
+            });
+            return;
+          }
+          opts.render(`**${opts.label || "Table"}.** ${caption}
+
+${content}`, shown);
+          return;
+        }
+        if (!content) {
+          shown.createDiv({
+            cls: "dendrite-float-missing",
+            text: "No image: paste one, drop a file, or link one with ![[\u2026]]."
+          });
+          return;
+        }
+        opts.render(content, shown);
+      };
+      const later = () => {
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(draw, 250);
+      };
+      if (kind === "table") {
+        cap = field("Caption, printed above the table");
+        shown = root.createDiv({ cls: "dendrite-float-shown" });
+        table = field("Table", "dendrite-float-table", true);
+        table.value = content;
+        table.addEventListener("input", () => {
+          content = table.value;
+          later();
+          changed();
+        });
+      } else {
+        shown = root.createDiv({ cls: "dendrite-float-shown is-image" });
+        root.createDiv({ cls: "dendrite-float-hint", text: "Paste an image, drop a file, or link one with ![[\u2026]]; a new one replaces it." });
+        cap = field("Caption, printed below the figure");
+      }
+      cap.value = caption;
+      cap.addEventListener("input", () => {
+        caption = cap.value;
+        if (kind === "table") later();
+        changed();
+      });
+      const take = async (dt) => {
+        if (kind !== "figure" || !dt) return false;
+        const file = [...dt.files || []].find((x) => /^image\//.test(x.type));
+        let embed = null;
+        if (file && opts.image) embed = await opts.image(file);
+        if (!embed) embed = linkedImage(dt.getData && dt.getData("text/plain"));
+        if (!embed) return false;
+        content = embed;
+        draw();
+        changed();
+        return true;
+      };
+      if (kind === "figure") {
+        root.addEventListener("paste", async (e) => {
+          const dt = e.clipboardData;
+          if (!dt) return;
+          const image = [...dt.files || []].some((x) => /^image\//.test(x.type));
+          const text = dt.getData && dt.getData("text/plain") || "";
+          const link = linkedImage(text);
+          if (!image && !(link && text.trim().replace(/^!/, "") === link.replace(/^!/, ""))) return;
+          e.preventDefault();
+          await take(dt);
+        });
+        root.addEventListener("dragover", (e) => e.preventDefault());
+        root.addEventListener("drop", async (e) => {
+          e.preventDefault();
+          await take(e.dataTransfer);
+        });
+      }
+      draw();
+      return {
+        kind: "float",
+        el: root,
+        ta: null,
+        get value() {
+          return compose(kind, caption, content);
+        },
+        focus(atStart) {
+          cap.focus();
+          const at = atStart ? 0 : cap.value.length;
+          cap.setSelectionRange(at, at);
+        },
+        selection() {
+          return [0, 0];
+        },
+        replace(text) {
+          ({ caption, content } = split(text, kind));
+          cap.value = caption;
+          if (table) table.value = content;
+          draw();
+        },
+        focusAt() {
+          cap.focus();
+        },
+        caretRect() {
+          return null;
+        },
+        rangeAt() {
+          return null;
+        },
+        // For the tests: an image taken as if pasted or dropped.
+        take,
+        destroy() {
+          clearTimeout(refreshTimer);
+          root.remove();
+        }
+      };
+    }
+    module2.exports = {
+      split,
+      compose,
+      embedFor,
+      linkedImage,
+      textWidthPt,
+      floatEditor,
+      STARTER_TABLE
+    };
+  }
+});
+
 // src/history.js
 var require_history = __commonJS({
   "src/history.js"(exports2, module2) {
@@ -3862,6 +4074,7 @@ var { cardEditor } = require_editor();
 var pandoc = require_pandoc();
 var review = require_review();
 var google = require_google();
+var float = require_float();
 var { History, idbStore } = require_history();
 var VIEW = "dendrite-view";
 var ROLE_ITEMS = [
@@ -4718,6 +4931,7 @@ var DendriteView = class extends ItemView {
     comp.load();
     const out = createDiv({ cls: "dendrite-md markdown-rendered" });
     const notes = review.reviewItems(text);
+    const kind = this.kindOf(id);
     if (text.trim()) {
       await MarkdownRenderer.render(
         this.app,
@@ -4733,11 +4947,22 @@ var DendriteView = class extends ItemView {
           (n, what) => this.reviewAction(id, n, what)
         );
       }
-    } else {
+    } else if (!kind) {
       out.createDiv({
         cls: "dendrite-placeholder",
         text: "Empty card"
       });
+    }
+    if (kind) {
+      const parts = float.split(text, kind);
+      const missing = (t) => createDiv({
+        cls: "dendrite-float-missing",
+        text: t
+      });
+      if (!parts.content) {
+        out.prepend(missing(kind === "figure" ? "No image: paste, drop or link one" : "No table yet"));
+      }
+      if (!parts.caption) out.append(missing("No caption"));
     }
     this.invalidate(id);
     this.rendered.set(id, { el: out, comp, mtime: f.stat.mtime });
@@ -4805,6 +5030,7 @@ var DendriteView = class extends ItemView {
     const svg = this.flowSvg;
     if (!svg || !this.board) return;
     this.placeFan();
+    this.placeFloat();
     while (svg.firstChild) svg.firstChild.remove();
     for (const g of this.board.querySelectorAll(".is-flow")) {
       g.classList.remove("is-flow");
@@ -5426,7 +5652,7 @@ var DendriteView = class extends ItemView {
       );
       return;
     }
-    if (e.target.closest(".dendrite-toolbar, textarea, .dendrite-cm, button, .dendrite-quota, .dendrite-id")) {
+    if (e.target.closest(".dendrite-toolbar, textarea, .dendrite-cm, button, .dendrite-quota, .dendrite-id, .dendrite-float-edit")) {
       return;
     }
     const grip = e.target.closest(".dendrite-grip");
@@ -5978,7 +6204,10 @@ var DendriteView = class extends ItemView {
       before: core.splitFrontmatter(raw).body
     };
     ed.saved = ed.before;
-    const editor = cardEditor(this.app, this, {
+    const kind = this.kindOf(id);
+    const asFloat = !!kind && this.asTextOnce !== id;
+    this.asTextOnce = null;
+    const handlers = {
       value: core.splitFrontmatter(raw).body,
       file: f,
       onChange: () => {
@@ -6008,12 +6237,26 @@ var DendriteView = class extends ItemView {
       },
       onUndo: () => this.undoInEditor(),
       onRedo: () => this.redoInEditor()
-    }, this.plugin.settings.obsidianEditor !== false);
+    };
+    const editor = asFloat ? float.floatEditor(Object.assign(handlers, {
+      kind,
+      label: this.floatOpts().floats.get(id) || (kind === "table" ? "Table" : "Figure"),
+      onAsText: () => this.editAsText(id),
+      render: (md, el) => this.renderInto(md, el, f.path),
+      image: (file) => this.saveFigureImage(id, file)
+    })) : cardEditor(
+      this.app,
+      this,
+      handlers,
+      this.plugin.settings.obsidianEditor !== false
+    );
     ed.editor = editor;
     ed.ta = editor.ta || null;
     this.editing = ed;
     const card = this.cardEls.get(id);
-    if (card) {
+    if (card && editor.kind === "float") {
+      this.mountFloat(card, editor);
+    } else if (card) {
       const body = card.querySelector(".dendrite-card-body");
       body.empty();
       body.appendChild(editor.el);
@@ -6073,12 +6316,121 @@ var DendriteView = class extends ItemView {
     if (card) {
       card.removeClass("is-editing");
       card.removeClass("has-obsidian-editor");
+      card.removeClass("is-float-editing");
       card.addClass("is-pending");
+      const body = card.querySelector(".dendrite-card-body");
+      if (body) body.style.minHeight = "";
     }
+    this.unmountFloat();
     await this.renderCard(ed.id);
     this.renderToolbar();
     this.showMode();
     this.contentEl.focus();
+  }
+  // ---- tables and figures, edited wide --------------------------------
+  /**
+   * A table or figure card's editor, drawn over the board where the card
+   * is, as wide as the page's text, since a column is narrower than what
+   * it holds. The card keeps its place and grows to the editor's height,
+   * so the cards below move down for it.
+   */
+  mountFloat(card, editor) {
+    const stage = this.board && this.board.parentElement;
+    if (!stage) return;
+    const st = this.manuscript().style || {};
+    const el = editor.el;
+    el.style.width = `${Math.round(float.textWidthPt(st))}pt`;
+    el.style.setProperty(
+      "--dendrite-float-size",
+      `${st.fontSize || 10}pt`
+    );
+    if (st.font) el.style.setProperty("--dendrite-float-font", st.font);
+    stage.appendChild(el);
+    card.addClass("is-editing");
+    card.addClass("is-float-editing");
+    card.removeClass("is-pending");
+    const body = card.querySelector(".dendrite-card-body");
+    if (body) body.empty();
+    this.floatEl = el;
+    this.floatCard = card;
+    if (typeof ResizeObserver !== "undefined") {
+      this.floatSizer = new ResizeObserver(() => this.placeFloat());
+      this.floatSizer.observe(el);
+    }
+    this.placeFloat();
+  }
+  unmountFloat() {
+    if (this.floatSizer) this.floatSizer.disconnect();
+    this.floatSizer = null;
+    if (this.floatComp) this.floatComp.unload();
+    this.floatComp = null;
+    this.floatEl = null;
+    this.floatCard = null;
+  }
+  /** Keep the wide editor over its card as the columns move. */
+  placeFloat() {
+    const el = this.floatEl;
+    const card = this.floatCard;
+    if (!el || !card || !el.parentElement) return;
+    const stage = el.parentElement.getBoundingClientRect();
+    const r = card.getBoundingClientRect();
+    const left = Math.max(0, r.left - stage.left);
+    el.style.left = `${left}px`;
+    el.style.top = `${r.top - stage.top}px`;
+    el.style.maxWidth = `${Math.max(
+      r.width,
+      stage.width - left - 12
+    )}px`;
+    const body = card.querySelector(".dendrite-card-body");
+    const extra = r.height - (body ? body.offsetHeight : 0);
+    if (body && el.offsetHeight) {
+      body.style.minHeight = `${Math.max(0, el.offsetHeight - extra)}px`;
+    }
+  }
+  /** The card's text in the plain editor, for this visit. */
+  async editAsText(id) {
+    this.asTextOnce = id;
+    if (this.editing) await this.endEdit();
+    this.asTextOnce = id;
+    await this.startEdit(id);
+  }
+  /** Markdown drawn into a table or figure editor. */
+  async renderInto(md, el, path) {
+    if (!this.floatComp) {
+      this.floatComp = new Component();
+      this.floatComp.load();
+    }
+    await MarkdownRenderer.render(
+      this.app,
+      md,
+      el,
+      path,
+      this.floatComp
+    );
+  }
+  /**
+   * An image pasted or dropped on a figure card, saved in figures/ in
+   * the manuscript's folder, named for the card, never over another
+   * file; answers its embed.
+   */
+  async saveFigureImage(id, file) {
+    const parent = this.file.parent ? this.file.parent.path : "";
+    const folder = normalizePath(`${parent}/figures`);
+    if (!this.app.vault.getAbstractFileByPath(folder)) {
+      await this.app.vault.createFolder(folder);
+    }
+    const ext = (/\.([a-z0-9]+)$/i.exec(file.name || "") || [null, (file.type || "image/png").split("/")[1] || "png"])[1].toLowerCase();
+    let name = `${id}.${ext}`;
+    for (let k = 2; this.app.vault.getAbstractFileByPath(
+      `${folder}/${name}`
+    ); k++) {
+      name = `${id}-${k}.${ext}`;
+    }
+    await this.app.vault.createBinary(
+      `${folder}/${name}`,
+      await file.arrayBuffer()
+    );
+    return float.embedFor(`figures/${name}`);
   }
   showMode() {
     if (!this.modeEl) return;
@@ -7713,9 +8065,33 @@ var DendriteView = class extends ItemView {
     }
     return opts;
   }
+  /**
+   * Set a card's kind; a card set to Table without one starts with a
+   * table to fill in. One step to undo.
+   */
   async setKind(id, kind) {
     const f = this.cardFile(id);
-    if (f) await writeProps(this.app, f, { dendrite_kind: kind });
+    if (!f) return;
+    const data = await this.app.vault.read(f);
+    await writeProps(this.app, f, { dendrite_kind: kind });
+    let body = core.splitFrontmatter(data).body;
+    if (kind === "table" && !float.split(body, "table").content) {
+      body = float.compose("table", body, float.STARTER_TABLE);
+      await this.writeCard(f, (d) => core.splitFrontmatter(d).fm + body);
+    }
+    this.pushUndo({
+      active: this.active,
+      files: [],
+      created: [],
+      restores: [{
+        path: f.path,
+        text: data,
+        ifBody: body
+      }],
+      text: false
+    });
+    this.invalidate(id);
+    await this.renderCard(id);
     await this.sweepStatuses();
   }
   async setRole(id, role) {

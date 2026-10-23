@@ -1,0 +1,230 @@
+'use strict';
+// Table and figure cards. A card's text stays plain markdown, its table
+// or image and, around it, its caption; here it is split into the two to
+// edit apart, and put back together, and edited in the card in a form
+// as wide as the page's text, with the table as it prints above its
+// markdown, or the figure's image shown large.
+
+const TABLE_LINE = /^\s*\|/;
+const IMAGE = /!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\)/;
+const IMAGE_LINE = /^\s*(!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\))\s*$/;
+
+/** The table a card set to Table starts with, to fill in. */
+const STARTER_TABLE = '| Column 1 | Column 2 |\n| --- | --- |\n|  |  |';
+
+/**
+ * A table or figure card's text as { caption, content }: for a table its
+ * table lines, for a figure its first image; the rest, trimmed, is the
+ * caption.
+ */
+function split(body, kind) {
+    const lines = String(body || '').split('\n');
+    let content = [];
+    let rest = lines;
+    if (kind === 'table') {
+        content = lines.filter((l) => TABLE_LINE.test(l));
+        rest = lines.filter((l) => !TABLE_LINE.test(l));
+    } else {
+        const k = lines.findIndex((l) => IMAGE_LINE.test(l));
+        if (k >= 0) {
+            content = [lines[k].trim()];
+            rest = lines.filter((l, i) => i !== k);
+        }
+    }
+    return { caption: rest.join('\n').trim(), content: content.join('\n') };
+}
+
+/**
+ * A card's text from its caption and content: a table under its caption,
+ * a figure's image above it, as each prints.
+ */
+function compose(kind, caption, content) {
+    const c = String(caption || '').trim();
+    const t = String(content || '').trim();
+    const parts = kind === 'table' ? [c, t] : [t, c];
+    return parts.filter(Boolean).join('\n\n');
+}
+
+function embedFor(path) {
+    return `![[${path}]]`;
+}
+
+/** An image link in pasted or dropped text, as an embed; null if none. */
+function linkedImage(text) {
+    const s = String(text || '');
+    const m = IMAGE.exec(s);
+    if (m) return m[0];
+    const w = /\[\[([^\]]+)\]\]/.exec(s);
+    return w ? embedFor(w[1]) : null;
+}
+
+const PAPER_IN = { letter: 8.5, a4: 210 / 25.4 };
+const UNIT_IN = { pt: 1 / 72.27, mm: 1 / 25.4, cm: 1 / 2.54, in: 1 };
+
+/**
+ * The width of a page's text, paper less its margins, in CSS points: the
+ * width a card's table or figure is shown at while it is edited.
+ */
+function textWidthPt(st) {
+    const paper = PAPER_IN[st && st.paper] || PAPER_IN.letter;
+    const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec((st && st.margin) ||
+                                                      '');
+    const margin = m ? Number(m[1]) * UNIT_IN[m[2]] : 2.5 * UNIT_IN.cm;
+    return (paper - 2 * margin) * 72;
+}
+
+/**
+ * The editor for a table or figure card, behind the card editor's
+ * interface (see editor.js). `opts`: value, kind, label ('Table 1'),
+ * onChange, onBlur, onEscape, onAsText, render(md, el) to draw markdown,
+ * and image(file) resolving to a saved image's embed, for one pasted or
+ * dropped.
+ */
+function floatEditor(opts) {
+    const kind = opts.kind;
+    let { caption, content } = split(opts.value, kind);
+    const root = createDiv({ cls: `dendrite-float-edit is-${kind}` });
+    const head = root.createDiv({ cls: 'dendrite-float-head' });
+    head.createSpan({ text: `${opts.label || (kind === 'table' ? 'Table' :
+        'Figure')} · editing` });
+    const asText = head.createEl('a', { cls: 'dendrite-float-astext',
+                                        text: 'Edit as text' });
+    asText.addEventListener('mousedown', (e) => e.preventDefault());
+    asText.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (opts.onAsText) opts.onAsText();
+    });
+    const changed = () => opts.onChange();
+    const field = (label, cls, mono) => {
+        const wrap = root.createDiv({ cls: 'dendrite-float-field' });
+        wrap.createDiv({ cls: 'dendrite-float-label', text: label });
+        const ta = wrap.createEl('textarea', { cls: 'dendrite-float-input' +
+            (mono ? ' is-mono' : '') + (cls ? ` ${cls}` : '') });
+        ta.rows = mono ? 6 : 2;
+        ta.addEventListener('blur', () => opts.onBlur());
+        ta.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                opts.onEscape();
+            }
+        });
+        return ta;
+    };
+    let cap = null;
+    let table = null;
+    let shown = null;
+    let refreshTimer = null;
+    const draw = () => {
+        if (!shown) return;
+        shown.empty();
+        if (kind === 'table') {
+            if (!content.trim()) {
+                shown.createDiv({ cls: 'dendrite-float-missing',
+                                  text: 'No table yet: write one below.' });
+                return;
+            }
+            opts.render(`**${opts.label || 'Table'}.** ${caption}` +
+                        `\n\n${content}`, shown);
+            return;
+        }
+        if (!content) {
+            shown.createDiv({ cls: 'dendrite-float-missing',
+                text: 'No image: paste one, drop a file, or link one with ' +
+                    '![[…]].' });
+            return;
+        }
+        opts.render(content, shown);
+    };
+    const later = () => {
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(draw, 250);
+    };
+    if (kind === 'table') {
+        cap = field('Caption, printed above the table');
+        shown = root.createDiv({ cls: 'dendrite-float-shown' });
+        table = field('Table', 'dendrite-float-table', true);
+        table.value = content;
+        table.addEventListener('input', () => {
+            content = table.value;
+            later();
+            changed();
+        });
+    } else {
+        shown = root.createDiv({ cls: 'dendrite-float-shown is-image' });
+        root.createDiv({ cls: 'dendrite-float-hint', text: 'Paste an image, ' +
+            'drop a file, or link one with ![[…]]; a new one replaces it.' });
+        cap = field('Caption, printed below the figure');
+    }
+    cap.value = caption;
+    cap.addEventListener('input', () => {
+        caption = cap.value;
+        if (kind === 'table') later();
+        changed();
+    });
+    // A figure's image: one, replaced by what is pasted or dropped.
+    const take = async (dt) => {
+        if (kind !== 'figure' || !dt) return false;
+        const file = [...(dt.files || [])].find((x) =>
+            /^image\//.test(x.type));
+        let embed = null;
+        if (file && opts.image) embed = await opts.image(file);
+        if (!embed) embed = linkedImage(dt.getData && dt.getData('text/plain'));
+        if (!embed) return false;
+        content = embed;
+        draw();
+        changed();
+        return true;
+    };
+    if (kind === 'figure') {
+        // A pasted image, or text that is only an image's link, is the
+        // figure; any other text pasted is the caption's.
+        root.addEventListener('paste', async (e) => {
+            const dt = e.clipboardData;
+            if (!dt) return;
+            const image = [...(dt.files || [])].some((x) =>
+                /^image\//.test(x.type));
+            const text = (dt.getData && dt.getData('text/plain')) || '';
+            const link = linkedImage(text);
+            if (!image && !(link && text.trim().replace(/^!/, '') ===
+                            link.replace(/^!/, ''))) return;
+            e.preventDefault();
+            await take(dt);
+        });
+        root.addEventListener('dragover', (e) => e.preventDefault());
+        root.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            await take(e.dataTransfer);
+        });
+    }
+    draw();
+    return {
+        kind: 'float',
+        el: root,
+        ta: null,
+        get value() { return compose(kind, caption, content); },
+        focus(atStart) {
+            cap.focus();
+            const at = atStart ? 0 : cap.value.length;
+            cap.setSelectionRange(at, at);
+        },
+        selection() { return [0, 0]; },
+        replace(text) {
+            ({ caption, content } = split(text, kind));
+            cap.value = caption;
+            if (table) table.value = content;
+            draw();
+        },
+        focusAt() { cap.focus(); },
+        caretRect() { return null; },
+        rangeAt() { return null; },
+        // For the tests: an image taken as if pasted or dropped.
+        take,
+        destroy() {
+            clearTimeout(refreshTimer);
+            root.remove();
+        },
+    };
+}
+
+module.exports = { split, compose, embedFor, linkedImage, textWidthPt,
+                   floatEditor, STARTER_TABLE };

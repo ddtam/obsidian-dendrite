@@ -3501,3 +3501,104 @@ test('an old version with open comments shows on its card, so they are ' +
     assert.ok(!view.cardEls.get('G-ccccc').hasClass('is-fanned'),
               'folded: the cards behind it again');
 });
+
+const FLOAT_INDEX = '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Fig]]\n' +
+    '- [[G-bbbbb|Tab]]\n- [[G-ccccc|Plain]]\n';
+const floatCards = () => ({
+    'G-aaaaa': '---\ndendrite_kind: figure\n---\n![[old.png]]\n\nOld caption.',
+    'G-bbbbb': '---\ndendrite_kind: table\n---\nPer year.\n\n| A | B |\n' +
+        '| --- | --- |\n| 1 | 2 |',
+    'G-ccccc': 'Some text.' });
+
+test('a figure card is edited in the card, widened to the page\'s text: ' +
+     'one image, replaced by one pasted, and a caption', async () => {
+    const { app, view, text } = await open(FLOAT_INDEX, floatCards());
+    await view.startEdit('G-aaaaa');
+    const ed = view.editing.editor;
+    assert.equal(ed.kind, 'float');
+    assert.ok(view.cardEls.get('G-aaaaa').hasClass('is-float-editing'));
+    const form = view.contentEl.querySelector('.dendrite-float-edit');
+    assert.ok(form && !form.closest('.dendrite-col'),
+              'drawn over the board, so it can be wider than a column');
+    assert.match(form.style.width, /pt$/, 'as wide as the page\'s text');
+    const cap = form.querySelector('textarea');
+    assert.equal(cap.value, 'Old caption.');
+    cap.value = 'New caption.';
+    cap.dispatchEvent(new h.window.Event('input'));
+    // An image pasted: saved in figures/ beside the index, named for the
+    // card, and the card's one image.
+    const bytes = new Uint8Array([137, 80, 78, 71]).buffer;
+    await ed.take({ files: [{ name: 'Screenshot 1.png', type: 'image/png',
+                              arrayBuffer: async () => bytes }],
+                    getData: () => '' });
+    assert.ok(app.vault.binaries.has('W/Grant/figures/G-aaaaa.png'));
+    await view.endEdit();
+    assert.equal(text(cardPath('G-aaaaa')),
+                 '![[figures/G-aaaaa.png]]\n\nNew caption.');
+    // A link dropped replaces it; a second paste does not overwrite the
+    // first file.
+    await view.startEdit('G-aaaaa');
+    await view.editing.editor.take({ files: [],
+        getData: () => '[[other.png]]' });
+    await view.endEdit();
+    assert.equal(text(cardPath('G-aaaaa')),
+                 '![[other.png]]\n\nNew caption.');
+    await view.startEdit('G-aaaaa');
+    await view.editing.editor.take({ files: [{ name: 'b.png',
+        type: 'image/png', arrayBuffer: async () => bytes }],
+        getData: () => '' });
+    assert.ok(app.vault.binaries.has('W/Grant/figures/G-aaaaa-2.png'));
+    await view.endEdit();
+    assert.ok(!view.contentEl.querySelector('.dendrite-float-edit'),
+              'the wide form goes when editing ends');
+    assert.ok(!view.cardEls.get('G-aaaaa').hasClass('is-float-editing'));
+});
+
+test('a table card is edited with its caption, its table as it prints, ' +
+     'and its markdown; Edit as text gives the plain editor', async () => {
+    const { view, text } = await open(FLOAT_INDEX, floatCards());
+    await view.startEdit('G-bbbbb');
+    const form = view.contentEl.querySelector('.dendrite-float-edit');
+    const [cap, table] = form.querySelectorAll('textarea');
+    assert.equal(cap.value, 'Per year.');
+    assert.equal(table.value, '| A | B |\n| --- | --- |\n| 1 | 2 |');
+    assert.match(form.querySelector('.dendrite-float-shown').textContent,
+                 /Table 1\.\*\* Per year\./, 'drawn as it prints');
+    table.value = '| A | B |\n| --- | --- |\n| 3 | 4 |';
+    table.dispatchEvent(new h.window.Event('input'));
+    await view.endEdit();
+    assert.equal(text(cardPath('G-bbbbb')),
+                 'Per year.\n\n| A | B |\n| --- | --- |\n| 3 | 4 |');
+    await view.startEdit('G-bbbbb');
+    [...view.contentEl.querySelectorAll('.dendrite-float-astext')][0]
+        .dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
+    await tick(20);
+    assert.ok(view.editing && view.editing.editor.kind !== 'float',
+              'the card\'s text, as any card\'s');
+    await view.endEdit();
+});
+
+test('a card set to Table starts with a table, in one step to undo, and ' +
+     'the board shows what a table or figure lacks', async () => {
+    const { view, text } = await open(FLOAT_INDEX, floatCards());
+    await view.setKind('G-ccccc', 'table');
+    assert.equal(text(cardPath('G-ccccc')),
+                 'Some text.\n\n| Column 1 | Column 2 |\n| --- | --- |\n' +
+                 '|  |  |');
+    await view.doUndo();
+    assert.equal(text(cardPath('G-ccccc')), 'Some text.');
+    await view.setKind('G-bbbbb', null);
+    await view.setKind('G-bbbbb', 'table');
+    assert.equal((text(cardPath('G-bbbbb')).match(/\| A \|/g) || []).length,
+                 1, 'a card with a table keeps its own');
+    // A figure without an image, or a caption.
+    await view.startEdit('G-aaaaa');
+    view.editing.editor.replace('');
+    view.editing.dirty = true;
+    await view.endEdit();
+    view.invalidate('G-aaaaa');
+    await view.renderCard('G-aaaaa');
+    const face = view.cardEls.get('G-aaaaa').textContent;
+    assert.match(face, /No image: paste, drop or link one/);
+    assert.match(face, /No caption/);
+});

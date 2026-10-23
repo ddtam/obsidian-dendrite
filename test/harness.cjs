@@ -156,6 +156,17 @@ function makeApp() {
             ev.trigger('create', f);
             return f;
         },
+        // An image, kept as its bytes beside the notes' text.
+        binaries: new Map(),
+        async createBinary(p, data) {
+            if (files.has(p)) throw new Error('exists: ' + p);
+            const f = new TFile(p);
+            files.set(p, f);
+            vault.binaries.set(p, data);
+            touch(f);
+            ev.trigger('create', f);
+            return f;
+        },
         async read(f) { return text.get(f.path); },
         async cachedRead(f) { return text.get(f.path); },
         async modify(f, data) {
