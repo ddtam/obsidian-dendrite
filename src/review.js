@@ -163,13 +163,15 @@ function readComments(xml) {
         if (tk.name === 'w:comment') {
             if (tk.close) {
                 out.set(cur.id, { author: cur.author, date: cur.date,
+                                  when: cur.when,
                                   text: paras.map((x) => x.trim())
                                       .filter(Boolean).join(' ') });
                 cur = null;
             } else {
                 cur = { id: attr(tk.attrs, 'w:id'),
                         author: attr(tk.attrs, 'w:author'),
-                        date: day(attr(tk.attrs, 'w:date')) };
+                        date: day(attr(tk.attrs, 'w:date')),
+                        when: attr(tk.attrs, 'w:date') || '' };
                 paras = [];
             }
         } else if (tk.name === 'w:p' && cur && !tk.close) {
@@ -216,6 +218,7 @@ function readReview(buf, zlib) {
         const sp = paras[r.start.p].text;
         const ep = paras[end.p].text;
         items.push({ kind: 'comment', author: note.author, date: note.date,
+                     when: note.when,
                      text: note.text, quote,
                      before: sp.slice(Math.max(0, r.start.o - CONTEXT),
                                       r.start.o),
@@ -234,7 +237,118 @@ function readReview(buf, zlib) {
         }
     });
     items.sort((a, b) => a.at[0] - b.at[0] || a.at[1] - b.at[1]);
+    linkGoogle(items, googleData(files));
     return items;
+}
+
+// ---- a Word file saved by Google Docs --------------------------------
+
+/** Protocol buffer fields, [field, value], a length-delimited one bytes. */
+function protoFields(buf) {
+    const out = [];
+    let i = 0;
+    const varint = () => {
+        let v = 0;
+        let scale = 1;
+        for (;;) {
+            const c = buf[i++];
+            if (c === undefined) throw new Error('truncated');
+            v += (c & 0x7f) * scale;
+            scale *= 128;
+            if (c < 0x80) return v;
+        }
+    };
+    while (i < buf.length) {
+        const key = varint();
+        const field = Math.floor(key / 8);
+        const type = key % 8;
+        if (type === 0) out.push([field, varint()]);
+        else if (type === 2) {
+            const n = varint();
+            out.push([field, buf.subarray(i, i + n)]);
+            i += n;
+        } else if (type === 1) i += 8;
+        else if (type === 5) i += 4;
+        else throw new Error('unknown wire type');
+    }
+    return out;
+}
+
+/**
+ * Google Docs' own record of its comments, kept in a custom XML part of
+ * a Word file it saves: the doc's id and, for each comment, its id
+ * (doco....), its text and when it was made, in milliseconds. Null for a
+ * Word file Docs did not save. Fields as read from such a file: the doc
+ * id 14; a comment 4, holding its id 1 and a body 2 with its text 4 (plain)
+ * or 3 (HTML), each { 1: type, 2: text }, and its time 6.
+ */
+function googleData(files) {
+    for (const [name, xml] of files) {
+        if (!/^customxml\//i.test(name)) continue;
+        const m = /<go:docsCustomData[^>]*>([^<]+)</.exec(xml);
+        if (!m) continue;
+        try {
+            const top = protoFields(Buffer.from(m[1], 'base64'));
+            const get = (fields, n) => (fields.find((f) => f[0] === n) ||
+                                        [])[1];
+            const str = (b) => (b ? Buffer.from(b).toString('utf8') : '');
+            const comments = [];
+            for (const [f, v] of top) {
+                if (f !== 4 || typeof v === 'number') continue;
+                const rec = protoFields(v);
+                const body = get(rec, 2);
+                if (!body) continue;
+                const b = protoFields(body);
+                const text = (k) => {
+                    const part = get(b, k);
+                    return part ? str(get(protoFields(part), 2)) : '';
+                };
+                comments.push({ id: str(get(rec, 1)),
+                                text: text(4) || text(3)
+                                    .replace(/<[^>]+>/g, ''),
+                                ms: get(b, 6) || 0 });
+            }
+            return { docId: str(get(top, 14)), comments };
+        } catch (err) {
+            return null;
+        }
+    }
+    return null;
+}
+
+/**
+ * Each comment read from a Word file Docs saved, given its Google id and
+ * link: matched to Docs' record by its text and, among those alike, the
+ * time it was made. A comment Docs had on several passages comes out of
+ * Word as one comment per passage, alike in author, text and time; each
+ * takes the one comment's id.
+ */
+function linkGoogle(items, g) {
+    if (!g || !g.docId) return;
+    const flatText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+    const groups = new Map();
+    for (const it of items) {
+        if (it.kind !== 'comment') continue;
+        const key = `${it.author}\u0000${flatText(it.text)}\u0000` +
+            (it.when || it.date);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(it);
+    }
+    const used = new Set();
+    for (const group of groups.values()) {
+        const it = group[0];
+        // The time to the second, which a comment's date, its day, lacks.
+        const when = Date.parse(it.when || '');
+        const near = g.comments.filter((c) => !used.has(c.id) &&
+            flatText(c.text) === flatText(it.text) &&
+            (!when || !c.ms || Math.abs(c.ms - when) < 120000))
+            .sort((a, b) => Math.abs(a.ms - when) - Math.abs(b.ms - when));
+        if (!near.length) continue;
+        used.add(near[0].id);
+        const link = 'https://docs.google.com/document/d/' +
+            `${g.docId}/edit?disco=${near[0].id}`;
+        for (const x of group) Object.assign(x, { gid: near[0].id, link });
+    }
 }
 
 /**
@@ -608,7 +722,7 @@ function reviewKeys(it) {
         return keys;
     }
     const { text, url } = noteLink(it.text);
-    const gid = it.gid || (/[?&]disco=([\w-]+)/.exec(url || it.link || '') ||
+    const gid = it.gid || (/[?&]disco=([\w.-]+)/.exec(url || it.link || '') ||
                            [])[1];
     if (gid) keys.push(`g:${gid}`);
     const bare = flat(text).replace(/^On “[^”]*”(?:, in an earlier version)?: /,
@@ -894,7 +1008,7 @@ function decorate(root, items, act, onMenu = null) {
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    plainMap, normalise, locate, reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
-                   commentActions, commentMenu,
+                   commentActions, commentMenu, googleData,
                    itemText,
                    addItems, removeItem,
                    stripReview, canHighlight, renderMarkdown, decorate,

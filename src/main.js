@@ -4812,6 +4812,41 @@ class DendriteView extends ItemView {
         });
     }
 
+    /**
+     * Take a Google comment, known by `gid` ('g:' and its id), out of
+     * every card it is on, old versions too, its passages left as they
+     * were; one step to undo.
+     */
+    async resolveEverywhere(gid) {
+        const restores = [];
+        for (const node of core.allNodes(this.root)) {
+            const f = this.cardFile(node.id);
+            if (!f) continue;
+            const data = await this.app.vault.read(f);
+            const { body } = core.splitFrontmatter(data);
+            const hits = review.reviewItems(body).map((x, k) =>
+                review.reviewKeys(x).includes(gid) ? k : -1)
+                .filter((k) => k >= 0);
+            if (!hits.length) continue;
+            let next = body;
+            for (const k of hits.reverse()) next = review.removeItem(next, k);
+            const out = await this.writeCard(f, (d) =>
+                core.splitFrontmatter(d).fm + next);
+            restores.push({ path: f.path, text: data,
+                            ifBody: core.splitFrontmatter(out).body });
+            this.invalidate(node.id);
+            if (this.cardEls.has(node.id)) await this.renderCard(node.id);
+        }
+        if (restores.length) {
+            this.pushUndo({ active: this.active, files: [], text: true,
+                            restores });
+        }
+        if (this.fannedId) {
+            this.render();
+            await this.fanReady;
+        }
+    }
+
     async reviewAction(id, n, what) {
         const f = this.cardFile(id);
         if (!f) return;
@@ -4838,6 +4873,15 @@ class DendriteView extends ItemView {
                 await write(after);
                 if (item) await this.rememberDone(item);
             }).open();
+            return;
+        }
+        // A Google comment on several passages comes in as one comment
+        // per passage; resolved, it is resolved on all of them.
+        const gid = what === 'resolve' && item && review.reviewKeys(item)
+            .find((k) => k.startsWith('g:'));
+        if (gid) {
+            await this.resolveEverywhere(gid);
+            await this.rememberDone(item);
             return;
         }
         await write(review.removeItem(body, n));
@@ -7374,6 +7418,15 @@ class ReviewImportModal extends Modal {
             (relinks ? `${relinks} already in the cards will get ` +
                 `${relinks === 1 ? 'its' : 'their'} Google Docs link. ` :
                 '') +
+            // From a Google Doc or a Word file in Drive: whether any of its
+            // comments has a link, which those kept inside a Word file,
+            // not in Drive's own comments, do not.
+            (this.name && /\(Google Docs\)$/.test(this.name) &&
+             rows.some((x) => x.item.kind === 'comment') &&
+             !rows.some((x) => x.item.link) ?
+                'None has a Google Docs link: its comments are kept inside ' +
+                'the Word file, not in Google Docs\' own comments, so ' +
+                'Google gives them no link to their thread. ' : '') +
             'Each goes after its passage in the card, which is set to ' +
             'revise. A change still made on the text as it was sent can ' +
             'be applied from its card later; one whose passage has ' +
@@ -7425,6 +7478,9 @@ class ReviewImportModal extends Modal {
             if (row.done) {
                 where.addClass('is-missing');
                 where.setText('Resolved here before: left unticked.');
+            } else if (row.dup && row.relink) {
+                where.setText(`Already in the card, ` +
+                    `${core.shortId(row.at.id)}: gets its Google Docs link.`);
             } else if (row.dup) {
                 where.addClass('is-missing');
                 where.setText(`Already in the card, ` +

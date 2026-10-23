@@ -407,3 +407,82 @@ test('a comment already in a card without its Google Docs link gets it, ' +
     assert.ok(!r.needsLink(md, { ...item, link: '' }), 'no link to give');
     assert.ok(!r.needsLink('Other text.', item), 'not in this card');
 });
+
+test('a comment on a Word file in Docs is known by its whole doco. id',
+     () => {
+    const url = 'https://docs.google.com/document/d/D/edit?disco=' +
+        'doco.Qknvat1R-9aOjq3RpB5kKw';
+    const note = r.reviewItems('A ==b==%%[!review] J, 2026-10-23: Why? ' +
+        `${url}%%`)[0];
+    assert.ok(r.reviewKeys(note).includes('g:doco.Qknvat1R-9aOjq3RpB5kKw'));
+});
+
+// Google Docs' own record of a doc's comments, as it keeps one inside a
+// Word file it saves: protocol buffers, base64 in a custom XML part.
+function pbField(n, value) {
+    const varint = (x) => {
+        const out = [];
+        while (x > 127) {
+            out.push((x % 128) | 128);
+            x = Math.floor(x / 128);
+        }
+        out.push(x);
+        return Buffer.from(out);
+    };
+    if (typeof value === 'number') {
+        return Buffer.concat([varint(n * 8), varint(value)]);
+    }
+    const b = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
+    return Buffer.concat([varint(n * 8 + 2), varint(b.length), b]);
+}
+function googleRecord(docId, comments) {
+    return Buffer.concat([pbField(1, '1.0'), ...comments.map((c) =>
+        pbField(4, Buffer.concat([pbField(1, c.id), pbField(2,
+            Buffer.concat([pbField(1, c.id),
+                           pbField(4, Buffer.concat([pbField(1, 'text/plain'),
+                                                     pbField(2, c.text)])),
+                           pbField(6, c.ms)]))]))),
+        pbField(14, docId)]);
+}
+
+test('a Word file saved by Google Docs gives each comment its Google ' +
+     'link, one comment on several passages the same link', () => {
+    const d = require('../src/docx.js');
+    const W2 = W;
+    const at = '2026-10-23T18:13:01Z';
+    const ms = Date.parse(at) + 681;
+    const range = (id, t) => `<w:commentRangeStart w:id="${id}"/>` +
+        run(t) + `<w:commentRangeEnd w:id="${id}"/>` +
+        `<w:r><w:commentReference w:id="${id}"/></w:r>`;
+    const body = '<w:p>' + run('We sequenced ') + range(0, 'WGS CRAMs') +
+        run(' and ') + range(1, 'scDNA panels') + run(' with ') +
+        range(2, 'mash') + run('.') + '</w:p>';
+    const note = (id, date, text) => `<w:comment w:id="${id}" ` +
+        `w:author="Joshua Bridgers" w:date="${date}"><w:p>${run(text)}` +
+        '</w:p></w:comment>';
+    const comments = `<w:comments ${W2}>` +
+        note(0, at, 'Inconsistent naming.') +
+        note(1, at, 'Inconsistent naming.') +
+        note(2, '2026-10-23T17:58:09Z', 'Which mash?') + '</w:comments>';
+    const record = googleRecord('DOC1', [
+        { id: 'doco.Wk1b', text: 'Inconsistent naming.', ms },
+        { id: 'doco.Qknv', text: 'Which mash?',
+          ms: Date.parse('2026-10-23T17:58:09Z') + 120 }]);
+    const custom = '<?xml version="1.0"?><go:gDocsCustomXmlDataStorage ' +
+        'xmlns:go="http://customooxmlschemas.google.com/"><go:docsCustomData' +
+        ' roundtripDataSignature="x">' + record.toString('base64') +
+        '</go:docsCustomData></go:gDocsCustomXmlDataStorage>';
+    const file = d.writeZip([
+        { name: 'word/document.xml', data: Buffer.from(
+            `<w:document ${W2}><w:body>${body}</w:body></w:document>`) },
+        { name: 'word/comments.xml', data: Buffer.from(comments) },
+        { name: 'customXML/item1.xml', data: Buffer.from(custom) }], zlib);
+    const items = r.readReview(file, zlib);
+    const base = 'https://docs.google.com/document/d/DOC1/edit?disco=';
+    assert.deepEqual(items.map((x) => [x.quote, x.gid, x.link]), [
+        ['WGS CRAMs', 'doco.Wk1b', base + 'doco.Wk1b'],
+        ['scDNA panels', 'doco.Wk1b', base + 'doco.Wk1b'],
+        ['mash', 'doco.Qknv', base + 'doco.Qknv']]);
+    // A Word file not from Google Docs: no links.
+    assert.ok(r.readReview(returned(), zlib).every((x) => !x.link));
+});

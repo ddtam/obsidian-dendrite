@@ -1841,8 +1841,10 @@ button.dendrite-review-btn:hover {
     margin: 4px 0 6px;
 }
 
-/* What a table or figure still lacks, on its card and in its editor. */
+/* What a table or figure still lacks, on its card and in its editor:
+   the interface's words, in its font, not the manuscript's. */
 .dendrite-float-missing {
+    font-family: var(--font-interface);
     color: var(--text-faint);
     font-style: italic;
     font-size: var(--font-ui-small);
@@ -1871,4 +1873,44 @@ button.dendrite-review-btn:hover {
 }
 .dendrite-float-table .dendrite-float-label:empty {
     display: none;
+}
+
+/* The parts of a table or figure editor that are typed in: framed as
+   inputs, the frame a neutral grey a shade stronger while typing, so
+   where to click is plain while the rest stays as it prints. */
+.dendrite-float-field > .dendrite-cm,
+.dendrite-float-field > .dendrite-editor,
+.dendrite-float-field > .dendrite-float-input {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 2.2em;
+    padding: 4px 8px;
+    background: var(--background-primary-alt);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    cursor: text;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.dendrite-float-field.dendrite-float-table > .dendrite-cm,
+.dendrite-float-field.dendrite-float-table > .dendrite-editor {
+    min-height: 5em;
+}
+.dendrite-float-field > .dendrite-cm:hover,
+.dendrite-float-field > .dendrite-editor:hover {
+    border-color: var(--background-modifier-border-hover);
+}
+.dendrite-float-field > .dendrite-cm:focus-within,
+.dendrite-float-field > .dendrite-editor:focus {
+    border-color: var(--background-modifier-border-focus,
+                      var(--text-faint));
+    outline: none;
+}
+
+/* The editor's own words, labels, hints and its head, in the interface's
+   font; only the table, figure and caption are the manuscript's. */
+.dendrite-float-head,
+.dendrite-float-label,
+.dendrite-float-hint {
+    font-family: var(--font-interface);
 }

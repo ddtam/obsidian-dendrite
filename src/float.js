@@ -139,17 +139,18 @@ function floatEditor(opts) {
     };
     let cap = null;
     let table = null;
+    let image = null;
     let shown = null;
     const draw = () => {
         if (!shown) return;
         shown.empty();
-        if (!content) {
+        if (!linkedImage(content)) {
             shown.createDiv({ cls: 'dendrite-float-missing',
-                text: 'No image: paste one, drop a file, or link one with ' +
-                    '![[…]].' });
+                text: 'No image: type [[ in the Image field below to find ' +
+                    'one, or paste or drop one.' });
             return;
         }
-        opts.render(content, shown);
+        opts.render(linkedImage(content), shown);
     };
     if (kind === 'table') {
         cap = field('Caption, printed above the table', null, caption,
@@ -161,8 +162,13 @@ function floatEditor(opts) {
                       (v) => { content = v; });
     } else {
         shown = root.createDiv({ cls: 'dendrite-float-shown is-image' });
-        root.createDiv({ cls: 'dendrite-float-hint', text: 'Paste an image, ' +
-            'drop a file, or link one with ![[…]]; a new one replaces it.' });
+        // Its image as a link, typed with the editor's link search ([[),
+        // or filled in by an image pasted or dropped.
+        image = field('Image: type [[ to find one, or paste or drop one',
+                      'dendrite-float-image', content, (v) => {
+                          content = v.trim();
+                          draw();
+                      });
         cap = field('Caption, printed below the figure', null, caption,
                     (v) => { caption = v; });
     }
@@ -176,6 +182,7 @@ function floatEditor(opts) {
         if (!embed) embed = linkedImage(dt.getData && dt.getData('text/plain'));
         if (!embed) return false;
         content = embed;
+        if (image) image.set(embed);
         draw();
         changed();
         return true;
@@ -213,6 +220,7 @@ function floatEditor(opts) {
             ({ caption, content } = split(text, kind));
             cap.set(caption);
             if (table) table.set(content);
+            if (image) image.set(content);
             draw();
         },
         focusAt() { cap.focus(false); },
@@ -223,6 +231,7 @@ function floatEditor(opts) {
         destroy() {
             cap.destroy();
             if (table) table.destroy();
+            if (image) image.destroy();
             root.remove();
         },
     };

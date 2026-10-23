@@ -2504,6 +2504,7 @@ var require_review = __commonJS({
             out.set(cur.id, {
               author: cur.author,
               date: cur.date,
+              when: cur.when,
               text: paras.map((x) => x.trim()).filter(Boolean).join(" ")
             });
             cur = null;
@@ -2511,7 +2512,8 @@ var require_review = __commonJS({
             cur = {
               id: attr(tk.attrs, "w:id"),
               author: attr(tk.attrs, "w:author"),
-              date: day(attr(tk.attrs, "w:date"))
+              date: day(attr(tk.attrs, "w:date")),
+              when: attr(tk.attrs, "w:date") || ""
             };
             paras = [];
           }
@@ -2552,6 +2554,7 @@ var require_review = __commonJS({
           kind: "comment",
           author: note.author,
           date: note.date,
+          when: note.when,
           text: note.text,
           quote,
           before: sp.slice(
@@ -2580,7 +2583,91 @@ var require_review = __commonJS({
         }
       });
       items.sort((a, b) => a.at[0] - b.at[0] || a.at[1] - b.at[1]);
+      linkGoogle(items, googleData(files));
       return items;
+    }
+    function protoFields(buf) {
+      const out = [];
+      let i = 0;
+      const varint = () => {
+        let v = 0;
+        let scale = 1;
+        for (; ; ) {
+          const c = buf[i++];
+          if (c === void 0) throw new Error("truncated");
+          v += (c & 127) * scale;
+          scale *= 128;
+          if (c < 128) return v;
+        }
+      };
+      while (i < buf.length) {
+        const key = varint();
+        const field = Math.floor(key / 8);
+        const type = key % 8;
+        if (type === 0) out.push([field, varint()]);
+        else if (type === 2) {
+          const n = varint();
+          out.push([field, buf.subarray(i, i + n)]);
+          i += n;
+        } else if (type === 1) i += 8;
+        else if (type === 5) i += 4;
+        else throw new Error("unknown wire type");
+      }
+      return out;
+    }
+    function googleData(files) {
+      for (const [name, xml] of files) {
+        if (!/^customxml\//i.test(name)) continue;
+        const m = /<go:docsCustomData[^>]*>([^<]+)</.exec(xml);
+        if (!m) continue;
+        try {
+          const top = protoFields(Buffer.from(m[1], "base64"));
+          const get = (fields, n) => (fields.find((f) => f[0] === n) || [])[1];
+          const str = (b) => b ? Buffer.from(b).toString("utf8") : "";
+          const comments = [];
+          for (const [f, v] of top) {
+            if (f !== 4 || typeof v === "number") continue;
+            const rec = protoFields(v);
+            const body = get(rec, 2);
+            if (!body) continue;
+            const b = protoFields(body);
+            const text = (k) => {
+              const part = get(b, k);
+              return part ? str(get(protoFields(part), 2)) : "";
+            };
+            comments.push({
+              id: str(get(rec, 1)),
+              text: text(4) || text(3).replace(/<[^>]+>/g, ""),
+              ms: get(b, 6) || 0
+            });
+          }
+          return { docId: str(get(top, 14)), comments };
+        } catch (err) {
+          return null;
+        }
+      }
+      return null;
+    }
+    function linkGoogle(items, g) {
+      if (!g || !g.docId) return;
+      const flatText = (t) => String(t || "").replace(/\s+/g, " ").trim();
+      const groups = /* @__PURE__ */ new Map();
+      for (const it of items) {
+        if (it.kind !== "comment") continue;
+        const key = `${it.author}\0${flatText(it.text)}\0` + (it.when || it.date);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(it);
+      }
+      const used = /* @__PURE__ */ new Set();
+      for (const group of groups.values()) {
+        const it = group[0];
+        const when = Date.parse(it.when || "");
+        const near = g.comments.filter((c) => !used.has(c.id) && flatText(c.text) === flatText(it.text) && (!when || !c.ms || Math.abs(c.ms - when) < 12e4)).sort((a, b) => Math.abs(a.ms - when) - Math.abs(b.ms - when));
+        if (!near.length) continue;
+        used.add(near[0].id);
+        const link = `https://docs.google.com/document/d/${g.docId}/edit?disco=${near[0].id}`;
+        for (const x of group) Object.assign(x, { gid: near[0].id, link });
+      }
     }
     function readReviewJson(text, today = /* @__PURE__ */ new Date()) {
       const data = JSON.parse(text);
@@ -2893,7 +2980,7 @@ var require_review = __commonJS({
         return keys;
       }
       const { text, url } = noteLink(it.text);
-      const gid = it.gid || (/[?&]disco=([\w-]+)/.exec(url || it.link || "") || [])[1];
+      const gid = it.gid || (/[?&]disco=([\w.-]+)/.exec(url || it.link || "") || [])[1];
       if (gid) keys.push(`g:${gid}`);
       const bare = flat(text).replace(
         /^On “[^”]*”(?:, in an earlier version)?: /,
@@ -3114,6 +3201,7 @@ var require_review = __commonJS({
       addLink,
       commentActions,
       commentMenu,
+      googleData,
       itemText,
       addItems,
       removeItem,
@@ -3751,18 +3839,19 @@ var require_float = __commonJS({
       };
       let cap = null;
       let table = null;
+      let image = null;
       let shown = null;
       const draw = () => {
         if (!shown) return;
         shown.empty();
-        if (!content) {
+        if (!linkedImage(content)) {
           shown.createDiv({
             cls: "dendrite-float-missing",
-            text: "No image: paste one, drop a file, or link one with ![[\u2026]]."
+            text: "No image: type [[ in the Image field below to find one, or paste or drop one."
           });
           return;
         }
-        opts.render(content, shown);
+        opts.render(linkedImage(content), shown);
       };
       if (kind === "table") {
         cap = field(
@@ -3787,7 +3876,15 @@ var require_float = __commonJS({
         );
       } else {
         shown = root.createDiv({ cls: "dendrite-float-shown is-image" });
-        root.createDiv({ cls: "dendrite-float-hint", text: "Paste an image, drop a file, or link one with ![[\u2026]]; a new one replaces it." });
+        image = field(
+          "Image: type [[ to find one, or paste or drop one",
+          "dendrite-float-image",
+          content,
+          (v) => {
+            content = v.trim();
+            draw();
+          }
+        );
         cap = field(
           "Caption, printed below the figure",
           null,
@@ -3805,6 +3902,7 @@ var require_float = __commonJS({
         if (!embed) embed = linkedImage(dt.getData && dt.getData("text/plain"));
         if (!embed) return false;
         content = embed;
+        if (image) image.set(embed);
         draw();
         changed();
         return true;
@@ -3813,10 +3911,10 @@ var require_float = __commonJS({
         root.addEventListener("paste", async (e) => {
           const dt = e.clipboardData;
           if (!dt) return;
-          const image = [...dt.files || []].some((x) => /^image\//.test(x.type));
+          const image2 = [...dt.files || []].some((x) => /^image\//.test(x.type));
           const text = dt.getData && dt.getData("text/plain") || "";
           const link = linkedImage(text);
-          if (!image && !(link && text.trim().replace(/^!/, "") === link.replace(/^!/, ""))) return;
+          if (!image2 && !(link && text.trim().replace(/^!/, "") === link.replace(/^!/, ""))) return;
           e.preventDefault();
           await take(dt);
         });
@@ -3844,6 +3942,7 @@ var require_float = __commonJS({
           ({ caption, content } = split(text, kind));
           cap.set(caption);
           if (table) table.set(content);
+          if (image) image.set(content);
           draw();
         },
         focusAt() {
@@ -3860,6 +3959,7 @@ var require_float = __commonJS({
         destroy() {
           cap.destroy();
           if (table) table.destroy();
+          if (image) image.destroy();
           root.remove();
         }
       };
@@ -8590,6 +8690,44 @@ var DendriteView = class extends ItemView {
       );
     });
   }
+  /**
+   * Take a Google comment, known by `gid` ('g:' and its id), out of
+   * every card it is on, old versions too, its passages left as they
+   * were; one step to undo.
+   */
+  async resolveEverywhere(gid) {
+    const restores = [];
+    for (const node of core.allNodes(this.root)) {
+      const f = this.cardFile(node.id);
+      if (!f) continue;
+      const data = await this.app.vault.read(f);
+      const { body } = core.splitFrontmatter(data);
+      const hits = review.reviewItems(body).map((x, k) => review.reviewKeys(x).includes(gid) ? k : -1).filter((k) => k >= 0);
+      if (!hits.length) continue;
+      let next = body;
+      for (const k of hits.reverse()) next = review.removeItem(next, k);
+      const out = await this.writeCard(f, (d) => core.splitFrontmatter(d).fm + next);
+      restores.push({
+        path: f.path,
+        text: data,
+        ifBody: core.splitFrontmatter(out).body
+      });
+      this.invalidate(node.id);
+      if (this.cardEls.has(node.id)) await this.renderCard(node.id);
+    }
+    if (restores.length) {
+      this.pushUndo({
+        active: this.active,
+        files: [],
+        text: true,
+        restores
+      });
+    }
+    if (this.fannedId) {
+      this.render();
+      await this.fanReady;
+    }
+  }
   async reviewAction(id, n, what) {
     const f = this.cardFile(id);
     if (!f) return;
@@ -8622,6 +8760,12 @@ var DendriteView = class extends ItemView {
         await write(after);
         if (item) await this.rememberDone(item);
       }).open();
+      return;
+    }
+    const gid = what === "resolve" && item && review.reviewKeys(item).find((k) => k.startsWith("g:"));
+    if (gid) {
+      await this.resolveEverywhere(gid);
+      await this.rememberDone(item);
       return;
     }
     await write(review.removeItem(body, n));
@@ -10967,7 +11111,10 @@ var ReviewImportModal = class extends Modal {
     const dups = rows.filter((x) => x.dup).length;
     const done = rows.filter((x) => x.done).length;
     const relinks = rows.filter((x) => x.relink).length;
-    contentEl.createEl("p", { text: `${rows.length} comment${rows.length === 1 ? "" : "s"} and suggested change${rows.length === 1 ? "" : "s"}; ${found} found in the cards` + (dups ? `, ${dups} already in the cards` : "") + (done ? `, ${done} resolved here before` : "") + ". " + (relinks ? `${relinks} already in the cards will get ${relinks === 1 ? "its" : "their"} Google Docs link. ` : "") + "Each goes after its passage in the card, which is set to revise. A change still made on the text as it was sent can be applied from its card later; one whose passage has changed since comes in as a comment. Nothing is written until you add them, and Ctrl+Z on the board undoes it." });
+    contentEl.createEl("p", { text: `${rows.length} comment${rows.length === 1 ? "" : "s"} and suggested change${rows.length === 1 ? "" : "s"}; ${found} found in the cards` + (dups ? `, ${dups} already in the cards` : "") + (done ? `, ${done} resolved here before` : "") + ". " + (relinks ? `${relinks} already in the cards will get ${relinks === 1 ? "its" : "their"} Google Docs link. ` : "") + // From a Google Doc or a Word file in Drive: whether any of its
+    // comments has a link, which those kept inside a Word file,
+    // not in Drive's own comments, do not.
+    (this.name && /\(Google Docs\)$/.test(this.name) && rows.some((x) => x.item.kind === "comment") && !rows.some((x) => x.item.link) ? "None has a Google Docs link: its comments are kept inside the Word file, not in Google Docs' own comments, so Google gives them no link to their thread. " : "") + "Each goes after its passage in the card, which is set to revise. A change still made on the text as it was sent can be applied from its card later; one whose passage has changed since comes in as a comment. Nothing is written until you add them, and Ctrl+Z on the board undoes it." });
     const list = contentEl.createDiv({ cls: "dendrite-review-rows" });
     const active = view.active && view.byId.get(view.active);
     const count = () => rows.filter((x) => x.use).length;
@@ -11013,6 +11160,8 @@ var ReviewImportModal = class extends Modal {
       if (row.done) {
         where.addClass("is-missing");
         where.setText("Resolved here before: left unticked.");
+      } else if (row.dup && row.relink) {
+        where.setText(`Already in the card, ${core.shortId(row.at.id)}: gets its Google Docs link.`);
       } else if (row.dup) {
         where.addClass("is-missing");
         where.setText(`Already in the card, ${core.shortId(row.at.id)}: left unticked.`);

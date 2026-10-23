@@ -3557,7 +3557,8 @@ test('a figure card is edited in the card, widened to the page\'s text: ' +
     assert.ok(form && !form.closest('.dendrite-col'),
               'drawn over the board, so it can be wider than a column');
     assert.match(form.style.width, /pt$/, 'as wide as the page\'s text');
-    const cap = form.querySelector('textarea');
+    const cap = form.querySelector(
+        '.dendrite-float-field:not(.dendrite-float-image) textarea');
     assert.equal(cap.value, 'Old caption.');
     cap.value = 'New caption.';
     cap.dispatchEvent(new h.window.Event('input'));
@@ -3712,4 +3713,73 @@ test('a comment deleted here leaves the card and is not remembered, so a ' +
                      [[true, false], [false, true]],
                      'the deleted one offered again; the resolved one not');
     await view.doUndo();
+});
+
+test('the review dialog says which comments gain a link, and when none ' +
+     'of a Word file\'s comments has one', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\ndendrite_gdoc: https://docs.google.com/' +
+        'document/d/D/edit\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'The ==cohort==%%[!review] Joshua Bridgers, ' +
+          '2026-10-22: How many?%% was large.' });
+    const item = (link) => ({ kind: 'comment', author: 'Joshua Bridgers',
+        date: '2026-10-22', text: 'How many?', quote: 'cohort', before: '',
+        after: '', ...(link ? { gid: 'A1', link } : {}) });
+    view.plugin.gdocReview = async () => ({ title: 'RAC.docx', resolved: 0,
+        items: [item(null)] });
+    let m = await view.pullGdoc();
+    assert.match(m.contentEl.textContent, /None has a Google Docs link: /);
+    assert.match(m.contentEl.textContent, /kept inside the Word file/);
+    view.plugin.gdocReview = async () => ({ title: 'RAC.docx', resolved: 0,
+        items: [item('https://docs.google.com/document/d/D/edit?disco=A1')]
+    });
+    m = await view.pullGdoc();
+    assert.match(m.contentEl.textContent,
+                 /Already in the card, \S+: gets its Google Docs link\./);
+});
+
+test('resolving one passage of a comment on several resolves it on all ' +
+     'of them, in every card, in one step to undo; deleting takes one',
+     async () => {
+    const url = 'https://docs.google.com/document/d/D/edit?disco=doco.Wk1b';
+    const n = (p) => `==${p}==%%[!review] Joshua Bridgers, 2026-10-23: ` +
+        `Inconsistent naming. ${url}%%`;
+    const A = `We sequenced ${n('WGS CRAMs')} here.`;
+    const B = `And ${n('scDNA panels')} there, ${n('bulk')} too.`;
+    const { view, text } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': A, 'G-bbbbb': B });
+    await view.reviewAction('G-bbbbb', 1, 'delete');
+    assert.equal(text(cardPath('G-bbbbb')),
+                 `And ${n('scDNA panels')} there, bulk too.`,
+                 'delete: the one passage');
+    await view.reviewAction('G-aaaaa', 0, 'resolve');
+    assert.equal(text(cardPath('G-aaaaa')), 'We sequenced WGS CRAMs here.');
+    assert.equal(text(cardPath('G-bbbbb')), 'And scDNA panels there, bulk ' +
+                 'too.', 'resolved on every passage');
+    await view.doUndo();
+    assert.equal(text(cardPath('G-aaaaa')), A);
+    assert.equal(text(cardPath('G-bbbbb')),
+                 `And ${n('scDNA panels')} there, bulk too.`, 'one step');
+});
+
+test('a figure\'s image can be typed as a link in its own field, where ' +
+     'the editor\'s link search works', async () => {
+    const { view, text } = await open(FLOAT_INDEX, floatCards());
+    await view.startEdit('G-aaaaa');
+    const form = view.contentEl.querySelector('.dendrite-float-edit');
+    const image = form.querySelector('.dendrite-float-image textarea');
+    assert.ok(image, 'an Image field');
+    assert.equal(image.value, '![[old.png]]');
+    image.value = '![[umap_by_clone.png]]';
+    image.dispatchEvent(new h.window.Event('input'));
+    // A dropped image fills the field in.
+    await view.editing.editor.take({ files: [],
+        getData: () => '[[other.png]]' });
+    assert.equal(image.value, '![[other.png]]');
+    image.value = '![[umap_by_clone.png]]';
+    image.dispatchEvent(new h.window.Event('input'));
+    await view.endEdit();
+    assert.equal(text(cardPath('G-aaaaa')),
+                 '![[umap_by_clone.png]]\n\nOld caption.');
 });
