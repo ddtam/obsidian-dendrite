@@ -1816,8 +1816,8 @@ test('number keys set a card\'s role, and the menus show each key',
                  'the title reads without its key');
 });
 
-test('Alt with a number sets a role or status on a whole branch, as ' +
-     'one undo', async () => {
+test('a whole branch is set from the menu only, as one undo; Alt with a ' +
+     'number does nothing', async () => {
     const { view, read } = await open(
         '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
         '    - [[G-bbbbb|B]]\n        - [[G-ccccc|C]]\n' +
@@ -1835,24 +1835,35 @@ test('Alt with a number sets a role or status on a whole branch, as ' +
     const prop = (id, k) => (new RegExp(`dendrite_${k}: (\\w+)`).exec(
         read(cardPath(id))) || [])[1];
     const branch = ['G-aaaaa', 'G-bbbbb', 'G-ccccc', 'G-ddddd'];
-    // Alt+Shift+2 no longer sets a status.
-    view.contentEl.dispatchEvent(new h.window.KeyboardEvent('keydown',
-        { code: 'Digit2', key: '@', altKey: true, shiftKey: true,
-          bubbles: true, cancelable: true }));
-    await tick(30);
-    assert.equal(prop('G-ccccc', 'status'), undefined);
-    // Ctrl+Alt+2: done on every card in the branch that prints text.
     await press('Digit2', true);
+    await press('Digit4');
+    assert.deepEqual(branch.map((id) => prop(id, 'status')),
+                     [undefined, undefined, undefined, undefined],
+                     'Ctrl+Alt+2 sets nothing');
+    assert.deepEqual(branch.map((id) => prop(id, 'role')),
+                     [undefined, undefined, undefined, undefined],
+                     'Alt+4 sets nothing');
+    // The menus: a Whole branch submenu, without keys.
+    view.roleMenu('G-aaaaa', view.cardEls.get('G-aaaaa'));
+    const whole = h.obsidian.lastMenu.items.find((i) =>
+        i.title === 'Whole branch');
+    assert.ok(whole && whole.submenu, 'a submenu');
+    assert.deepEqual(whole.submenu.items.map((i) => i.title), [
+        'Prints automatically', 'Prints its heading only',
+        'Prints its full text', 'Scaffolding: prints its children only',
+        'Left out of the manuscript', 'Status: draft', 'Status: done',
+        'Status: revise']);
+    await whole.submenu.items[6].click();
+    await tick(30);
     assert.deepEqual(branch.map((id) => prop(id, 'status')),
                      [undefined, undefined, 'done', 'done'],
                      'headings take no status');
     assert.equal(prop('G-eeeee', 'status'), undefined, 'outside untouched');
-    // Alt+4: the whole branch left out, its statuses cleared with it.
-    await press('Digit4');
+    await whole.submenu.items[4].click();
+    await tick(30);
     assert.deepEqual(branch.map((id) => prop(id, 'role')),
                      ['notes', 'notes', 'notes', 'notes']);
     assert.equal(prop('G-ccccc', 'status'), undefined);
-    assert.equal(prop('G-eeeee', 'role'), undefined);
     assert.match(h.notices[h.notices.length - 1], /4 cards in the branch/);
     // One undo puts back every card's role and status.
     await view.doUndo();
@@ -1861,21 +1872,16 @@ test('Alt with a number sets a role or status on a whole branch, as ' +
                      [undefined, undefined, undefined, undefined]);
     assert.deepEqual(branch.map((id) => prop(id, 'status')),
                      [undefined, undefined, 'done', 'done']);
-    // The menus: a Whole branch submenu with each key.
-    view.roleMenu('G-aaaaa', view.cardEls.get('G-aaaaa'));
-    const whole = h.obsidian.lastMenu.items.find((i) =>
-        i.title === 'Whole branch');
-    assert.ok(whole && whole.submenu, 'a submenu');
-    const keys = whole.submenu.items.map((i) =>
-        i.titleContent.querySelector('[data-key]').dataset.key);
-    assert.deepEqual(keys, ['Alt+0', 'Alt+1', 'Alt+2', 'Alt+3', 'Alt+4',
-                            'Ctrl+Alt+1', 'Ctrl+Alt+2',
-                            'Ctrl+Alt+3']);
-    await whole.submenu.items[3].click();
+    // A heading card's own menu sets the cards below it.
+    await view.updateStatuses();
+    view.cardMenu(view.cardEls.get('G-aaaaa'));
+    const below = h.obsidian.lastMenu.items.find((i) =>
+        i.title === 'Cards below: revise');
+    assert.ok(below, 'the cards below take a status from its menu');
+    await below.click();
     await tick(30);
-    assert.deepEqual(branch.map((id) => prop(id, 'role')),
-                     ['scaffolding', 'scaffolding', 'scaffolding',
-                      'scaffolding']);
+    assert.deepEqual(branch.map((id) => prop(id, 'status')),
+                     [undefined, undefined, 'revise', 'revise']);
     // A card with nothing below it has no branch to set.
     view.roleMenu('G-eeeee', view.cardEls.get('G-eeeee'));
     assert.ok(!h.obsidian.lastMenu.items.some((i) =>
@@ -1940,7 +1946,7 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                              b.getAttribute('aria-label')),
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
-                      'Undo', 'Redo', 'Preview', 'Export']);
+                      'Undo', 'Redo', 'Preview', 'Printed', 'Export']);
     // The mode comes after the buttons; the name is the pane's title.
     const kids = [...view.contentEl.querySelector('.dendrite-bar').children];
     assert.ok(kids.indexOf(view.modeEl) > kids.indexOf(bar[5]));
@@ -2191,4 +2197,168 @@ test('review comments go into their cards as one undo step, set them to ' +
     await view.doUndo();
     assert.match(text(cardPath('G-bbbbb')), /==between 2014 and 2023==/,
                  'applying is undone in one step');
+});
+
+// ---- renaming the manuscript --------------------------------------------
+
+const RENAME_INDEX = '---\ndendrite_prefix: G\n' +
+    'dendrite_csl: W/Grant/style.csl\n---\n' +
+    '- [[G-aaaaa|One]]\n    - [[G-bbbbb|Two]]\n';
+
+async function openForRename() {
+    const o = await open(RENAME_INDEX, { 'G-aaaaa': '# One\nText.',
+                                         'G-bbbbb': 'Two text.' });
+    o.app.vault.folders.add('W/Grant');
+    await o.app.vault.create('Notes.md', 'See [[G-aaaaa|the aims]].');
+    await o.view.versionsChecked;
+    return o;
+}
+
+test('renaming the manuscript renames every card note, the index and ' +
+     'its folder, and keeps links and versions', async () => {
+    const { app, view, read } = await openForRename();
+    h.notices.length = 0;
+    assert.equal(await view.renameManuscript('Grant 2027', 'G27'), true);
+    const dir = 'W/Grant 2027';
+    assert.deepEqual([...app.vault.files.keys()].sort(), [
+        'Notes.md', `${dir}/Grant 2027.md`, `${dir}/cards/G27-aaaaa.md`,
+        `${dir}/cards/G27-bbbbb.md`]);
+    assert.equal(read(`${dir}/Grant 2027.md`),
+                 '---\ndendrite_prefix: G27\n' +
+                 `dendrite_csl: ${dir}/style.csl\n` +
+                 'dendrite_former_prefixes:\n  - G\n---\n' +
+                 '- [[G27-aaaaa|One]]\n    - [[G27-bbbbb|Two]]\n');
+    assert.equal(read('Notes.md'), 'See [[G27-aaaaa|the aims]].');
+    assert.equal(read(`${dir}/cards/G27-aaaaa.md`), '# One\nText.');
+    assert.equal(view.file.path, `${dir}/Grant 2027.md`);
+    assert.deepEqual([...view.byId.keys()], ['G27-aaaaa', 'G27-bbbbb']);
+    assert.ok(await view.history.store.get(view.historyKey('G27-aaaaa')),
+              'the card\'s versions followed it');
+    assert.ok(h.notices.some((n) => /renamed to Grant 2027/.test(n)));
+    assert.equal(view.renameProblem('Grant 2027', 'G27'),
+                 'that is already its title and prefix.');
+});
+
+test('a rename cut short finishes when run again', async () => {
+    const { app, view, read } = await openForRename();
+    const rename = app.fileManager.renameFile;
+    let n = 0;
+    app.fileManager.renameFile = async (f, to) => {
+        if (++n === 2) throw new Error('disk full');
+        return rename(f, to);
+    };
+    h.notices.length = 0;
+    assert.equal(await view.renameManuscript('Grant 2027', 'G27'), false);
+    assert.ok(h.notices.some((n) => /stopped part way: disk full/.test(n)));
+    assert.ok(read('W/Grant/cards/G27-aaaaa.md') !== undefined);
+    assert.ok(read('W/Grant/cards/G-bbbbb.md') !== undefined);
+    app.fileManager.renameFile = rename;
+    assert.equal(await view.renameManuscript('Grant 2027', 'G27'), true);
+    assert.equal(read('W/Grant 2027/Grant 2027.md'),
+                 '---\ndendrite_prefix: G27\n' +
+                 'dendrite_csl: W/Grant 2027/style.csl\n' +
+                 'dendrite_former_prefixes:\n  - G\n---\n' +
+                 '- [[G27-aaaaa|One]]\n    - [[G27-bbbbb|Two]]\n');
+});
+
+test('a rename refuses a prefix another manuscript has or had, and a ' +
+     'title taken', async () => {
+    const { app, view } = await openForRename();
+    await app.vault.create('W/Other.md', '---\ndendrite_prefix: OTH\n' +
+        'dendrite_former_prefixes:\n  - OLD\n---\n');
+    await app.vault.create('W/Taken/Taken.md', 'x');
+    app.vault.folders.add('W/Taken');
+    assert.match(view.renameProblem('New', 'OTH'), /already used/);
+    assert.match(view.renameProblem('New', 'OLD'), /already used/);
+    assert.match(view.renameProblem('Taken', 'NEW'), /W\/Taken already exists/);
+    assert.equal(view.renameProblem('New', 'NEW'), null);
+});
+
+test('after a rename, notes back under the old name are old copies, and ' +
+     'opening the old index shows the new one', async () => {
+    const { app, view } = await openForRename();
+    await view.renameManuscript('Grant 2027', 'G27');
+    await app.vault.create('W/Grant 2027/cards/G-aaaaa.md', '# One\nOld.');
+    await app.vault.create('W/Grant/Grant.md', RENAME_INDEX);
+    h.notices.length = 0;
+    view.checkOldCopies();
+    assert.deepEqual(view.oldCopies.map((c) => c.file.path).sort(),
+                     ['W/Grant 2027/cards/G-aaaaa.md', 'W/Grant/Grant.md']);
+    assert.ok(h.notices.some((n) => /2 notes under this manuscript's/
+        .test(n)));
+    assert.match(view.renameProblem('Grant 2028', 'G28'), /old copy/);
+    const other = new DendriteView({ app, updateHeader() {}, detach() {} },
+                                   view.plugin);
+    await other.onOpen();
+    await other.setState({ file: 'W/Grant/Grant.md' });
+    assert.equal(other.file.path, 'W/Grant 2027/Grant 2027.md');
+});
+
+test('a status set on a card is one undo step, and redoes', async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': '---\ndendrite_status: draft\n---\nA text' });
+    const status = () => (/dendrite_status: (\w+)/.exec(
+        read(cardPath('G-aaaaa'))) || [])[1];
+    await view.select('G-aaaaa');
+    await view.setStatusByKey('done');
+    assert.equal(status(), 'done');
+    await view.doUndo();
+    await tick(30);
+    assert.equal(status(), 'draft', 'undone');
+    await view.doRedo();
+    await tick(30);
+    assert.equal(status(), 'done', 'redone');
+    await view.stepStatus(false);
+    assert.equal(status(), 'revise');
+    await view.doUndo();
+    await tick(30);
+    assert.equal(status(), 'done', 'the step undone too');
+});
+
+test('the print-only view shows the cards that print, each where it ' +
+     'prints, and changes no structure', async () => {
+    const { view, read } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-sssss|S]]\n        - [[G-ccccc|C]]\n' +
+        '    - [[G-nnnnn|N]]\n        - [[G-mmmmm|M]]\n' +
+        '    - [[G-ddddd|D]]\n- [[G-eeeee|E]]\n',
+        { 'G-aaaaa': '# A\nNotes under A.',
+          'G-sssss': '---\ndendrite_role: scaffolding\n---\nplan',
+          'G-ccccc': 'C text', 'G-nnnnn': '---\ndendrite_role: notes\n' +
+          '---\nN', 'G-mmmmm': 'M text', 'G-ddddd': 'D text',
+          'G-eeeee': 'E text' });
+    await view.select('G-sssss');
+    const before = read(INDEX);
+    view.togglePrintOnly();
+    await tick(30);
+    const ids = (col) => col.map((n) => n.id);
+    assert.deepEqual(view.cols.map(ids),
+                     [['G-aaaaa', 'G-eeeee'], ['G-ccccc', 'G-ddddd']],
+                     'scaffolding lifts its children; notes go');
+    assert.deepEqual([...view.cardEls.keys()].sort(),
+                     ['G-aaaaa', 'G-ccccc', 'G-ddddd', 'G-eeeee']);
+    assert.equal(view.active, 'G-ccccc', 'a hidden card gives way');
+    assert.ok(view.cardEls.get('G-aaaaa').hasClass('is-prints-heading'));
+    assert.ok(view.board.hasClass('is-print-only'));
+    view.navigate('left');
+    await tick();
+    assert.equal(view.active, 'G-aaaaa', 'left goes to where it prints');
+    view.navigate('right');
+    await tick();
+    assert.equal(view.active, 'G-ccccc');
+    h.notices.length = 0;
+    await view.structural('down');
+    await view.insert('below');
+    await view.deleteActive();
+    assert.equal(read(INDEX), before, 'no structure changed');
+    assert.ok(h.notices.some((n) => /print-only view/.test(n)));
+    await view.setStatusByKey('done');
+    assert.match(read(cardPath('G-ccccc')), /dendrite_status: done/,
+                 'statuses still set');
+    assert.equal(view.getState().printOnly, true);
+    view.togglePrintOnly();
+    await tick(30);
+    assert.equal(view.cols.length, 3, 'every card again');
+    assert.equal(view.cardEls.size, 7);
 });

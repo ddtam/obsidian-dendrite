@@ -126,6 +126,16 @@ var require_core = __commonJS({
       }
       throw new Error("Dendrite: could not find a free card ID");
     }
+    function withPrefix(id, from, to) {
+      const head = from + "-";
+      const rest = id.slice(head.length);
+      return id.startsWith(head) && rest.length === ID_LEN && [...rest].every((c) => ID_CHARS.includes(c)) ? to + "-" + rest : id;
+    }
+    function formerPrefixes(fm) {
+      const v = fm && fm.dendrite_former_prefixes;
+      const list = Array.isArray(v) ? v : v ? [v] : [];
+      return list.map((x) => String(x).trim()).filter(validPrefix);
+    }
     function indexOf(node) {
       return node.parent.children.indexOf(node);
     }
@@ -295,10 +305,11 @@ var require_core = __commonJS({
       };
       return [segs(x, keepX), segs(y, keepY)];
     }
-    function columns(root) {
+    var TREE = { up: (n) => n.parent, kids: (n) => n.children };
+    function columns(root, kids = (n) => n.children) {
       const cols = [];
       const walk = (n, d) => {
-        for (const c of n.children) {
+        for (const c of kids(n)) {
           c.depth = d;
           (cols[d] = cols[d] || []).push(c);
           walk(c, d + 1);
@@ -702,12 +713,20 @@ var require_core = __commonJS({
       }
       return current;
     }
-    function alignColumns(cols, active, pos, heights, own = null) {
+    function alignColumns(cols, active, pos, heights, own = null, tree = TREE) {
       const targets = cols.map(() => null);
       if (!active) return targets;
       const lineage = /* @__PURE__ */ new Set([active.id]);
-      for (let n = active.parent; n && n.id; n = n.parent) lineage.add(n.id);
-      for (const d of descendants(active)) lineage.add(d.id);
+      for (let n = tree.up(active); n && n.id; n = tree.up(n)) {
+        lineage.add(n.id);
+      }
+      const below = (n) => {
+        for (const c of tree.kids(n)) {
+          lineage.add(c.id);
+          below(c);
+        }
+      };
+      below(active);
       const centre = (nodes, d) => {
         const a = pos(nodes[0].id);
         const b = pos(nodes[nodes.length - 1].id);
@@ -728,17 +747,17 @@ var require_core = __commonJS({
           const at = prev.indexOf(anchor[d - 1]);
           let best = null;
           prev.forEach((n, i) => {
-            if (!n.children.length) return;
+            if (!tree.kids(n).length) return;
             const dist = Math.abs(i - at);
             if (!best || dist < best.dist) best = { n, dist };
           });
           if (!best) continue;
           const parent = pos(best.n.id);
-          const first = pos(best.n.children[0].id);
+          const first = pos(tree.kids(best.n)[0].id);
           if (!parent || !first) continue;
           const onScreen = parent.top - targets[d - 1];
           targets[d] = first.top - onScreen;
-          anchor[d] = best.n.children[0];
+          anchor[d] = tree.kids(best.n)[0];
         }
       }
       return targets;
@@ -1102,6 +1121,8 @@ var require_core = __commonJS({
       stripComments,
       validPrefix,
       newId,
+      withPrefix,
+      formerPrefixes,
       makeNode,
       makeRoot,
       insertSibling,
@@ -3091,6 +3112,17 @@ var require_history = __commonJS({
           now: seen(match)
         };
       }
+      /**
+       * A note renamed: its versions follow it to `key` from `from`, unless
+       * `key` has its own already.
+       */
+      adopt(key, from) {
+        return this.serial(key, async () => {
+          if (key === from || await this.store.get(key)) return;
+          const rec = await this.store.get(from);
+          if (rec) await this.store.set(key, rec);
+        });
+      }
       /** Accept the card's current text as its newest version. */
       keep(key, text, compared) {
         return this.serial(key, async () => {
@@ -3210,6 +3242,37 @@ function prefixOf(app, file) {
 function isIndex(app, file) {
   return file instanceof TFile && file.extension === "md" && !!prefixOf(app, file);
 }
+function indexPrefix(text) {
+  const m = /^dendrite_prefix:[ \t]*["']?([^"'\n]*?)["']?[ \t]*$/m.exec(core.splitFrontmatter(text).fm);
+  return m ? m[1].trim() : null;
+}
+function formersOf(app, file) {
+  return core.formerPrefixes(
+    app.metadataCache.getFileCache(file)?.frontmatter
+  );
+}
+function prefixesInUse(app, except = null) {
+  const out = /* @__PURE__ */ new Set();
+  for (const f of app.vault.getMarkdownFiles()) {
+    const p = f !== except && prefixOf(app, f);
+    if (!p) continue;
+    out.add(p.toLowerCase());
+    for (const q of formersOf(app, f)) out.add(q.toLowerCase());
+  }
+  return out;
+}
+function successorOf(app, prefix) {
+  if (!prefix) return null;
+  return app.vault.getMarkdownFiles().find((f) => {
+    const p = prefixOf(app, f);
+    return p && p !== prefix && formersOf(app, f).includes(prefix);
+  }) || null;
+}
+var PATH_PROPS = [
+  "dendrite_csl",
+  "dendrite_pandoc_defaults",
+  "dendrite_reference_docx"
+];
 function safeName(s) {
   return String(s).replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -3241,6 +3304,14 @@ var DendriteView = class extends ItemView {
     this.labelTimer = null;
     this.ownBodies = /* @__PURE__ */ new Map();
     this.reverted = /* @__PURE__ */ new Set();
+    this.printOnly = false;
+    this.shown = null;
+    this.renaming = false;
+    this.loadedPrefix = null;
+    this.arriving = 0;
+    this.oldCopies = [];
+    this.renameTimer = null;
+    this.copiesTimer = null;
     this.history = plugin.history || new History();
     this.scope = new Scope(this.app.scope);
     this.registerKeys();
@@ -3255,13 +3326,24 @@ var DendriteView = class extends ItemView {
     return this.file ? this.file.basename : "Dendrite";
   }
   getState() {
-    return { file: this.file ? this.file.path : null };
+    return {
+      file: this.file ? this.file.path : null,
+      printOnly: this.printOnly
+    };
   }
   async setState(state, result) {
     const f = state && state.file && this.app.vault.getAbstractFileByPath(state.file);
     if (f instanceof TFile) {
       this.file = f;
+      if (state.printOnly !== void 0) {
+        this.printOnly = !!state.printOnly;
+      }
       await this.reload();
+      const next = successorOf(this.app, this.loadedPrefix);
+      if (next) {
+        await this.follow(next);
+        return super.setState(state, result);
+      }
       if (state.card && this.byId.has(state.card)) {
         this.active = state.card;
         this.applyActive(false);
@@ -3285,13 +3367,33 @@ var DendriteView = class extends ItemView {
     this.registerEvent(this.app.vault.on("rename", (f, old) => {
       if (this.file && f === this.file) {
         this.leaf.updateHeader();
-      } else if (f instanceof TFile) {
+        this.history.adopt(
+          this.historyKey(null),
+          this.historyKey(null, old)
+        );
+      } else if (f instanceof TFile && !this.renaming) {
         this.onRenameCard(f, old);
+        this.scheduleRenameChecks();
       }
     }));
+    this.registerEvent(this.app.vault.on("create", (f) => {
+      if (!(f instanceof TFile) || this.renaming || !this.file) return;
+      if (this.byId.has(f.basename)) {
+        this.invalidate(f.basename);
+        this.renderCard(f.basename);
+      }
+      this.scheduleRenameChecks();
+    }));
     this.registerEvent(this.app.vault.on("delete", (f) => {
-      if (f === this.file) this.leaf.detach();
-      else if (f instanceof TFile && this.dropped.has(f.basename)) {
+      if (this.renaming) return;
+      if (f === this.file) {
+        const next = successorOf(this.app, this.loadedPrefix);
+        if (next) this.follow(next);
+        else this.leaf.detach();
+        return;
+      }
+      if (f instanceof TFile) this.scheduleRenameChecks();
+      if (f instanceof TFile && this.dropped.has(f.basename)) {
         this.dropped.delete(f.basename);
         if (!this.dropped.size) this.dropBase = null;
         this.flagIndex();
@@ -3342,6 +3444,8 @@ var DendriteView = class extends ItemView {
     );
   }
   async onClose() {
+    clearTimeout(this.renameTimer);
+    clearTimeout(this.copiesTimer);
     this.cancelDrag();
     this.hideQuotaTip();
     this.closeQuotaEditor();
@@ -3356,6 +3460,9 @@ var DendriteView = class extends ItemView {
     if (!this.file) return;
     const text = await this.app.vault.read(this.file);
     this.loadText(text);
+    this.loadedPrefix = indexPrefix(text);
+    this.checkArriving(false);
+    this.scheduleOldCopies();
     this.render();
     this.versionsChecked = this.checkVersions().catch((err) => console.error("Dendrite: version check failed", err));
   }
@@ -3415,6 +3522,79 @@ var DendriteView = class extends ItemView {
       this.file ? this.file.path : ""
     );
     return f instanceof TFile ? f : null;
+  }
+  // ---- the print-only view ----------------------------------------------
+  /**
+   * The cards that print, each where it prints: a card left out goes
+   * with its branch, and a scaffolding card's children take its place
+   * under its parent, as export prints them a level up. So each column
+   * is a heading level of the printed document.
+   */
+  shownTree() {
+    const roleOf = (x) => this.printRoleOf(x);
+    const parent = /* @__PURE__ */ new Map();
+    const kids = /* @__PURE__ */ new Map();
+    const walk = (n, under) => {
+      const out = [];
+      for (const c of n.children) {
+        const role = core.roleFor(c, roleOf);
+        if (role === "notes") continue;
+        if (role === "scaffolding") {
+          out.push(...walk(c, under));
+          continue;
+        }
+        parent.set(c.id, under);
+        kids.set(c.id, walk(c, c));
+        out.push(c);
+      }
+      return out;
+    };
+    kids.set(null, walk(this.root, this.root));
+    return { parent, kids };
+  }
+  /** A shown tree as text, to tell when it changes. */
+  shownKey(t) {
+    return [...t.parent].map(([id, p]) => `${id}<${p.id}`).join(" ");
+  }
+  /** A card's children as the board shows them. */
+  kidsOf(n) {
+    return this.shown ? this.shown.kids.get(n.id) || [] : n.children;
+  }
+  /** A card's parent as the board shows it. */
+  upOf(n) {
+    return this.shown ? this.shown.parent.get(n.id) || null : n.parent;
+  }
+  /** Every card shown below one, in order. */
+  shownBelow(node) {
+    const out = [];
+    const walk = (n) => {
+      for (const c of this.kidsOf(n)) {
+        out.push(c);
+        walk(c);
+      }
+    };
+    walk(node);
+    return out;
+  }
+  /** The shown card nearest a hidden one: the next that prints. */
+  nearestShown(id) {
+    const all = core.allNodes(this.root);
+    const at = all.findIndex((n) => n.id === id);
+    const shown = (n) => this.shown.parent.has(n.id);
+    const pick = all.slice(at + 1).find(shown) || all.slice(0, Math.max(at, 0)).reverse().find(shown);
+    return pick ? pick.id : null;
+  }
+  togglePrintOnly() {
+    this.printOnly = !this.printOnly;
+    if (this.editing) this.endEdit();
+    this.render();
+    this.app.workspace.requestSaveLayout();
+  }
+  /** True, with a notice, when the print-only view is on. */
+  refuseInPrintView() {
+    if (!this.printOnly) return false;
+    new Notice('Dendrite: the print-only view shows the cards where they print, not where they sit in the index, so the structure is changed with every card shown. Click "Printed" in the bar to show them.', 8e3);
+    return true;
   }
   // ---- rendering -------------------------------------------------------
   render() {
@@ -3490,7 +3670,12 @@ var DendriteView = class extends ItemView {
       }, { passive: true });
     }
     this.renderOrphans(stage);
-    const cols = core.columns(this.root);
+    board.toggleClass("is-print-only", this.printOnly);
+    this.shown = this.printOnly ? this.shownTree() : null;
+    if (this.shown && this.active && !this.shown.parent.has(this.active)) {
+      this.active = this.nearestShown(this.active);
+    }
+    const cols = core.columns(this.root, (n) => this.kidsOf(n));
     this.cols = cols;
     if (!cols.length) {
       const empty = board.createDiv({ cls: "dendrite-empty" });
@@ -3509,9 +3694,9 @@ var DendriteView = class extends ItemView {
       let group = null;
       let parent;
       for (const n of nodes) {
-        if (!group || n.parent !== parent) {
+        if (!group || this.upOf(n) !== parent) {
           group = inner.createDiv({ cls: "dendrite-group" });
-          parent = n.parent;
+          parent = this.upOf(n);
         }
         this.renderShell(group, n);
       }
@@ -3549,6 +3734,12 @@ var DendriteView = class extends ItemView {
     btn("undo-2", "Undo", "Undo the last change to the tree: moves, new and deleted cards, roles and statuses (Ctrl+Z). A card's text is undone inside the card.", () => this.doUndo());
     btn("redo-2", "Redo", "Redo what was undone (Ctrl+Shift+Z or Ctrl+Y)", () => this.doRedo()).addClass("dendrite-bar-gap");
     btn("scroll-text", "Preview", "Show what export would print, beside the board", () => this.plugin.openPreview(this.file));
+    btn(
+      "printer",
+      "Printed",
+      "Show only the cards that print, each where it prints, headings by their heading line alone",
+      () => this.togglePrintOnly()
+    ).toggleClass("is-on", this.printOnly);
     btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e));
     this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
     this.showMode();
@@ -3605,7 +3796,7 @@ var DendriteView = class extends ItemView {
   renderShell(group, n) {
     const card = group.createDiv({ cls: "dendrite-card" });
     card.dataset.id = n.id;
-    if (n.children.length) card.addClass("has-children");
+    if (this.kidsOf(n).length) card.addClass("has-children");
     const grip = card.createDiv({ cls: "dendrite-grip" });
     grip.createSpan({ cls: "dendrite-role-icon" });
     setIcon(
@@ -3737,8 +3928,8 @@ var DendriteView = class extends ItemView {
     const node = this.active && this.byId.get(this.active);
     const lineage = /* @__PURE__ */ new Set();
     if (node) {
-      for (let n = node; n && n.id; n = n.parent) lineage.add(n.id);
-      for (const d of core.descendants(node)) lineage.add(d.id);
+      for (let n = node; n && n.id; n = this.upOf(n)) lineage.add(n.id);
+      for (const d of this.shownBelow(node)) lineage.add(d.id);
     }
     this.lineage = lineage;
     if (this.plugin.previewActive) {
@@ -3797,15 +3988,17 @@ var DendriteView = class extends ItemView {
     };
     const pairs = [];
     const steps = [];
-    for (let n = node; n && n.id; n = n.parent) {
+    for (let n = node; n && n.id; n = this.upOf(n)) {
       const card = this.cardEls.get(n.id);
       if (!card) continue;
-      if (n.parent && n.parent.id) {
-        const up = this.cardEls.get(n.parent.id);
+      const parent = this.upOf(n);
+      if (parent && parent.id) {
+        const up = this.cardEls.get(parent.id);
         if (up) steps.push({ from: rel(up), to: rel(card) });
       }
-      if (!n.children.length) continue;
-      const child = this.cardEls.get(n.children[0].id);
+      const kids = this.kidsOf(n);
+      if (!kids.length) continue;
+      const child = this.cardEls.get(kids[0].id);
       const group = child && child.parentElement;
       if (!group) continue;
       group.classList.add("is-flow");
@@ -3850,7 +4043,8 @@ var DendriteView = class extends ItemView {
       node,
       pos,
       heights,
-      own
+      own,
+      { up: (n) => this.upOf(n), kids: (n) => this.kidsOf(n) }
     );
     if (this.nativeScroll) {
       cols.forEach((col2, d) => {
@@ -4120,18 +4314,12 @@ var DendriteView = class extends ItemView {
     });
     const into = sub || m;
     const lead = sub ? "" : "Whole branch: ";
-    for (const [value, title, icon, key] of [[null, "Prints automatically", "wand", "0"], ...ROLE_ITEMS]) {
-      into.addItem((i) => i.setTitle(this.menuLabel(
-        lead + title,
-        `Alt+${key}`
-      )).setIcon(icon).onClick(() => this.setBranch(id, "role", value)));
+    for (const [value, title, icon] of [[null, "Prints automatically", "wand"], ...ROLE_ITEMS]) {
+      into.addItem((i) => i.setTitle(lead + title).setIcon(icon).onClick(() => this.setBranch(id, "role", value)));
     }
     into.addSeparator();
-    for (const [value, title, icon, key] of STATUS_ITEMS) {
-      into.addItem((i) => i.setTitle(this.menuLabel(
-        lead + title,
-        `Ctrl+Alt+${key}`
-      )).setIcon(icon).onClick(() => this.setBranch(id, "status", value)));
+    for (const [value, title, icon] of STATUS_ITEMS) {
+      into.addItem((i) => i.setTitle(lead + title).setIcon(icon).onClick(() => this.setBranch(id, "status", value)));
     }
   }
   /**
@@ -4227,7 +4415,7 @@ var DendriteView = class extends ItemView {
       m.addSeparator();
       for (const [value, title, icon, key] of STATUS_ITEMS) {
         m.addItem((i) => {
-          i.setTitle(this.menuLabel(title, `Ctrl+${key}`)).setIcon(icon).onClick(() => this.setStatus(id, value));
+          i.setTitle(this.menuLabel(title, `Ctrl+${key}`)).setIcon(icon).onClick(() => this.markStatus(id, value));
           if (typeof i.setChecked === "function") {
             i.setChecked(info.own === value);
             tickBeforeKey(i);
@@ -4239,8 +4427,18 @@ var DendriteView = class extends ItemView {
       item(
         "Keep the leftover text as notes",
         "check",
-        () => this.setStatus(id, null)
+        () => this.markStatus(id, null)
       );
+    } else if (info && info.derived) {
+      m.addSeparator();
+      for (const [value, title, icon] of STATUS_ITEMS) {
+        m.addItem((i) => {
+          i.setTitle(title.replace("Status", "Cards below")).setIcon(icon).onClick(() => this.setBranch(id, "status", value));
+          if (typeof i.setChecked === "function") {
+            i.setChecked(info.derived === value);
+          }
+        });
+      }
     }
     m.addSeparator();
     this.addRoleItems(m, id);
@@ -4333,9 +4531,8 @@ var DendriteView = class extends ItemView {
     if (!id || id === this.active) return;
     if (this.editing) await this.endEdit();
     const node = this.byId.get(id);
-    if (node && node.parent && node.parent.id) {
-      this.lastChild.set(node.parent.id, id);
-    }
+    const parent = node && this.upOf(node);
+    if (parent && parent.id) this.lastChild.set(parent.id, id);
     this.active = id;
     if (move) this.applyActive();
     else this.highlight();
@@ -4344,11 +4541,13 @@ var DendriteView = class extends ItemView {
     const node = this.active && this.byId.get(this.active);
     if (!node) return;
     if (dir === "left") {
-      if (node.parent && node.parent.id) this.select(node.parent.id);
+      const parent = this.upOf(node);
+      if (parent && parent.id) this.select(parent.id);
     } else if (dir === "right") {
-      if (!node.children.length) return;
+      const kids = this.kidsOf(node);
+      if (!kids.length) return;
       const last = this.lastChild.get(node.id);
-      const pick = node.children.find((c) => c.id === last) || node.children[0];
+      const pick = kids.find((c) => c.id === last) || kids[0];
       this.select(pick.id);
     } else {
       const col = this.cols[node.depth];
@@ -4379,14 +4578,11 @@ var DendriteView = class extends ItemView {
     s.register(["Mod"], "b", () => this.editKey("bold"));
     s.register(["Mod"], "i", () => this.editKey("italic"));
     for (const [value, , , key] of STATUS_ITEMS) {
-      const set = (branch) => () => {
+      s.register(["Mod"], key, () => {
         if (this.editing || !this.active) return true;
-        if (branch) this.setBranch(this.active, "status", value);
-        else this.setStatusByKey(value);
+        this.setStatusByKey(value);
         return false;
-      };
-      s.register(["Mod"], key, set(false));
-      s.register(["Mod", "Alt"], key, set(true));
+      });
     }
     s.register([], "Tab", () => this.editKey("indent"));
     s.register(["Shift"], "Tab", () => this.editKey("outdent"));
@@ -4465,7 +4661,7 @@ var DendriteView = class extends ItemView {
     this.pressInText = !!(e.target.closest && e.target.closest(".dendrite-cm, textarea, input"));
     if (e.button !== 0 || e.pointerType === "touch") return;
     const card = e.target.closest(".dendrite-card");
-    if (!card) return;
+    if (!card || this.printOnly) return;
     const grip = e.target.closest(".dendrite-grip");
     if (!grip) {
       if (card.dataset.id === this.active) return;
@@ -4624,6 +4820,7 @@ var DendriteView = class extends ItemView {
     return false;
   }
   async startEdit(id, atStart = false) {
+    if (this.refuseWhileArriving()) return;
     if (this.editing) {
       if (this.editing.id === id) return;
       await this.endEdit();
@@ -4768,17 +4965,11 @@ var DendriteView = class extends ItemView {
     const code = /^(?:Digit|Numpad)(\d)$/.exec(e.code || "");
     const digit = code ? code[1] : /^\d$/.test(e.key) ? e.key : null;
     const mod = e.ctrlKey || e.metaKey;
-    const status = mod && !e.shiftKey && digit && STATUS_ITEMS.find((r) => r[3] === digit);
+    const status = mod && !e.shiftKey && !e.altKey && digit && STATUS_ITEMS.find((r) => r[3] === digit);
     if (status) {
       if (!this.active) return;
       e.preventDefault();
-      if (e.altKey) this.setBranch(this.active, "status", status[0]);
-      else this.setStatusByKey(status[0]);
-      return;
-    }
-    if (e.altKey && !mod && !e.shiftKey && ROLE_KEYS.has(digit) && this.active) {
-      e.preventDefault();
-      this.setBranch(this.active, "role", ROLE_KEYS.get(digit));
+      this.setStatusByKey(status[0]);
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -4934,6 +5125,10 @@ var DendriteView = class extends ItemView {
   async writeIndex() {
     const root = this.root;
     clearTimeout(this.labelTimer);
+    if (this.refuseWhileArriving()) {
+      await this.reload();
+      return false;
+    }
     let stale = false;
     await this.app.vault.process(this.file, (data) => {
       const disk = core.serialiseTree(
@@ -4991,7 +5186,7 @@ var DendriteView = class extends ItemView {
    */
   async moveSelection(where) {
     const ed = this.editing;
-    if (!ed) return;
+    if (!ed || this.refuseInPrintView()) return;
     const prefix = this.prefix();
     if (!prefix || !core.validPrefix(prefix)) {
       new Notice("Dendrite: set a valid dendrite_prefix first.");
@@ -5028,7 +5223,10 @@ var DendriteView = class extends ItemView {
     if (where === "child") core.appendChild(node, fresh);
     else core.insertSibling(node, fresh, true);
     this.byId.set(id, fresh);
-    await this.writeIndex();
+    if (!await this.writeIndex()) {
+      await this.app.fileManager.trashFile(made);
+      return;
+    }
     ed.editor.replace(cut.keep, cut.at);
     ed.dirty = true;
     ed.changed = true;
@@ -5061,6 +5259,7 @@ var DendriteView = class extends ItemView {
    * card's note goes to the trash.
    */
   async merge(kind) {
+    if (this.refuseInPrintView()) return;
     const node = this.active && this.byId.get(this.active);
     if (!node) return;
     if (this.editing) await this.endEdit();
@@ -5099,7 +5298,10 @@ var DendriteView = class extends ItemView {
     }
     this.reindex();
     this.active = target.id;
-    await this.writeIndex();
+    if (!await this.writeIndex()) {
+      await this.writeCard(dst, () => dstText);
+      return;
+    }
     this.invalidate(node.id);
     this.invalidate(target.id);
     await this.app.fileManager.trashFile(src);
@@ -5128,6 +5330,7 @@ var DendriteView = class extends ItemView {
     );
   }
   async insert(where) {
+    if (this.refuseWhileArriving() || this.refuseInPrintView()) return;
     const prefix = this.prefix();
     if (!prefix || !core.validPrefix(prefix)) {
       new Notice("Dendrite: set a valid dendrite_prefix in the index note's properties first.");
@@ -5148,7 +5351,11 @@ var DendriteView = class extends ItemView {
     }
     this.byId.set(id, fresh);
     this.active = id;
-    await this.writeIndex();
+    if (!await this.writeIndex()) {
+      this.undo.pop();
+      await this.app.fileManager.trashFile(made);
+      return;
+    }
     await this.sweepStatuses();
     this.render();
     await this.startEdit(id);
@@ -5232,6 +5439,7 @@ var DendriteView = class extends ItemView {
     return true;
   }
   async structural(op) {
+    if (this.refuseInPrintView()) return;
     const node = this.active && this.byId.get(this.active);
     if (!node) return;
     if (this.editing) await this.endEdit();
@@ -5250,7 +5458,7 @@ var DendriteView = class extends ItemView {
   }
   async deleteActive() {
     const node = this.active && this.byId.get(this.active);
-    if (!node) return;
+    if (!node || this.refuseWhileArriving() || this.refuseInPrintView()) return;
     if (this.editing) await this.endEdit();
     const doomed = [node, ...core.descendants(node)];
     const files = [];
@@ -5268,7 +5476,10 @@ var DendriteView = class extends ItemView {
     core.remove(node);
     this.reindex();
     this.active = next ? next.id : null;
-    await this.writeIndex();
+    if (!await this.writeIndex()) {
+      this.undo.pop();
+      return;
+    }
     for (const n of doomed) {
       const f = this.cardFile(n.id);
       this.invalidate(n.id);
@@ -5406,7 +5617,17 @@ var DendriteView = class extends ItemView {
         await this.checkVersion(null, text2, true);
         return;
       }
-      this.checkDropped(text2);
+      if (this.renaming) return;
+      if (indexPrefix(text2) !== this.loadedPrefix) {
+        if (this.editing) await this.endEdit();
+        this.dropped.clear();
+        this.dropBase = null;
+        this.indexText = text2;
+        this.flagIndex();
+        new Notice(`Dendrite: ${this.file.basename} was renamed on another device, to the prefix ${indexPrefix(text2)}. The board follows it as its cards arrive.`, 1e4);
+      } else {
+        this.checkDropped(text2);
+      }
       await this.checkVersion(null, text2, false);
       if (this.root && core.writeIndexText(text2, this.root) === text2) {
         this.indexList = core.serialiseTree(this.root);
@@ -5467,8 +5688,13 @@ var DendriteView = class extends ItemView {
     }
   }
   async onMetadata(f) {
-    if (!(f instanceof TFile)) return;
+    if (!(f instanceof TFile) || this.renaming) return;
+    if (f !== this.file && this.loadedPrefix && isIndex(this.app, f) && prefixOf(this.app, f) !== this.loadedPrefix && formersOf(this.app, f).includes(this.loadedPrefix)) {
+      await this.follow(f);
+      return;
+    }
     if (f === this.file) {
+      this.checkArriving();
       this.updateNumbers();
       this.updateCounts();
       return;
@@ -5485,9 +5711,9 @@ var DendriteView = class extends ItemView {
     this.noteLabel(f.basename, body);
   }
   // ---- versions going back ---------------------------------------------
-  historyKey(id) {
+  historyKey(id, path = this.file.path) {
     const vault = this.app.appId || this.app.vault.getName && this.app.vault.getName() || "vault";
-    return `${vault}/${id === null ? "index:" + this.file.path : id}`;
+    return `${vault}/${id === null ? "index:" + path : id}`;
   }
   /**
    * Record a note's text in this device's history and notice when a
@@ -5685,6 +5911,273 @@ var DendriteView = class extends ItemView {
     if (this.active === old) this.active = node.id;
     this.invalidate(old);
   }
+  // ---- renaming the manuscript ------------------------------------------
+  /** The prefixes this manuscript had before, from its index. */
+  formers() {
+    return this.file ? formersOf(this.app, this.file) : [];
+  }
+  /**
+   * The index's new path, and its folder's when the folder has the
+   * index's name, as a manuscript made here does.
+   */
+  renameTargets(name) {
+    const dir = this.file.parent ? this.file.parent.path : "/";
+    const top = !dir || dir === "/";
+    const parts = top ? [] : dir.split("/");
+    const moveFolder = !top && parts[parts.length - 1] === this.file.basename && name !== this.file.basename;
+    const newDir = moveFolder ? normalizePath([...parts.slice(0, -1), name].join("/")) : dir;
+    return {
+      dir,
+      newDir,
+      moveFolder,
+      index: normalizePath((top ? "" : dir + "/") + name + ".md")
+    };
+  }
+  /** Why the manuscript cannot be renamed so, or null. */
+  renameProblem(title, prefix) {
+    const name = safeName(title);
+    if (!name) return "give the manuscript a title.";
+    if (!core.validPrefix(prefix)) {
+      return "a prefix is letters, digits and single hyphens.";
+    }
+    const now = this.prefix();
+    if (prefix !== now && prefix.toLowerCase() === now.toLowerCase()) {
+      return "a prefix that differs only in capitals is not supported, since some systems treat the file names as the same.";
+    }
+    const mine = [now, ...this.formers()].map((p) => p.toLowerCase());
+    if (!mine.includes(prefix.toLowerCase()) && prefixesInUse(this.app, this.file).has(prefix.toLowerCase())) {
+      return `the prefix ${prefix} is already used by another manuscript.`;
+    }
+    if (this.reverted.size || this.oldCopies.length) {
+      return "something on the board is marked as an older or old copy. Compare and choose first.";
+    }
+    const t = this.renameTargets(name);
+    if (name !== this.file.basename && this.app.vault.getAbstractFileByPath(t.index)) {
+      return `${t.index} already exists.`;
+    }
+    if (t.moveFolder && this.app.vault.getAbstractFileByPath(t.newDir)) {
+      return `${t.newDir} already exists.`;
+    }
+    if (name === this.file.basename && prefix === now && !this.renamePlan(prefix).moves.length) {
+      return "that is already its title and prefix.";
+    }
+    return null;
+  }
+  /**
+   * Each card note to rename to `prefix`: its note under this or an
+   * earlier prefix, where the note under the new name is not there
+   * yet. A card with notes under both names is a clash.
+   */
+  renamePlan(prefix) {
+    const from = [this.prefix(), ...this.formers()].filter((p) => p !== prefix);
+    const to = (id) => from.reduce((x, p) => core.withPrefix(x, p, prefix), id);
+    const moves = [];
+    const clashes = [];
+    for (const n of core.allNodes(this.root)) {
+      const id = to(n.id);
+      const have = /* @__PURE__ */ new Set();
+      for (const old of [n.id, ...from.map((p) => `${p}-${core.shortId(id)}`)]) {
+        const f = old !== id && this.cardFile(old);
+        if (f) have.add(f);
+      }
+      if (!have.size) continue;
+      if (have.size > 1 || this.cardFile(id)) clashes.push(id);
+      else moves.push({ file: [...have][0], id });
+    }
+    return { from, to, moves, clashes };
+  }
+  /**
+   * Rename the manuscript: every card note to the new prefix, the
+   * index's list and prefix, the index note, and its folder when the
+   * folder has the index's name. The old prefix is recorded on the
+   * index first, as dendrite_former_prefixes, so a board on another
+   * device follows the rename as a sync brings it and tells an old
+   * copy that comes back later from a card. Run again with the same
+   * title and prefix, it finishes a rename cut short.
+   */
+  async renameManuscript(title, prefix) {
+    const problem = this.renameProblem(title, prefix);
+    if (problem) {
+      new Notice("Dendrite: not renamed: " + problem, 1e4);
+      return false;
+    }
+    if (this.editing) await this.endEdit();
+    await this.flush();
+    const name = safeName(title);
+    const plan = this.renamePlan(prefix);
+    if (plan.clashes.length) {
+      new Notice("Dendrite: not renamed: these cards have a note under both the old and the new name: " + plan.clashes.join(", ") + ". Keep one of each first.", 0);
+      return false;
+    }
+    const target = this.renameTargets(name);
+    const old = this.prefix();
+    const indexKey = this.historyKey(null);
+    const fm = this.app.fileManager;
+    this.renaming = true;
+    let failed = null;
+    try {
+      const formers = [.../* @__PURE__ */ new Set([...this.formers(), old])].filter((p) => p !== prefix);
+      await writeProps(this.app, this.file, {
+        dendrite_former_prefixes: formers.length ? formers : null
+      });
+      for (const m of plan.moves) {
+        await fm.renameFile(m.file, normalizePath(
+          `${m.file.parent.path}/${m.id}.md`
+        ));
+      }
+      for (const n of core.allNodes(this.root)) n.id = plan.to(n.id);
+      this.reindex();
+      if (this.active) this.active = plan.to(this.active);
+      await this.app.vault.process(
+        this.file,
+        (data) => core.writeIndexText(data, this.root)
+      );
+      await writeProps(
+        this.app,
+        this.file,
+        { dendrite_prefix: prefix }
+      );
+      for (const n of core.allNodes(this.root)) {
+        for (const p of plan.from) {
+          await this.history.adopt(
+            this.historyKey(n.id),
+            this.historyKey(`${p}-${core.shortId(n.id)}`)
+          );
+        }
+      }
+      if (name !== this.file.basename) {
+        await fm.renameFile(this.file, target.index);
+      }
+      if (target.moveFolder) {
+        await fm.renameFile(
+          this.app.vault.getAbstractFileByPath(target.dir),
+          target.newDir
+        );
+        await fm.processFrontMatter(this.file, (props) => {
+          for (const k of PATH_PROPS) {
+            const v = props[k];
+            if (typeof v === "string" && v.startsWith(target.dir + "/")) {
+              props[k] = target.newDir + v.slice(target.dir.length);
+            }
+          }
+        });
+      }
+      await this.history.adopt(this.historyKey(null), indexKey);
+    } catch (err) {
+      console.error("Dendrite: rename failed", err);
+      failed = err;
+    } finally {
+      this.renaming = false;
+      this.undo = [];
+      this.redo = [];
+      this.texts.clear();
+      this.leaf.updateHeader();
+      await this.reload();
+    }
+    if (failed) {
+      new Notice("Dendrite: the rename stopped part way: " + failed.message + ". Rename again with the same title and prefix to finish it.", 0);
+      return false;
+    }
+    new Notice(`Dendrite: renamed to ${name}, cards ${prefix}-\u2026, ${plan.moves.length} card notes renamed.`, 1e4);
+    return true;
+  }
+  /** Show `f`, the index this manuscript was renamed to. */
+  async follow(f) {
+    if (this.editing) await this.endEdit();
+    const was = this.file ? this.file.basename : "";
+    this.undo = [];
+    this.redo = [];
+    this.texts.clear();
+    this.reverted.clear();
+    this.held.clear();
+    this.versionInfo.clear();
+    this.dropped.clear();
+    this.dropBase = null;
+    this.indexReverted = false;
+    this.file = f;
+    this.leaf.updateHeader();
+    await this.reload();
+    new Notice(`Dendrite: ${was} was renamed to ${f.basename} on another device; the board shows it under its new name.`, 1e4);
+    if (this.app.workspace.requestSaveLayout) {
+      this.app.workspace.requestSaveLayout();
+    }
+  }
+  scheduleRenameChecks() {
+    clearTimeout(this.renameTimer);
+    this.renameTimer = setTimeout(() => this.checkArriving(), 200);
+    this.scheduleOldCopies();
+  }
+  /**
+   * Count the cards listed under the new prefix whose notes still
+   * carry an earlier one: a rename from another device arriving.
+   * While any are, the board changes nothing.
+   */
+  checkArriving(tell = true) {
+    if (!this.file || this.renaming) return;
+    const now = this.prefix();
+    const formers = this.formers().filter((p) => p !== now);
+    let n = 0;
+    for (const node of formers.length ? core.allNodes(this.root) : []) {
+      if (this.cardFile(node.id)) continue;
+      const s = core.shortId(node.id);
+      if (formers.some((p) => this.cardFile(`${p}-${s}`))) n++;
+    }
+    const was = this.arriving;
+    this.arriving = n;
+    if (n === was) return;
+    if (n && this.editing) this.endEdit();
+    if (!n && tell) {
+      new Notice("Dendrite: the rename has arrived; every card is here under its new name.");
+      this.render();
+    }
+    this.updateStatuses();
+  }
+  refuseWhileArriving() {
+    if (!this.arriving || this.renaming) return false;
+    new Notice(`Dendrite: ${this.arriving} card${this.arriving === 1 ? "" : "s"} renamed on another device ${this.arriving === 1 ? "has" : "have"} not arrived yet, so the board changes nothing until they do. If they never arrive, rename again from the settings with the same title and prefix.`, 1e4);
+    return true;
+  }
+  scheduleOldCopies() {
+    clearTimeout(this.copiesTimer);
+    this.copiesTimer = setTimeout(() => this.checkOldCopies(), 5e3);
+  }
+  /**
+   * Notes under a name this manuscript had before a rename: its index,
+   * or a card whose note under the new name exists or which the index
+   * no longer lists. A device that had not seen the rename brought
+   * them back. They are reported, never used.
+   */
+  checkOldCopies() {
+    if (!this.file || this.renaming) return;
+    const now = this.prefix();
+    const formers = this.formers().filter((p) => p !== now);
+    const out = [];
+    for (const f of formers.length ? this.app.vault.getMarkdownFiles() : []) {
+      if (f === this.file) continue;
+      const p = prefixOf(this.app, f);
+      if (p && formers.includes(p)) {
+        out.push({ file: f, id: null });
+        continue;
+      }
+      const q = formers.find((x) => core.withPrefix(f.basename, x, now) !== f.basename);
+      if (!q) continue;
+      const id = core.withPrefix(f.basename, q, now);
+      if (this.cardFile(id) || !this.byId.has(id)) {
+        out.push({ file: f, id: this.byId.has(id) ? id : null });
+      }
+    }
+    const before = new Set(this.oldCopies.map((c) => c.file.path));
+    this.oldCopies = out;
+    const fresh = out.filter((c) => !before.has(c.file.path));
+    if (fresh.length) {
+      const names = fresh.slice(0, 5).map((c) => c.file.basename).join(", ");
+      const more = fresh.length > 5 ? `, and ${fresh.length - 5} more` : "";
+      new Notice(`Dendrite: ${fresh.length} note${fresh.length === 1 ? "" : "s"} under this manuscript's name before its rename came back, probably from a device that had not synced: ${names}${more}. They are not used. Click "old copies" on the bar to see them.`, 0);
+    }
+    if (fresh.length || before.size !== out.length) {
+      this.updateStatuses();
+    }
+  }
   // ---- manuscript settings, numbering and counts ------------------------
   /** The manuscript's settings, from its index note's properties. */
   manuscript() {
@@ -5815,7 +6308,7 @@ var DendriteView = class extends ItemView {
       new Notice("Dendrite: a structural card takes its status from the cards below it.");
       return;
     }
-    await this.setStatus(this.active, status);
+    await this.markStatus(this.active, status);
   }
   /**
    * Ask for a returned Word file, then show what it says and where in
@@ -5990,6 +6483,24 @@ var DendriteView = class extends ItemView {
     if ((this.statusOf(id) || null) === (status || null)) return;
     await writeProps(this.app, f, { dendrite_status: status || null });
   }
+  /** A status set by hand: a key, a menu or a chip. One undo step. */
+  async markStatus(id, status) {
+    const f = this.cardFile(id);
+    if (!f || (this.statusOf(id) || null) === (status || null)) return;
+    const data = await this.app.vault.read(f);
+    await this.setStatus(id, status);
+    this.pushUndo({
+      active: this.active,
+      files: [],
+      created: [],
+      restores: [{
+        path: f.path,
+        text: data,
+        ifBody: core.splitFrontmatter(data).body
+      }],
+      text: false
+    });
+  }
   /**
    * Show each card's status at its top right, beside the role icon,
    * and the counts in the bar.
@@ -6056,6 +6567,23 @@ var DendriteView = class extends ItemView {
         s.setAttr("aria-label", "The index changed outside Dendrite to an older copy. Click to compare and choose; nothing is written until you do");
         s.onclick = () => this.reviewVersion(null);
       }
+      if (this.arriving) {
+        const s = this.statusEl.createSpan({
+          cls: "dendrite-status-chip is-reverted",
+          text: `renaming: ${this.arriving} to arrive`
+        });
+        s.setAttr("aria-label", "Renamed on another device; some card notes have not arrived under their new names. The board changes nothing until they do");
+        s.onclick = () => this.refuseWhileArriving();
+      }
+      if (this.oldCopies.length) {
+        const n = this.oldCopies.length;
+        const s = this.statusEl.createSpan({
+          cls: "dendrite-status-chip is-reverted",
+          text: `${n} old cop${n === 1 ? "y" : "ies"} \u27F2`
+        });
+        s.setAttr("aria-label", "Notes under this manuscript's name before its rename, brought back by a sync. Click to see them");
+        s.onclick = () => new OldCopiesModal(this).open();
+      }
     }
     if (this.plugin.previewStatuses) {
       this.plugin.previewStatuses(this.file);
@@ -6107,17 +6635,21 @@ var DendriteView = class extends ItemView {
     const node = this.active && this.byId.get(this.active);
     if (!node) return;
     if (this.statusOf(node.id) === "unsplit") {
-      if (up) await this.setStatus(node.id, null);
+      if (up) await this.markStatus(node.id, null);
       return;
     }
     if (core.roleFor(node, (x) => this.printRoleOf(x)) !== "prose") {
       new Notice("Dendrite: a structural card takes its status from the cards below it.");
       return;
     }
-    await this.setStatus(this.active, up ? "done" : "revise");
+    await this.markStatus(this.active, up ? "done" : "revise");
   }
   /** Mark cards that print nothing, and where a role was set by hand. */
   updateRoles() {
+    if (this.shown && this.shownKey(this.shownTree()) !== this.shownKey(this.shown)) {
+      this.render();
+      return;
+    }
     for (const [id, card] of this.cardEls) {
       const node = this.byId.get(id);
       if (!node) continue;
@@ -6133,6 +6665,7 @@ var DendriteView = class extends ItemView {
         "is-heading-only",
         this.roleOf(id) === "section"
       );
+      card.toggleClass("is-prints-heading", !out && core.roleFor(node, (x) => this.printRoleOf(x)) === "section");
       const set = this.roleOf(id);
       let role = out ? "notes" : core.roleFor(node, (x) => this.printRoleOf(x));
       const auto = out ? set !== "notes" : !set;
@@ -6567,7 +7100,7 @@ var DendriteView = class extends ItemView {
     const ed = this.editing;
     const bodyOf = (id) => ed && ed.id === id ? ed.editor.value : bodies.get(id);
     const top = f.branch && this.byId.get(f.branch);
-    const nodes = top ? [top, ...core.descendants(top)] : core.allNodes(this.root);
+    const nodes = (top ? [top, ...core.descendants(top)] : core.allNodes(this.root)).filter((n) => !this.shown || this.shown.parent.has(n.id));
     const ids = nodes.map((n) => n.id);
     const r = core.findMatches(ids, bodyOf, f.query, f);
     const was = f.matches[f.index];
@@ -6604,7 +7137,7 @@ var DendriteView = class extends ItemView {
     const below = /* @__PURE__ */ new Map();
     for (const [id, k] of per) {
       const node = this.byId.get(id);
-      for (let p = node && node.parent; p && p.id; p = p.parent) {
+      for (let p = node && this.upOf(node); p && p.id; p = this.upOf(p)) {
         below.set(p.id, (below.get(p.id) || 0) + k);
       }
     }
@@ -6638,9 +7171,8 @@ var DendriteView = class extends ItemView {
     if (this.find !== f) return;
     if (this.active !== m.id) {
       const node = this.byId.get(m.id);
-      if (node && node.parent && node.parent.id) {
-        this.lastChild.set(node.parent.id, m.id);
-      }
+      const parent = node && this.upOf(node);
+      if (parent && parent.id) this.lastChild.set(parent.id, m.id);
       this.active = m.id;
     }
     this.applyActive();
@@ -6803,6 +7335,7 @@ var DendriteView = class extends ItemView {
    */
   async exportTo(node, format = "md") {
     await this.flush();
+    if (this.refuseWhileArriving()) return null;
     if (this.reverted.size) {
       const names = [...this.reverted].map((k) => k === "index" ? "the index" : core.shortId(k));
       new Notice("Dendrite: not exported, since " + names.join(", ") + ' changed to an older copy. Click "older copy" to compare and choose first.', 1e4);
@@ -7373,7 +7906,10 @@ var ManuscriptModal = class extends Modal {
     const ms = view.manuscript();
     const draft = {};
     this.titleEl.setText(`${view.file.basename}: settings`);
-    new Setting(contentEl).setName("Prefix").setDesc("Starts every card ID in this manuscript. Fixed once cards exist, since their file names carry it.").addText((t) => t.setValue(ms.prefix || "").setDisabled(true));
+    new Setting(contentEl).setName("Title and prefix").setDesc(`The index is ${view.file.basename}, and card IDs start ${ms.prefix}. Renaming changes both, with every card note and the folder.`).addButton((b) => b.setButtonText("Rename\u2026").onClick(() => {
+      this.close();
+      new RenameModal(view).open();
+    }));
     quotaSetting(
       contentEl,
       "Total quota",
@@ -7924,6 +8460,61 @@ async function writeProps(app, file, draft) {
     }
   });
 }
+var RenameModal = class extends Modal {
+  constructor(view) {
+    super(view.app);
+    this.view = view;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    const view = this.view;
+    let title = view.file.basename;
+    let prefix = view.prefix() || "";
+    this.titleEl.setText(`Rename ${title}`);
+    new Setting(contentEl).setName("Title").setDesc("Names the index note, and its folder when the folder has the same name.").addText((t) => t.setValue(title).onChange((v) => {
+      title = v;
+    }));
+    new Setting(contentEl).setName("Prefix").setDesc("Starts every card ID. Each card note is renamed to it, keeping its last five characters.").addText((t) => t.setValue(prefix).onChange((v) => {
+      prefix = v.trim();
+    }));
+    contentEl.createEl("p", { text: "Let your other devices finish syncing first. A board open on another device follows the rename as it arrives and changes nothing until every card is there. A note under the old name that a device brings back later is marked on the board as an old copy and not used. Links elsewhere in the vault follow when Obsidian is set to update internal links. This is not an undo step; rename again to go back." });
+    new Setting(contentEl).addButton((b) => b.setButtonText("Cancel").onClick(() => this.close())).addButton((b) => b.setButtonText("Rename").setCta().onClick(async () => {
+      this.close();
+      await view.renameManuscript(title, prefix);
+    }));
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var OldCopiesModal = class extends Modal {
+  constructor(view) {
+    super(view.app);
+    this.view = view;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    const view = this.view;
+    contentEl.empty();
+    this.titleEl.setText("Old copies from before the rename");
+    contentEl.createEl("p", { text: "These notes carry a name this manuscript had before it was renamed. A device that had not synced the rename brought them back. The manuscript does not use them. If one holds writing you want, open it and copy the writing into the card it names, then move it to the trash." });
+    for (const c of view.oldCopies) {
+      const node = c.id && view.byId.get(c.id);
+      const desc = c.id === null && prefixOf(this.app, c.file) ? "the index as it was" : node ? `old copy of card ${core.shortId(c.id)}` + (node.label ? ` (${node.label})` : "") : "a card the index does not list";
+      new Setting(contentEl).setName(c.file.path).setDesc(desc).addButton((b) => b.setButtonText("Open").onClick(() => {
+        this.app.workspace.getLeaf("tab").openFile(c.file);
+      })).addButton((b) => b.setButtonText("Move to trash").setWarning().onClick(async () => {
+        await this.app.fileManager.trashFile(c.file);
+        view.checkOldCopies();
+        if (view.oldCopies.length) this.onOpen();
+        else this.close();
+      }));
+    }
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var NewManuscriptModal = class extends Modal {
   constructor(plugin) {
     super(plugin.app);
@@ -8130,6 +8721,7 @@ module.exports = class DendritePlugin extends Plugin {
       false,
       (v) => v.nextFlagged(1, (i) => i.prints && i.own === "draft")
     );
+    viewCommand("toggle-printed", "Show only the cards that print, or every card", false, (v) => v.togglePrintOnly());
     viewCommand("import-review", "Import review comments from a returned Word file", false, (v) => v.importReview());
     viewCommand("add-types", "Add the type property to the index and every card", false, (v) => v.sweepTypes());
     viewCommand(
@@ -8511,12 +9103,7 @@ module.exports = class DendritePlugin extends Plugin {
     view.dendriteAction = { el, kind, path: file.path };
   }
   prefixesInUse() {
-    const out = /* @__PURE__ */ new Set();
-    for (const f of this.app.vault.getMarkdownFiles()) {
-      const p = prefixOf(this.app, f);
-      if (p) out.add(p.toLowerCase());
-    }
-    return out;
+    return prefixesInUse(this.app);
   }
   checkNew(title, prefix) {
     if (!safeName(title)) return "give the manuscript a title.";

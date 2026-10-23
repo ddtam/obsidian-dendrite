@@ -29,6 +29,8 @@ Run **Dendrite: New manuscript**, give it a title and a prefix, and it creates:
     cards/         one note per card
 ```
 
+**Rename…** in the manuscript's settings changes its title and prefix together: every card note is renamed to the new prefix, keeping its last five characters, and the index's list, its `dendrite_prefix`, the index note and, when it has the index's name, its folder follow, with any path in its properties that pointed into the folder. Links elsewhere in the vault follow when Obsidian is set to update internal links, and each card's versions follow it on this device. The old prefix is kept on the index as `dendrite_former_prefixes`, and no other manuscript can take it. A rename cut short, as by a crash, is finished by renaming again with the same title and prefix. It is not an undo step; rename again to go back.
+
 Opening an index note shows it in Dendrite; **Index** in the view's bar opens its markdown instead. A card or index note open as markdown has a Dendrite button in its tab header, which opens the manuscript at that card.
 
 ## Writing a card
@@ -117,6 +119,7 @@ Quotas in different units are compared by converting through **words per page** 
 | Property | Where | Holds |
 | --- | --- | --- |
 | `dendrite_prefix` | index | the card ID prefix |
+| `dendrite_former_prefixes` | index | written by a rename: prefixes the manuscript had before |
 | `dendrite_limit` | index or card | a quota: `500 words`, `2000 characters`, `0.25 pages` |
 | `dendrite_limit_required` | index or card | `true` for a hard limit; absent for a soft one |
 | `dendrite_chars_per_word` | index | for comparing character quotas, default 6 |
@@ -176,7 +179,7 @@ A card's status shows at its top right, beside the role icon, in a band at the t
 
 Colours come from the [Pretty Properties](https://github.com/anareaty/pretty-properties) plugin, if it gives `dendrite_status` values a colour, so the Properties panel and the board agree.
 
-To set a role or status on a card and everything below it, use **Whole branch** in its menu, or Alt with the same keys: Alt+0 to Alt+4 for a role, Ctrl+Alt+1 to 3 for a status, which only cards that print their text take. The whole change is one undo.
+To set a role or status on a card and everything below it, use **Whole branch** in its menu; a status there reaches only cards that print their text. A card that takes its status from the cards below it, such as a heading, has **Cards below: draft**, **done** and **revise** in its own menu for the same. A whole branch has no key, since it is a sweeping change. The whole change is one undo, and so is a status set on one card, by key, menu, **+** or **−**.
 
 ## Sync across devices
 
@@ -185,7 +188,12 @@ Dendrite writes a note only for something done on its board: a key, a menu, a dr
 - **Labels.** A card's label in the index follows its first words or heading. While you type, the label is written to the index once typing pauses for three seconds or when you leave the card, not at every autosave. A card changed elsewhere gets its new label on the board at once and in the index at the next write made here.
 - **The index.** Dendrite writes the index by reading it from disk and replacing only the list, keeping its properties as they are on disk. If the list on disk changed since the board read it, Dendrite writes nothing, reads it again and asks you to make the change again.
 - **Versions going back.** Each device keeps the last 20 versions of each card's text, as hashes, with the full text of the newest, in the app's own browser storage, which sync plugins do not copy. Versions are kept per ten minutes of writing, not per save. When a card's text arrives from outside Dendrite and matches one of its earlier versions, the card is marked **older copy ⟲** and a notice names it. Nothing is written. Clicking the mark opens a dialog that says what happened and when, whether each side was written on this device or came from outside Dendrite, and when this device last saw it, and shows the lines that differ, either unified, with − for lines only in the note now and + for lines only in the text from before, or side by side, the note now on the left and the text from before on the right. Within a changed line, the words that differ are tinted more strongly, and spaces, tabs and line-end characters in them are drawn as · → ␍, so a change in spacing alone still shows. Each side has its own colour, blue for the note now and orange for the text from before, and the button that picks it carries the same colour and sits under its column: **Keep the note now** clears the mark and writes nothing; **Put back the text from before** writes it, and Ctrl+Z on the board undoes it; **Decide later** closes the dialog and leaves the mark. Restoring a backup yourself looks the same as a sync, so after one, choose Keep. The index is watched the same way, whole, with its mark in the bar. Export refuses while anything is marked. A device that edits its stale copy, rather than sending it back unchanged, is not caught. A card open in its editor when a sync changes its note takes the new text, so a later save cannot write the old text back; if you had typing not yet saved, nothing is written, the editor closes on the note as it came, and the card is marked **typing kept ⟲**, with the same dialog, your typing being the text from before.
+- **A rename.** Let the other devices finish syncing before renaming. A board open on another device follows the rename as it arrives, whether the sync moves the index or brings it as a new note, and does not report the cards under their old names as left out. Until every card note has arrived under its new name the bar shows **renaming: n to arrive**, and the board writes nothing: no editing, inserting, deleting, moving or export. A note under an old name that comes back after, from a device that had not seen the rename or edited while offline, is marked **old copies ⟲** in the bar with a notice, and is not used. Its dialog opens each, to copy any writing into the card it names, and moves it to the trash. Opening the old index shows the new one. A device typing in a card while the rename arrives saves its typing to the note under the old name, which then comes back as an old copy.
 - **Cards left out of the index.** An index arriving from outside Dendrite that no longer lists cards whose notes still exist is marked in the bar the same way, with a notice naming the cards, and the dialog lists them. Deleting a card on a board deletes its note, so this is an old copy coming back, often merged line by line with the current one, and it is caught even when this device never saw that copy. Putting it back writes the index as this board last saw it, properties included, as one undo step. The mark clears if the cards are listed again or their notes are deleted, as when the deletion arrives after the index. An edit to the index in Obsidian's own editor on this device is not marked.
+
+## Revising what prints
+
+**Printed** in the bar shows only the cards that print, each where it prints: a card left out goes with its branch, a scaffolding card's children take its place under its parent, and a card that prints its heading alone shows only its heading. Each column is then a heading level of the printed document. Cards are edited, and statuses set, as usual; the structure is not changed here, since cards sit where they print rather than where they are in the index, so moving, adding, deleting, merging and dragging wait until **Printed** is clicked again. Find searches the cards shown. The command **Show only the cards that print, or every card** does the same, and the board remembers the choice.
 
 ## Preview
 

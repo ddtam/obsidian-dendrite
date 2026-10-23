@@ -38,6 +38,12 @@
     color: var(--text-muted);
 }
 
+/* A bar button that toggles a view, while on. */
+.dendrite-bar-btn.is-on {
+    color: var(--text-accent);
+    background: var(--background-modifier-active-hover);
+}
+
 /* Space between the bar's groups of buttons. */
 .dendrite-bar-gap {
     margin-right: 8px;
@@ -691,6 +697,13 @@
    notes. */
 .dendrite-card.is-heading-only .dendrite-md > :not(:first-child) {
     color: var(--text-muted);
+}
+
+/* The print-only view: a card that prints its heading alone shows only
+   that. */
+.dendrite-board.is-print-only .dendrite-card.is-prints-heading
+    .dendrite-md > :not(:first-child) {
+    display: none;
 }
 
 /* The preview: the printed manuscript, one block per card. */

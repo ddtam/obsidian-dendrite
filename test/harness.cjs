@@ -150,6 +150,7 @@ function makeApp() {
             files.set(p, f);
             text.set(p, data);
             touch(f);
+            ev.trigger('create', f);
             return f;
         },
         async read(f) { return text.get(f.path); },
@@ -168,9 +169,34 @@ function makeApp() {
             return out;
         },
         getMarkdownFiles() { return [...files.values()]; },
+        /** Move a note, links to it left as they are. */
+        async rename(f, to) {
+            if (files.has(to)) throw new Error('exists: ' + to);
+            const from = f.path;
+            const data = text.get(from);
+            files.delete(from);
+            text.delete(from);
+            f.setPath(to);
+            files.set(to, f);
+            text.set(to, data);
+            touch(f);
+            ev.trigger('rename', f, from);
+        },
+    };
+    // Obsidian's rename with "Automatically update internal links" on: a
+    // note's links follow it, and a folder moves the notes in it.
+    const relink = async (from, to) => {
+        if (from === to) return;
+        const esc = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp('\\[\\[' + esc + '(?=[|\\]#])', 'g');
+        for (const f of [...files.values()]) {
+            const t = text.get(f.path);
+            const out = t.replace(re, '[[' + to);
+            if (out !== t) await vault.modify(f, out);
+        }
     };
     const metadataCache = {
-        on: meta.on, offref: meta.offref,
+        on: meta.on, offref: meta.offref, trigger: meta.trigger,
         getFileCache(f) {
             const t = text.get(f.path) || '';
             const m = /^---\n([\s\S]*?)\n---/.exec(t);
@@ -224,6 +250,29 @@ function makeApp() {
                 const head = lines.length ?
                     '---\n' + lines.join('\n') + '\n---\n' : '';
                 await vault.modify(f, head + (m ? t.slice(m[0].length) : t));
+            },
+            async renameFile(f, to) {
+                if (f instanceof TFolder) {
+                    if (folders.has(to)) throw new Error('exists: ' + to);
+                    folders.delete(f.path);
+                    folders.add(to);
+                    for (const d of [...folders]) {
+                        if (d.startsWith(f.path + '/')) {
+                            folders.delete(d);
+                            folders.add(to + d.slice(f.path.length));
+                        }
+                    }
+                    for (const g of [...files.values()]) {
+                        if (g.path.startsWith(f.path + '/')) {
+                            await vault.rename(g,
+                                to + g.path.slice(f.path.length));
+                        }
+                    }
+                    return;
+                }
+                const old = f.basename;
+                await vault.rename(f, to);
+                await relink(old, f.basename);
             },
             async trashFile(f) {
                 files.delete(f.path);

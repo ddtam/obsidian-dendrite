@@ -151,6 +151,18 @@ class History {
                  now: seen(match) };
     }
 
+    /**
+     * A note renamed: its versions follow it to `key` from `from`, unless
+     * `key` has its own already.
+     */
+    adopt(key, from) {
+        return this.serial(key, async () => {
+            if (key === from || await this.store.get(key)) return;
+            const rec = await this.store.get(from);
+            if (rec) await this.store.set(key, rec);
+        });
+    }
+
     /** Accept the card's current text as its newest version. */
     keep(key, text, compared) {
         return this.serial(key, async () => {

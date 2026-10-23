@@ -176,6 +176,25 @@ function newId(prefix, taken, rand = Math.random) {
     throw new Error('Dendrite: could not find a free card ID');
 }
 
+/**
+ * A card ID moved to another prefix, keeping its random suffix:
+ * `withPrefix('G-2026-lchl3', 'G-2026', 'G-2027')` is `G-2027-lchl3`. An
+ * ID not under `from` is returned as it is.
+ */
+function withPrefix(id, from, to) {
+    const head = from + '-';
+    const rest = id.slice(head.length);
+    return id.startsWith(head) && rest.length === ID_LEN &&
+        [...rest].every((c) => ID_CHARS.includes(c)) ? to + '-' + rest : id;
+}
+
+/** A manuscript's earlier prefixes, from its index's properties. */
+function formerPrefixes(fm) {
+    const v = fm && fm.dendrite_former_prefixes;
+    const list = Array.isArray(v) ? v : v ? [v] : [];
+    return list.map((x) => String(x).trim()).filter(validPrefix);
+}
+
 // ---- tree operations ----------------------------------------------------
 // Each mutates the tree in place and returns true if anything changed.
 
@@ -391,10 +410,17 @@ function charDiff(a, b) {
 }
 
 /** Nodes grouped by depth, each column in reading order. */
-function columns(root) {
+// A card's parent and children as stored, for what takes a tree as shown.
+const TREE = { up: (n) => n.parent, kids: (n) => n.children };
+
+/**
+ * The cards by column, each given its depth. `kids` gives a card's
+ * children as the board shows them, which a filtered view changes.
+ */
+function columns(root, kids = (n) => n.children) {
     const cols = [];
     const walk = (n, d) => {
-        for (const c of n.children) {
+        for (const c of kids(n)) {
             c.depth = d;
             (cols[d] = cols[d] || []).push(c);
             walk(c, d + 1);
@@ -964,12 +990,21 @@ function caretOffset(caret, height, current, margin, typewriter) {
  * columns to its right follow it. Returns the scrollTop for each column,
  * or null to leave a column alone.
  */
-function alignColumns(cols, active, pos, heights, own = null) {
+function alignColumns(cols, active, pos, heights, own = null,
+                      tree = TREE) {
     const targets = cols.map(() => null);
     if (!active) return targets;
     const lineage = new Set([active.id]);
-    for (let n = active.parent; n && n.id; n = n.parent) lineage.add(n.id);
-    for (const d of descendants(active)) lineage.add(d.id);
+    for (let n = tree.up(active); n && n.id; n = tree.up(n)) {
+        lineage.add(n.id);
+    }
+    const below = (n) => {
+        for (const c of tree.kids(n)) {
+            lineage.add(c.id);
+            below(c);
+        }
+    };
+    below(active);
     const centre = (nodes, d) => {
         const a = pos(nodes[0].id);
         const b = pos(nodes[nodes.length - 1].id);
@@ -991,17 +1026,17 @@ function alignColumns(cols, active, pos, heights, own = null) {
             const at = prev.indexOf(anchor[d - 1]);
             let best = null;
             prev.forEach((n, i) => {
-                if (!n.children.length) return;
+                if (!tree.kids(n).length) return;
                 const dist = Math.abs(i - at);
                 if (!best || dist < best.dist) best = { n, dist };
             });
             if (!best) continue;
             const parent = pos(best.n.id);
-            const first = pos(best.n.children[0].id);
+            const first = pos(tree.kids(best.n)[0].id);
             if (!parent || !first) continue;
             const onScreen = parent.top - targets[d - 1];
             targets[d] = first.top - onScreen;
-            anchor[d] = best.n.children[0];
+            anchor[d] = tree.kids(best.n)[0];
         }
     }
     return targets;
@@ -1463,7 +1498,8 @@ module.exports = {
     inlineToReferences, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
     lineDiff, charDiff, printedOnly,
-    deriveLabel, stripComments, validPrefix, newId, makeNode, makeRoot,
+    deriveLabel, stripComments, validPrefix, newId, withPrefix,
+    formerPrefixes, makeNode, makeRoot,
     insertSibling, appendChild, moveWithin, indent, outdent, remove,
     descendants, allNodes, columns, exportMarkdown, cleanLabel,
 };

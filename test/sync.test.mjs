@@ -540,3 +540,87 @@ test('the dialog says where and when each side was seen, and opens from ' +
         '.dendrite-version-diff > div')].map((d) => d.textContent);
     assert.ok(diff.includes('+The'), 'the damaged copy is the side before');
 });
+
+test('a delete over an index changed elsewhere deletes no notes',
+     async () => {
+    const clock = { t: 1 };
+    const a = await device({ ...FILES,
+        [INDEX]: FILES[INDEX] + '- [[G-bbbbb|B]]\n',
+        [cardPath('G-bbbbb')]: 'B' }, clock);
+    const other = '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-bbbbb|B]]\n- [[G-aaaaa|Aims]]\n';
+    a.app.vault.text.set(INDEX, other);
+    a.view.active = 'G-aaaaa';
+    await a.view.deleteActive();
+    assert.equal(a.read(INDEX), other, 'the index left as it was');
+    assert.ok(a.read(cardPath('G-aaaaa')) !== undefined,
+              'and the card\'s note kept');
+});
+
+// A rename made on another device, arriving by sync one note at a time.
+const RENAMED = '---\ndendrite_prefix: G27\n' +
+    'dendrite_former_prefixes:\n  - G\n---\n' +
+    '- [[G27-aaaaa|Aims]]\n- [[G27-bbbbb|B]]\n';
+
+async function renameArrives(a) {
+    const move = async (from, to) => {
+        await a.receive(to, a.read(from));
+        await a.app.fileManager.trashFile(
+            a.app.vault.getAbstractFileByPath(from));
+        await tick(250);
+    };
+    return { move };
+}
+
+test('a rename from another device: the board follows, writes nothing, ' +
+     'and changes nothing until every card arrives', async () => {
+    const clock = { t: 1 };
+    const a = await device({ ...FILES,
+        [INDEX]: FILES[INDEX] + '- [[G-bbbbb|B]]\n',
+        [cardPath('G-bbbbb')]: 'B' }, clock);
+    h.notices.length = 0;
+    await a.receive(INDEX, RENAMED);
+    await tick(400);
+    assert.equal(a.view.arriving, 2);
+    assert.ok(!a.view.reverted.has('index'), 'no cards reported left out');
+    assert.ok(!h.notices.some((n) => /no longer lists/.test(n)));
+    assert.ok(h.notices.some((n) => /renamed on another device/.test(n)));
+    await a.view.startEdit('G27-aaaaa');
+    assert.equal(a.view.editing, null, 'no editing');
+    a.view.active = 'G27-aaaaa';
+    await a.view.insert('below');
+    assert.equal(await a.view.exportTo(null), null, 'export refuses');
+    const { move } = await renameArrives(a);
+    await move(cardPath('G-aaaaa'), cardPath('G27-aaaaa'));
+    assert.equal(a.view.arriving, 1);
+    h.notices.length = 0;
+    await move(cardPath('G-bbbbb'), cardPath('G27-bbbbb'));
+    assert.equal(a.view.arriving, 0);
+    assert.ok(h.notices.some((n) => /rename has arrived/.test(n)));
+    assert.deepEqual(a.writes, [], 'A wrote nothing throughout');
+    a.view.checkOldCopies();
+    assert.deepEqual(a.view.oldCopies, []);
+    await a.view.startEdit('G27-aaaaa');
+    assert.equal(a.view.editing.id, 'G27-aaaaa', 'and edits again');
+});
+
+test('an index renamed as a new note and a delete: the board follows the ' +
+     'new note, and keeps its versions', async () => {
+    const clock = { t: 1 };
+    const a = await device({ ...FILES,
+        [INDEX]: FILES[INDEX] + '- [[G-bbbbb|B]]\n',
+        [cardPath('G-bbbbb')]: 'B' }, clock);
+    const NEW = 'W/Grant 2027/Grant 2027.md';
+    await a.receive(NEW, RENAMED);
+    a.app.metadataCache.trigger('changed',
+                                a.app.vault.getAbstractFileByPath(NEW));
+    await tick(50);
+    assert.equal(a.view.file.path, NEW);
+    assert.equal(a.view.arriving, 2);
+    let detached = false;
+    a.view.leaf.detach = () => { detached = true; };
+    await a.app.fileManager.trashFile(a.app.vault.getAbstractFileByPath(
+        INDEX));
+    assert.ok(!detached, 'the board stays open');
+    assert.deepEqual(a.writes, []);
+});
