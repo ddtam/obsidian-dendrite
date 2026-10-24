@@ -125,6 +125,43 @@ test('typing in a tall card keeps the caret in view, or centred',
     await view.endEdit();
 });
 
+test('typing on one line moves nothing after its first key: the board ' +
+     'is laid out again only when the caret changes line or the card its ' +
+     'height', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|Long]]\n',
+        { 'G-aaaaa': 'Long text\n' });
+    await view.startEdit('G-aaaaa');
+    const card = view.cardEls.get('G-aaaaa');
+    let height = 1000;
+    Object.defineProperty(card, 'offsetHeight', { get: () => height });
+    let line = 600;
+    view.editing.editor.caretRect = () => {
+        const top = line - view.colOffset(0);
+        return { top, bottom: top + 20 };
+    };
+    let centred = 0;
+    const centre = view.centre.bind(view);
+    view.centre = (...a) => {
+        centred++;
+        return centre(...a);
+    };
+    for (const t of ['L', 'Lo', 'Lon', 'Long', 'Long ']) {
+        type(view, t);
+        await tick(5);
+    }
+    assert.equal(centred, 1, 'five keys on one line: laid out once');
+    line = 620;
+    type(view, 'Long t');
+    await tick(5);
+    assert.equal(centred, 2, 'the caret on a new line');
+    height = 1020;
+    type(view, 'Long te');
+    await tick(5);
+    assert.equal(centred, 3, 'the card grown');
+    await view.endEdit();
+});
+
 test('a card drawn while a column is scrolled by hand does not pull the ' +
      'board back to the active card', async () => {
     const { view } = await open(

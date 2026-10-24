@@ -1407,14 +1407,41 @@ class DendriteView extends ItemView {
         return core.tallTop(box, height, CARD_MARGIN);
     }
 
-    /** Move the active column to the caret once the editor has drawn. */
+    /**
+     * Move the active column to the caret once the editor has drawn. Most
+     * keys leave the caret on its line and the card its height, and then
+     * nothing would move: the board is laid out again, every column
+     * measured and the flow redrawn, only when one of them changes.
+     */
     followCaret() {
         if (this.caretFrame) return;
         const win = this.pageWin();
         this.caretFrame = win.requestAnimationFrame(() => {
             this.caretFrame = null;
-            if (this.editing) this.centre(false, true);
+            const ed = this.editing;
+            if (!ed) return;
+            if (this.caretAt && this.caretAt === this.caretKey(ed)) return;
+            this.centre(false, true);
+            // Where the caret is once moved, so the next key on the same
+            // line finds it there; a column moved by hand since moves it.
+            this.caretAt = this.caretKey(ed);
         });
+    }
+
+    /**
+     * Where editor `ed`'s caret is on screen, and its card's height; null
+     * when the caret cannot be read, so the board is laid out every time.
+     */
+    caretKey(ed) {
+        let r = null;
+        try {
+            r = ed.editor.caretRect && ed.editor.caretRect();
+        } catch (err) {
+            return null;
+        }
+        const card = this.cardEls.get(ed.id);
+        return r && card ?
+            `${ed.id}:${Math.round(r.top)}:${card.offsetHeight}` : null;
     }
 
     /** A column's scroll position, however it is scrolled. */
@@ -2552,6 +2579,7 @@ class DendriteView extends ItemView {
         // Obsidian's editor brings its own.
         ed.ta = editor.ta || null;
         this.editing = ed;
+        this.caretAt = null;
         const card = this.cardEls.get(id);
         if (card && editor.kind === 'float') {
             this.mountFloat(card, editor);
@@ -8867,7 +8895,8 @@ class DendriteSettings extends PluginSettingTab {
 timing.wrap(DendriteView.prototype, 'board', ['render', 'renderCard',
     'updateStatuses', 'updateChanged', 'updateNumbers', 'updateCounts',
     'applyActive', 'drawFlow', 'loadBodies', 'onModify', 'onMetadata',
-    'sweepStatuses', 'startEdit', 'endEdit']);
+    'sweepStatuses', 'startEdit', 'endEdit', 'centre', 'followCaret',
+    'onResize', 'scheduleFlow', 'animateOffsets']);
 timing.wrap(DendritePreview.prototype, 'preview', ['refresh',
     'renderSegments', 'renderBlock', 'drawBubbles', 'layoutBubbles',
     'keepPace', 'fitComments', 'listComments', 'highlight']);
