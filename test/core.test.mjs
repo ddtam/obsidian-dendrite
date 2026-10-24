@@ -901,3 +901,23 @@ test('comments are placed level with their passages, a crowded run ' +
     assert.equal(scrollFor(50, p.knots), 50);
     assert.deepEqual(placeComments([], [], 10).tops, []);
 });
+
+test('status: a section carrying open review comments is flagged to ' +
+     'revise, whatever is below it, until they are resolved', () => {
+    const root = c.makeRoot();
+    const s = c.makeNode('S', 'S', null);
+    c.appendChild(root, s);
+    c.appendChild(s, c.makeNode('P', 'P', null));
+    const statuses = { P: 'done' };
+    const report = (open) => c.statusReport(root,
+        (id) => statuses[id] || null, () => null, (id) => open[id] || 0);
+    let r = report({ S: 1 });
+    assert.equal(r.cards.get('S').own, 'revise');
+    assert.equal(r.tally.revise, 1);
+    r = report({});
+    assert.equal(r.cards.get('S').own, null);
+    assert.equal(r.cards.get('S').derived, 'done');
+    // Left unsplit, it stays unsplit.
+    statuses.S = 'unsplit';
+    assert.equal(report({ S: 1 }).cards.get('S').own, 'unsplit');
+});

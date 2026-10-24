@@ -1205,7 +1205,9 @@ function threadPath(pairs) {
  * A card's status describes its text. Cards that print their text carry
  * draft (the default), done or revise. A structural card carries no
  * status of its own except unsplit: text left behind when part of it was
- * moved into a child, which may be a split never finished.
+ * moved into a child, which may be a split never finished; and one
+ * carrying open review comments, on its heading, is shown to revise
+ * until they are resolved.
  */
 const STATUSES = ['draft', 'done', 'revise', 'unsplit'];
 // How much work a status asks for, to find a branch's least-finished
@@ -1240,9 +1242,10 @@ function lowerStatus(a, b) {
  * structural card's unsplit, `derived` a structural card's least-finished
  * printing descendant, and `below` how many flagged cards its branch
  * holds. Left-out branches count for nothing. `tally` counts printing
- * cards by status, plus unsplit structural cards.
+ * cards by status, plus unsplit and commented structural cards.
+ * `commentsOf(id)` is how many open review comments a card carries.
  */
-function statusReport(root, statusOf, roleOf) {
+function statusReport(root, statusOf, roleOf, commentsOf = () => 0) {
     const cards = new Map();
     const tally = { revise: 0, unsplit: 0, draft: 0, done: 0 };
     const walk = (node) => {
@@ -1253,6 +1256,7 @@ function statusReport(root, statusOf, roleOf) {
         let own = null;
         if (prints) own = ['done', 'revise'].includes(set) ? set : 'draft';
         else if (set === 'unsplit') own = 'unsplit';
+        else if (commentsOf(node.id) > 0) own = 'revise';
         if (own) tally[own] += 1;
         let worst = prints ? own : null;
         let below = 0;

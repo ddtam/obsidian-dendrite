@@ -1042,6 +1042,13 @@ class DendriteView extends ItemView {
         // Review comments render as marks in the text and callouts under
         // their paragraphs, where Obsidian alone would hide them.
         const notes = review.reviewItems(text);
+        // Open comments flag a heading card to revise (core.statusReport).
+        this.openComments = this.openComments || new Map();
+        const count = review.countComments(notes);
+        if ((this.openComments.get(id) || 0) !== count) {
+            this.openComments.set(id, count);
+            this.scheduleStatuses();
+        }
         const kind = this.kindOf(id);
         // A figure's image written as a plain link shows as its image.
         const shown = kind === 'figure' && !notes.length ?
@@ -4939,10 +4946,21 @@ class DendriteView extends ItemView {
      * A printing card shows its own status, a structural card the least
      * finished state below it and how many cards there are flagged.
      */
+    /** Statuses shown again once, after the cards being drawn. */
+    scheduleStatuses() {
+        if (this.statusTimer) return;
+        this.statusTimer = this.pageWin().setTimeout(() => {
+            this.statusTimer = null;
+            this.updateStatuses();
+        }, 0);
+    }
+
     updateStatuses() {
         if (!this.board) return;
+        const open = this.openComments || new Map();
         const report = core.statusReport(this.root,
-            (id) => this.statusOf(id), (id) => this.printRoleOf(id));
+            (id) => this.statusOf(id), (id) => this.printRoleOf(id),
+            (id) => open.get(id) || 0);
         this.statusInfo = report.cards;
         // Suggested changes on cards take the revise flag's colour.
         const revise = this.plugin.statusColour &&
@@ -6216,7 +6234,10 @@ class DendritePreview extends ItemView {
             const s = props(id).dendrite_status;
             return core.STATUSES.includes(s) ? s : null;
         };
-        const report = core.statusReport(root, statusOf, roleOf);
+        const report = core.statusReport(root, statusOf, roleOf, (id) => {
+            const b = this.bodies.get(id);
+            return b ? review.countComments(review.reviewItems(b.body)) : 0;
+        });
         this.flags = new Map();
         for (const [id, info] of report.cards) {
             if (core.isFlag(info.own)) {

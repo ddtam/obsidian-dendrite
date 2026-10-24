@@ -3932,3 +3932,22 @@ test('the Preview and Comments buttons are toggles, lit while on and ' +
     const board = await open(FLOAT_INDEX, floatCards());
     assert.ok(board.view.previewBtn.hasClass('is-toggle'));
 });
+
+test('a heading card carrying a review comment shows revise, not the ' +
+     'done of the card below it, until the comment is resolved',
+     async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Cluster]]\n    - [[G-bbbbb|p1]]\n',
+        { 'G-aaaaa': '# ==Cluster Selection==%%[!review] J, ' +
+              '2026-10-23: Unnecessary?%%',
+          'G-bbbbb': '---\ndendrite_status: done\n---\nFir it is.' });
+    await tick(30);
+    const chips = (id) => [...view.cardEls.get(id)
+        .querySelectorAll('.dendrite-status-chip')].map((c) => c.textContent);
+    assert.deepEqual(chips('G-aaaaa'), ['revise ⚑']);
+    assert.match(view.statusEl.textContent, /1 revise/);
+    await view.reviewAction('G-aaaaa', 0, 'resolve');
+    await tick(30);
+    assert.deepEqual(chips('G-aaaaa'), ['done ✓']);
+});

@@ -875,7 +875,7 @@ var require_core = __commonJS({
       const y = MATURITY[b] === void 0 ? 1 : MATURITY[b];
       return x <= y ? a || "draft" : b || "draft";
     }
-    function statusReport(root, statusOf, roleOf) {
+    function statusReport(root, statusOf, roleOf, commentsOf = () => 0) {
       const cards = /* @__PURE__ */ new Map();
       const tally = { revise: 0, unsplit: 0, draft: 0, done: 0 };
       const walk = (node) => {
@@ -886,6 +886,7 @@ var require_core = __commonJS({
         let own = null;
         if (prints) own = ["done", "revise"].includes(set) ? set : "draft";
         else if (set === "unsplit") own = "unsplit";
+        else if (commentsOf(node.id) > 0) own = "revise";
         if (own) tally[own] += 1;
         let worst = prints ? own : null;
         let below = 0;
@@ -5234,6 +5235,12 @@ var DendriteView = class extends ItemView {
     comp.load();
     const out = createDiv({ cls: "dendrite-md markdown-rendered" });
     const notes = review.reviewItems(text);
+    this.openComments = this.openComments || /* @__PURE__ */ new Map();
+    const count = review.countComments(notes);
+    if ((this.openComments.get(id) || 0) !== count) {
+      this.openComments.set(id, count);
+      this.scheduleStatuses();
+    }
     const kind = this.kindOf(id);
     const shown = kind === "figure" && !notes.length ? float.compose(
       "figure",
@@ -8924,12 +8931,22 @@ var DendriteView = class extends ItemView {
    * A printing card shows its own status, a structural card the least
    * finished state below it and how many cards there are flagged.
    */
+  /** Statuses shown again once, after the cards being drawn. */
+  scheduleStatuses() {
+    if (this.statusTimer) return;
+    this.statusTimer = this.pageWin().setTimeout(() => {
+      this.statusTimer = null;
+      this.updateStatuses();
+    }, 0);
+  }
   updateStatuses() {
     if (!this.board) return;
+    const open = this.openComments || /* @__PURE__ */ new Map();
     const report = core.statusReport(
       this.root,
       (id) => this.statusOf(id),
-      (id) => this.printRoleOf(id)
+      (id) => this.printRoleOf(id),
+      (id) => open.get(id) || 0
     );
     this.statusInfo = report.cards;
     const revise = this.plugin.statusColour && this.plugin.statusColour("revise");
@@ -10174,7 +10191,10 @@ var DendritePreview = class extends ItemView {
       const s = props(id).dendrite_status;
       return core.STATUSES.includes(s) ? s : null;
     };
-    const report = core.statusReport(root, statusOf, roleOf);
+    const report = core.statusReport(root, statusOf, roleOf, (id) => {
+      const b = this.bodies.get(id);
+      return b ? review.countComments(review.reviewItems(b.body)) : 0;
+    });
     this.flags = /* @__PURE__ */ new Map();
     for (const [id, info] of report.cards) {
       if (core.isFlag(info.own)) {
