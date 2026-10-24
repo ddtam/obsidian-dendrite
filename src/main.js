@@ -4205,6 +4205,7 @@ class DendriteView extends ItemView {
         const target = this.renameTargets(name);
         const old = this.prefix();
         const indexKey = this.historyKey(null);
+        const roundsWas = this.roundsPath();
         const fm = this.app.fileManager;
         this.renaming = true;
         let failed = null;
@@ -4226,6 +4227,7 @@ class DendriteView extends ItemView {
                 (data) => core.writeIndexText(data, this.root));
             await writeProps(this.app, this.file,
                              { dendrite_prefix: prefix });
+            await this.renameRounds(roundsWas, plan.to);
             for (const n of core.allNodes(this.root)) {
                 for (const p of plan.from) {
                     await this.history.adopt(this.historyKey(n.id),
@@ -4234,6 +4236,14 @@ class DendriteView extends ItemView {
             }
             if (name !== this.file.basename) {
                 await fm.renameFile(this.file, target.index);
+                // The rounds' file keeps the index's name.
+                const rounds = this.app.vault.getAbstractFileByPath(
+                    roundsWas);
+                if (rounds instanceof TFile &&
+                    !this.app.vault.getAbstractFileByPath(
+                        this.roundsPath())) {
+                    await fm.renameFile(rounds, this.roundsPath());
+                }
             }
             if (target.moveFolder) {
                 await fm.renameFile(
@@ -5218,6 +5228,28 @@ class DendriteView extends ItemView {
         if (f instanceof TFile) await this.app.vault.modify(f, text);
         else await this.app.vault.create(path, text);
         await this.updateChanged();
+    }
+
+    /**
+     * The review rounds' cards under their new ids, `to(id)`, for a
+     * rename, so none reads as changed since it was sent.
+     */
+    async renameRounds(path, to) {
+        const f = this.app.vault.getAbstractFileByPath(path);
+        if (!(f instanceof TFile)) return;
+        await this.app.vault.process(f, (data) => {
+            let d;
+            try {
+                d = JSON.parse(data);
+            } catch (err) {
+                return data;
+            }
+            for (const r of Array.isArray(d.rounds) ? d.rounds : []) {
+                r.cards = Object.fromEntries(Object.entries(r.cards || {})
+                    .map(([id, crc]) => [to(id), crc]));
+            }
+            return JSON.stringify(d, null, 2) + '\n';
+        });
     }
 
     /** After an export: a notice offering to mark it as sent. */

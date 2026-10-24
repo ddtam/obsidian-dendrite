@@ -605,8 +605,11 @@ const tail = (s, n) => s.slice(Math.max(0, s.length - n));
  */
 function locate(item, cards) {
     if (item.card) {
-        const k = item.card;
-        cards = cards.filter((c) => c.id === k || c.id.endsWith('-' + k));
+        // By its short id, which a rename keeps, so a card named as it
+        // was before one is still found.
+        const short = (x) => String(x).slice(String(x).lastIndexOf('-') + 1);
+        const k = short(item.card);
+        cards = cards.filter((c) => short(c.id) === k);
     }
     if (item.heading && item.quote) {
         const want = normalise(item.quote).text;

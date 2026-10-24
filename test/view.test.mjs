@@ -2291,6 +2291,32 @@ test('renaming the manuscript renames every card note, the index and ' +
                  'that is already its title and prefix.');
 });
 
+test('a rename takes the review rounds along: the file beside the ' +
+     'index, and its cards, so nothing reads as changed', async () => {
+    const { app, view, read } = await openForRename();
+    await view.recordRound('Aly');
+    assert.ok(read('W/Grant/Grant.rounds.json'));
+    assert.equal(await view.renameManuscript('Grant 2027', 'G27'), true);
+    const dir = 'W/Grant 2027';
+    assert.equal(read(`${dir}/Grant.rounds.json`), undefined,
+                 'not left under the old name');
+    const rounds = JSON.parse(read(`${dir}/Grant 2027.rounds.json`)).rounds;
+    assert.deepEqual(Object.keys(rounds[0].cards).sort(),
+                     ['G27-aaaaa', 'G27-bbbbb']);
+    await view.updateChanged();
+    assert.equal(view.changed.ids.size, 0, 'no card changed since sent');
+});
+
+test('a review naming its cards by the ids they had before a rename ' +
+     'still finds them, by their short id', async () => {
+    const review = require('../src/review.js');
+    const cards = [{ id: 'G27-aaaaa', text: 'The cohort is large.' },
+                   { id: 'G27-bbbbb', text: 'The cohort is small.' }];
+    const at = review.locate({ card: 'G-bbbbb', quote: 'cohort',
+                               text: 'How many?' }, cards);
+    assert.equal(at && at.id, 'G27-bbbbb');
+});
+
 test('a rename cut short finishes when run again', async () => {
     const { app, view, read } = await openForRename();
     const rename = app.fileManager.renameFile;
