@@ -781,6 +781,18 @@ test('Obsidian\'s editor: typing saves, Escape leaves, and it is torn down',
         made.editor.cm.contentDOM.dispatchEvent(
             new h.window.Event('focusin'));
         assert.equal(app.workspace.activeEditor, made.owner);
+        // Obsidian's window not the focused one: CodeMirror says it has no
+        // focus while the card still has it, and a pane is still refused.
+        const content = made.editor.cm.contentDOM;
+        h.window.document.body.appendChild(view.contentEl);
+        content.tabIndex = 0;
+        content.focus();
+        assert.equal(content.ownerDocument.activeElement, content);
+        assert.equal(app.workspace.setActiveLeaf(), undefined,
+                     'a pane does not take the focus from the card');
+        content.blur();
+        assert.equal(app.workspace.setActiveLeaf(), 'leaf',
+                     'once the card lets the focus go, a pane takes it');
         made.doc = 'Typed in Obsidian\'s editor';
         made.onUpdate({}, true);
         await tick(60);

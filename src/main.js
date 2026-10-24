@@ -2566,14 +2566,13 @@ class DendriteView extends ItemView {
             // Each field in the card editor: Obsidian's live preview
             // edits a table as a grid, rows, columns and alignment from
             // its own menu.
-            makeEditor: (value, h) => cardEditor(this.app, this, {
+            makeEditor: (value, h) => this.newEditor({
                 value, file: f, onChange: h.onChange, onBlur: h.onBlur,
                 onEscape: h.onEscape, onFind: () => this.openFind(),
                 onRedraw: () => {}, onUndo: () => false,
                 onRedo: () => false,
-            }, this.plugin.settings.obsidianEditor !== false),
-        })) : cardEditor(this.app, this, handlers,
-                         this.plugin.settings.obsidianEditor !== false);
+            }),
+        })) : this.newEditor(handlers);
         ed.editor = editor;
         // The text box's own commands (bold, Tab, lists) are Dendrite's;
         // Obsidian's editor brings its own.
@@ -2592,10 +2591,21 @@ class DendriteView extends ItemView {
             card.removeClass('is-pending');
         }
         this.renderToolbar();
-        editor.focus(atStart);
+        this.focusEditor(editor, atStart);
         this.showMode();
         // The rendered card it replaced took find's paint with it.
         if (this.find) this.paintFind();
+    }
+
+    /** A card's editor: Obsidian's, unless the settings say not. */
+    newEditor(handlers) {
+        return cardEditor(this.app, this, handlers,
+                          this.plugin.settings.obsidianEditor !== false);
+    }
+
+    /** The caret into a card's new editor, at its start or its end. */
+    focusEditor(editor, atStart) {
+        editor.focus(atStart);
     }
 
     /** Write the editor's text to its card, keeping the frontmatter. */
@@ -8896,7 +8906,8 @@ timing.wrap(DendriteView.prototype, 'board', ['render', 'renderCard',
     'updateStatuses', 'updateChanged', 'updateNumbers', 'updateCounts',
     'applyActive', 'drawFlow', 'loadBodies', 'onModify', 'onMetadata',
     'sweepStatuses', 'startEdit', 'endEdit', 'centre', 'followCaret',
-    'onResize', 'scheduleFlow', 'animateOffsets']);
+    'onResize', 'scheduleFlow', 'animateOffsets', 'newEditor',
+    'focusEditor', 'renderToolbar']);
 timing.wrap(DendritePreview.prototype, 'preview', ['refresh',
     'renderSegments', 'renderBlock', 'drawBubbles', 'layoutBubbles',
     'keepPace', 'fitComments', 'listComments', 'highlight']);

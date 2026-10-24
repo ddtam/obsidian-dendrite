@@ -108,10 +108,17 @@ function obsidianEditor(app, parent, opts) {
             const ws = app.workspace;
             const original = ws.setActiveLeaf;
             const self = this;
+            // CodeMirror's hasFocus is also false while Obsidian's window
+            // is not the focused one, when the card can still have it.
+            const hasFocus = () => {
+                const cm = self.editor && self.editor.cm;
+                if (!cm) return false;
+                const dom = cm.contentDOM;
+                return !!cm.hasFocus ||
+                    (!!dom && dom.contains(dom.ownerDocument.activeElement));
+            };
             const patched = function (...args) {
-                if (self.editor && self.editor.cm && self.editor.cm.hasFocus) {
-                    return undefined;
-                }
+                if (hasFocus()) return undefined;
                 return original.apply(this, args);
             };
             ws.setActiveLeaf = patched;

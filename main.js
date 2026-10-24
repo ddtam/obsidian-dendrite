@@ -1451,10 +1451,14 @@ var require_editor = __commonJS({
           const ws = app.workspace;
           const original = ws.setActiveLeaf;
           const self = this;
+          const hasFocus = () => {
+            const cm = self.editor && self.editor.cm;
+            if (!cm) return false;
+            const dom = cm.contentDOM;
+            return !!cm.hasFocus || !!dom && dom.contains(dom.ownerDocument.activeElement);
+          };
           const patched = function(...args) {
-            if (self.editor && self.editor.cm && self.editor.cm.hasFocus) {
-              return void 0;
-            }
+            if (hasFocus()) return void 0;
             return original.apply(this, args);
           };
           ws.setActiveLeaf = patched;
@@ -7168,7 +7172,7 @@ var DendriteView = class extends ItemView {
       // Each field in the card editor: Obsidian's live preview
       // edits a table as a grid, rows, columns and alignment from
       // its own menu.
-      makeEditor: (value, h) => cardEditor(this.app, this, {
+      makeEditor: (value, h) => this.newEditor({
         value,
         file: f,
         onChange: h.onChange,
@@ -7179,13 +7183,8 @@ var DendriteView = class extends ItemView {
         },
         onUndo: () => false,
         onRedo: () => false
-      }, this.plugin.settings.obsidianEditor !== false)
-    })) : cardEditor(
-      this.app,
-      this,
-      handlers,
-      this.plugin.settings.obsidianEditor !== false
-    );
+      })
+    })) : this.newEditor(handlers);
     ed.editor = editor;
     ed.ta = editor.ta || null;
     this.editing = ed;
@@ -7202,9 +7201,22 @@ var DendriteView = class extends ItemView {
       card.removeClass("is-pending");
     }
     this.renderToolbar();
-    editor.focus(atStart);
+    this.focusEditor(editor, atStart);
     this.showMode();
     if (this.find) this.paintFind();
+  }
+  /** A card's editor: Obsidian's, unless the settings say not. */
+  newEditor(handlers) {
+    return cardEditor(
+      this.app,
+      this,
+      handlers,
+      this.plugin.settings.obsidianEditor !== false
+    );
+  }
+  /** The caret into a card's new editor, at its start or its end. */
+  focusEditor(editor, atStart) {
+    editor.focus(atStart);
   }
   /** Write the editor's text to its card, keeping the frontmatter. */
   save(ed) {
@@ -12916,7 +12928,10 @@ timing.wrap(DendriteView.prototype, "board", [
   "followCaret",
   "onResize",
   "scheduleFlow",
-  "animateOffsets"
+  "animateOffsets",
+  "newEditor",
+  "focusEditor",
+  "renderToolbar"
 ]);
 timing.wrap(DendritePreview.prototype, "preview", [
   "refresh",
