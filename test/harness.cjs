@@ -445,10 +445,14 @@ const obsidian = {
         async render(app, md, el) {
             const esc = String(md).replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            el.innerHTML = esc.replace(
+            const html = esc.replace(
                 /&lt;(mark|span|sup) class="(dendrite-review-[^"]*)"&gt;/g,
                 '<$1 class="$2">').replace(/&lt;\/(mark|span|sup)&gt;/g,
                 '</$1>');
+            // Each paragraph a <p>, as Obsidian draws them, the blank
+            // line between kept as text.
+            el.innerHTML = html.split(/(\n\s*\n)/).map((x, k) =>
+                k % 2 ? x : `<p>${x}</p>`).join('');
         },
     },
     Notice: class {

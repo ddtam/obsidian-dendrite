@@ -1094,7 +1094,8 @@ test('settings are grouped under headings by what they affect', () => {
         'Typewriter scrolling', 'Autosave delay',
         '## PDF and Word export', 'Pandoc', 'PDF engine', 'Zotero port',
         'Fallback .bib',
-        '## Review', 'Accept reviews from programs on this computer',
+        '## Review', 'Your name, on replies',
+        'Accept reviews from programs on this computer',
         'Review port',
         '## Google Docs', 'Google OAuth client', 'Google Picker API key',
         'Google account',
@@ -2729,7 +2730,7 @@ test('a manuscript linked to a Google Doc pulls its comments and ' +
     assert.deepEqual(h.obsidian.lastMenu.items.map((i) => i.title), [
         'Pull from Google Docs', 'Open the linked doc',
         'Change the linked doc…', 'Import a Word or JSON file…',
-        'Reviewers…']);
+        'Reviewers…', 'Mark as sent for review…']);
     const m = await view.pullGdoc();
     assert.equal(asked, view.gdocUrl());
     assert.match(m.titleEl.textContent, /RAC draft \(Google Docs\)/);
@@ -2896,8 +2897,8 @@ test('the Review menu offers linking a doc when none is, and each review ' +
     const titles = h.obsidian.lastMenu.items.map((i) => i.title);
     assert.deepEqual(titles, ['Link a Google Doc…',
         'Import a Word or JSON file…', 'Reviewers…',
-        'RAC review: 2 from Claude']);
-    await h.obsidian.lastMenu.items[3].click();
+        'Mark as sent for review…', 'RAC review: 2 from Claude']);
+    await h.obsidian.lastMenu.items[4].click();
     assert.equal(opened.id, 'r1');
 });
 
@@ -3687,7 +3688,7 @@ test('a comment deleted here leaves the card and is not remembered, so a ' +
     const note = view.cardEls.get('G-aaaaa')
         .querySelector('.dendrite-review-note');
     assert.deepEqual([...note.querySelectorAll('button')]
-        .map((b) => b.textContent), ['Resolve']);
+        .map((b) => b.textContent), ['Resolve', 'Reply']);
     h.obsidian.lastMenu = null;
     note.dispatchEvent(new h.window.MouseEvent('contextmenu',
         { bubbles: true, cancelable: true }));
@@ -4152,4 +4153,215 @@ test('a reviewer\'s note is found with Obsidian\'s note search as it is ' +
         app.vault.getAbstractFileByPath(INDEX)).frontmatter
         .dendrite_reviewer_colours,
         ['Joshua Bridgers: blue', '[[Aly Karsan]]: green']);
+});
+
+test('find marks a match in a review comment in its callout, and steps ' +
+     'to it as to any match', async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n',
+        { 'G-aaaaa': 'A ==passage==%%[!review] Joshua Bridgers, ' +
+            '2026-10-23: Check timepoints https://docs.google.com/' +
+            'document/d/D/edit?disco=x%% and timepoints here.' });
+    view.openFind();
+    const f = view.find;
+    h.window.CSS = { highlights: new Map() };
+    h.window.Highlight = class { constructor(...r) { this.ranges = r; } };
+    const cur = () => h.window.CSS.highlights.get('dendrite-find-current')
+        .ranges[0];
+    f.input.value = 'timepoints';
+    f.input.dispatchEvent(new h.window.Event('input'));
+    await tick(150);
+    assert.equal(f.countEl.textContent, '1 of 2 in 1 card, 1 in comments');
+    // The first, in the card's text, is the comment's: marked in its
+    // callout, though the callout is drawn after the paragraph.
+    let r = cur();
+    assert.ok(r.startContainer.parentElement
+        .closest('.dendrite-review-note'), 'in the callout');
+    await view.findStep(1);
+    r = cur();
+    assert.ok(!r.startContainer.parentElement
+        .closest('.dendrite-review-note'), 'then in the text');
+    f.input.value = '2026';
+    f.input.dispatchEvent(new h.window.Event('input'));
+    await tick(150);
+    assert.equal(f.countEl.textContent, 'No matches', 'not its date');
+    view.closeFind();
+    delete h.window.CSS;
+    delete h.window.Highlight;
+});
+
+test('find\'s printed-text toggle searches only what prints: a section\'s ' +
+     'heading, prose, no comments, no left-out branch', async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|p]]\n- [[G-ccccc|n]]\n' +
+        '    - [[G-ddddd|q]]\n',
+        { 'G-aaaaa': '# Aims\nPlanning the aims here.',
+          'G-bbbbb': 'The aims are clear %%aims to check%%.',
+          'G-ccccc': '---\ndendrite_role: notes\n---\nNotes on aims.',
+          'G-ddddd': 'Left-out aims.' });
+    view.openFind();
+    const f = view.find;
+    f.input.value = 'aims';
+    f.input.dispatchEvent(new h.window.Event('input'));
+    await tick(150);
+    assert.equal(f.countEl.textContent, '1 of 6 in 4 cards, 1 in comments');
+    const printed = [...f.el.querySelectorAll('button')].find((b) =>
+        b.getAttribute('aria-label') === 'Only text that prints');
+    assert.ok(printed, 'a toggle beside match case and regex');
+    printed.onclick();
+    await tick(150);
+    assert.ok(printed.hasClass('is-on'));
+    assert.equal(f.countEl.textContent, '1 of 2 in 2 cards');
+    assert.deepEqual(f.matches.map((m) => m.id), ['G-aaaaa', 'G-bbbbb']);
+    view.closeFind();
+});
+
+test('a reply is written under a comment on its card, signed with the ' +
+     'name in settings, shown in the callout, and taken back by ' +
+     'right-click', async () => {
+    const { view, text } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n',
+        { 'G-aaaaa': 'The ==cohort==%%[!review] Claude, 2026-10-23: ' +
+            'Say how many.%% is large.' });
+    view.plugin.settings.replyName = 'Derek Tam';
+    const note = () => view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-note');
+    const reply = [...note().querySelectorAll('button')]
+        .find((b) => b.textContent === 'Reply');
+    assert.ok(reply, 'a Reply button beside Resolve');
+    reply.click();
+    const box = note().querySelector('textarea.dendrite-review-reply-box');
+    assert.ok(box, 'a box to write it in');
+    box.value = '175 patients,\nin Methods.';
+    const send = [...note().querySelectorAll('button')]
+        .find((b) => b.textContent === 'Send');
+    await send.onclick();
+    await tick(20);
+    // Today, where the writer is.
+    const d = new Date();
+    const today = `${d.getFullYear()}-` +
+        `${String(d.getMonth() + 1).padStart(2, '0')}-` +
+        `${String(d.getDate()).padStart(2, '0')}`;
+    assert.equal(text(cardPath('G-aaaaa')), 'The ==cohort==%%[!review] ' +
+        'Claude, 2026-10-23: Say how many.%%%%[!reply] Derek Tam, ' +
+        `${today}: 175 patients, in Methods.%% is large.`);
+    const shown = note().querySelector('.dendrite-review-reply');
+    assert.match(shown.textContent, /Derek Tam.*175 patients, in Methods\./);
+    // Ctrl+Z takes it back as any change to the card.
+    await view.doUndo();
+    assert.equal(text(cardPath('G-aaaaa')), 'The ==cohort==%%[!review] ' +
+        'Claude, 2026-10-23: Say how many.%% is large.');
+    await view.doRedo();
+    await tick(20);
+    note().querySelector('.dendrite-review-reply').dispatchEvent(
+        new h.window.MouseEvent('contextmenu', { bubbles: true }));
+    await tick(10);
+    const menu = h.obsidian.lastMenu;
+    const del = menu.items.find((i) => i.title === 'Delete reply');
+    assert.ok(del && del.warning);
+    await del.click();
+    await tick(20);
+    assert.equal(text(cardPath('G-aaaaa')), 'The ==cohort==%%[!review] ' +
+        'Claude, 2026-10-23: Say how many.%% is large.');
+});
+
+test('in the preview a bubble shows a comment\'s replies and takes a new ' +
+     'one, written on the card through the board', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'The ==cohort==' +
+        '%%[!review] Claude, 2026-10-23: Say how many.%%%%[!reply] ' +
+        'Derek Tam, 2026-10-24: In Methods.%% is large.');
+    const sent = [];
+    const plugin = { settings: { headingTop: 1 }, focusCard() {},
+                     reviewFromPreview: async (...a) => sent.push(a) };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(30);
+    const bubble = view.contentEl.querySelector('.dendrite-pbubble');
+    assert.match(bubble.querySelector('.dendrite-review-reply').textContent,
+                 /Derek Tam.*In Methods\./);
+    [...bubble.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Reply').click();
+    const box = bubble.querySelector('textarea');
+    box.value = 'And the samples.';
+    await [...bubble.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Send').onclick();
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0].slice(1), ['G-aaaaa', 0, 'reply',
+                                        'And the samples.']);
+});
+
+test('threads: each open comment of a manuscript with its card, passage ' +
+     'and replies, in reading order, for a reviewer to read back',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const link = 'https://docs.google.com/document/d/D/edit?disco=x';
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': 'The ==cohort==%%[!review] Claude, 2026-10-23: ' +
+              'Say how many.%%%%[!reply] Derek Tam, 2026-10-24: In ' +
+              'Methods.%% is large.',
+          'G-bbbbb': 'B ==text==%%[!review] Joshua Bridgers, 2026-10-23: ' +
+              `Why? ${link}%% and ==old==%%[!suggest] Claude, ` +
+              '2026-10-23: new%%.' });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.openViews = () => [view];
+    const all = await p.threadsFor('G');
+    assert.equal(all.status, 200);
+    assert.deepEqual(all.json.threads.map((t) => [t.card, t.kind, t.passage,
+        t.author, t.text, t.link, t.replies.length]), [
+        ['G-aaaaa', 'comment', 'cohort', 'Claude', 'Say how many.', null, 1],
+        ['G-bbbbb', 'comment', 'text', 'Joshua Bridgers', 'Why?', link, 0],
+        ['G-bbbbb', 'suggestion', 'old', 'Claude', 'new', null, 0]]);
+    assert.deepEqual(all.json.threads[0].replies, [
+        { author: 'Derek Tam', date: '2026-10-24', text: 'In Methods.' }]);
+    const mine = await p.threadsFor('G', 'Claude');
+    assert.equal(mine.json.threads.length, 2, 'one reviewer\'s');
+    assert.equal((await p.threadsFor('X')).status, 404);
+});
+
+test('a review round is recorded beside the index, and a card whose ' +
+     'printed text changed since shows it', async () => {
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': 'First text.', 'G-bbbbb': 'Second text.' });
+    const chips = (id) => [...view.cardEls.get(id)
+        .querySelectorAll('.dendrite-status-chip')].map((c) => c.textContent);
+    assert.ok(!chips('G-aaaaa').some((t) => /changed/.test(t)));
+    // Offered after an export: a notice with a button.
+    h.notices.length = 0;
+    view.offerRound();
+    const offer = h.notices[h.notices.length - 1];
+    const btn = offer.querySelector && offer.querySelector('button');
+    assert.equal(btn && btn.textContent, 'Mark as sent for review…');
+    btn.click();
+    const modal = h.obsidian.lastModal;
+    modal.contentEl.querySelector('input').value = 'Joshua Bridgers';
+    await [...modal.contentEl.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Record').onclick();
+    await tick(30);
+    const file = app.vault.getAbstractFileByPath('W/Grant/Grant.rounds.json');
+    assert.ok(file, 'kept beside the index');
+    const rounds = JSON.parse(await app.vault.read(file)).rounds;
+    assert.equal(rounds.length, 1);
+    assert.equal(rounds[0].to, 'Joshua Bridgers');
+    assert.deepEqual(Object.keys(rounds[0].cards), ['G-aaaaa', 'G-bbbbb']);
+    // Edited since: that card shows it, and the bar counts it.
+    const f = app.vault.getAbstractFileByPath(cardPath('G-bbbbb'));
+    await app.vault.modify(f, 'Second text, revised.');
+    await tick(700);
+    const day = rounds[0].date.slice(8, 10).replace(/^0/, '');
+    assert.ok(chips('G-bbbbb').some((t) => t.startsWith('changed since ' +
+        day)), chips('G-bbbbb').join());
+    assert.ok(!chips('G-aaaaa').some((t) => /changed/.test(t)));
+    assert.match(view.statusEl.textContent, /1 changed since sent/);
+    // The Review menu records one too.
+    assert.ok(menuItem(view.reviewMenu(), 'Mark as sent for review…'));
 });

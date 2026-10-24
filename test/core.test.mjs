@@ -921,3 +921,70 @@ test('status: a section carrying open review comments is flagged to ' +
     statuses.S = 'unsplit';
     assert.equal(report({ S: 1 }).cards.get('S').own, 'unsplit');
 });
+
+test('find: a review comment is searched by its reviewer and what they ' +
+     'wrote, not its date or link, and its matches are marked as notes',
+     () => {
+    const body = 'A ==passage==%%[!review] Joshua Bridgers, 2026-10-23: ' +
+        'Check timepoints https://docs.google.com/document/d/D/edit' +
+        '?disco=x%% and timepoints here.';
+    const find = (q) => c.findMatches(['X'], () => body, q).matches;
+    const m = find('timepoints');
+    assert.equal(m.length, 2);
+    assert.deepEqual(m.map((x) => !!x.note), [true, false]);
+    assert.equal(find('bridgers').length, 1, 'the reviewer');
+    assert.equal(find('2026').length, 0, 'not the date');
+    assert.equal(find('docs.google').length, 0, 'not the link');
+    // Other %% notes are found as before.
+    assert.equal(c.findMatches(['X'], () => 'Text %%a note%%.', 'note')
+        .matches[0].comment, true);
+});
+
+test('find, printed text only: what each card prints, as its role says, ' +
+     'and nothing in a comment', () => {
+    const p = (body, role) => c.printedRanges(body, role)
+        .map(([a, b]) => body.slice(a, b));
+    assert.deepEqual(p('Text %%a note%% more.', 'prose'),
+                     ['Text ', ' more.']);
+    assert.deepEqual(p('\n# Aims\nPlanning words.', 'section'), ['# Aims']);
+    assert.deepEqual(p('Planning only.', 'section'), []);
+    assert.deepEqual(p('Anything.', 'scaffolding'), []);
+    assert.deepEqual(p('Anything.', 'notes'), []);
+    const bodies = { A: '# Aims\nplan the aims', B: 'the aims %%aims%%' };
+    const role = { A: 'section', B: 'prose' };
+    const r = c.findMatches(['A', 'B'], (id) => bodies[id], 'aims',
+        { printed: (id, body) => c.printedRanges(body, role[id]) });
+    assert.deepEqual(r.matches.map((m) => [m.id, m.start]),
+                     [['A', 2], ['B', 4]]);
+});
+
+test('review rounds: a fingerprint of what each card prints, and which ' +
+     'cards changed since', () => {
+    const root = c.makeRoot();
+    const mk = (id, parent) => {
+        const n = c.makeNode(id, id, null);
+        c.appendChild(parent, n);
+        return n;
+    };
+    const s = mk('S', root);
+    mk('P', s);
+    mk('Q', s);
+    const n = mk('N', root);
+    mk('L', n);
+    const bodies = { S: '# Aims\nplanning', P: 'Text %%a note%%.',
+                     Q: 'More.', N: 'notes', L: 'left out' };
+    const roles = { N: 'notes' };
+    const crc = (t) => `#${t}`;
+    const print = (b) => c.roundFingerprints(root, (id) => b[id],
+        (id) => roles[id] || null, crc);
+    const sent = print(bodies);
+    assert.deepEqual(sent, { S: '## Aims', P: '#Text .', Q: '#More.' },
+                     'what prints, no comments, no left-out branch');
+    const now = print(Object.assign({}, bodies, {
+        P: 'Text %%another note%%.', Q: 'More, edited.',
+        S: '# Aims\nother planning' }));
+    assert.deepEqual([...c.changedSince(sent, now)], ['Q'],
+                     'a comment or planning text is no change');
+    assert.deepEqual([...c.changedSince(sent, Object.assign({}, now,
+        { R: '#new' }))], ['Q', 'R'], 'a card new since');
+});

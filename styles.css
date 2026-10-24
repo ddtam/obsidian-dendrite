@@ -2005,3 +2005,26 @@ button.dendrite-review-btn:hover {
     color: var(--text-faint);
     font-size: var(--font-ui-smaller);
 }
+
+/* Replies to a review comment, under it in its callout or bubble, set in
+   from it; and the box to write one in. */
+.dendrite-review-reply {
+    margin: 4px 0 0 2px;
+    padding-left: 8px;
+    border-left: 1px solid var(--background-modifier-border);
+}
+.dendrite-review-reply-form {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+}
+.dendrite-review-reply-box {
+    width: 100%;
+    resize: vertical;
+    font-size: var(--font-ui-small);
+}
+.dendrite-review-reply-btns {
+    display: flex;
+    gap: 4px;
+}

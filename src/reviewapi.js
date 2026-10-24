@@ -6,6 +6,9 @@
 //
 //   POST /dendrite/review        { manuscript, title?, items: [...] }
 //   GET  /dendrite/review/<id>   the review's state
+//   GET  /dendrite/threads?manuscript=<prefix>[&author=<name>]
+//        the manuscript's open comments, each with its replies, so a
+//        reviewer can read what was answered; read only
 //
 // Every request carries `Authorization: Bearer <key>`. A request with an
 // Origin header comes from a web page and is refused, and no CORS header
@@ -63,6 +66,17 @@ async function handle(opts, req, res) {
         const out = await opts.submit(data);
         return send(res, out.status, out.json);
     }
+    if (url.pathname === '/dendrite/threads' && req.method === 'GET' &&
+        opts.threads) {
+        const prefix = (url.searchParams.get('manuscript') || '').trim();
+        if (!prefix) {
+            return send(res, 400, { error: 'say which manuscript, by its ' +
+                                           'prefix, as ?manuscript=' });
+        }
+        const out = await opts.threads(prefix,
+            url.searchParams.get('author') || null);
+        return send(res, out.status, out.json);
+    }
     const m = /^\/dendrite\/review\/([\w-]+)$/.exec(url.pathname);
     if (m && req.method === 'GET') {
         const out = await opts.status(m[1]);
@@ -74,8 +88,8 @@ async function handle(opts, req, res) {
 /**
  * Listen on 127.0.0.1:`port` (0 for any free port); resolves with the
  * server once listening, rejects when the port cannot be had. `opts`:
- * { port, token, submit(data), status(id) }, each answering
- * { status, json }.
+ * { port, token, submit(data), status(id), threads(prefix, author) },
+ * each answering { status, json }.
  */
 function start(opts, http = require('http')) {
     return new Promise((resolve, reject) => {

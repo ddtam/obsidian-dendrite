@@ -609,3 +609,62 @@ test('a reviewer\'s comments and suggested changes take their colour', () => {
     assert.equal(r.reviewItems(md).map((x) => x.author).join(),
                  'Aly Karsan,Joshua Bridgers,Nobody');
 });
+
+test('replies follow the comment they answer, go with it when it is ' +
+     'resolved, and never print', () => {
+    const md = 'The ==cohort==%%[!review] Claude, 2026-10-23: Say how many.' +
+        '%% is large.';
+    const one = r.addReply(md, 0, { author: 'Derek Tam', date: '2026-10-24',
+                                    text: '175 patients, in Methods.' });
+    assert.equal(one, 'The ==cohort==%%[!review] Claude, 2026-10-23: Say ' +
+        'how many.%%%%[!reply] Derek Tam, 2026-10-24: 175 patients, in ' +
+        'Methods.%% is large.');
+    const two = r.addReply(one, 0, { author: 'Claude', date: '2026-10-24',
+                                     text: 'Thanks; noted.' });
+    const it = r.reviewItems(two)[0];
+    assert.deepEqual(it.replies.map((x) => [x.author, x.date, x.text]), [
+        ['Derek Tam', '2026-10-24', '175 patients, in Methods.'],
+        ['Claude', '2026-10-24', 'Thanks; noted.']]);
+    assert.equal(two.slice(it.end), ' is large.', 'the whole thread');
+    assert.equal(r.reviewItems(two).length, 1, 'a reply is not a comment');
+    assert.equal(r.countComments(r.reviewItems(two)), 1);
+    assert.equal(r.removeItem(two, 0), 'The cohort is large.');
+    assert.equal(r.stripReview(two), 'The cohort is large.');
+    assert.doesNotMatch(r.renderMarkdown(two), /reply/);
+    // A reply taken back.
+    assert.equal(r.removeReply(two, 0, 1), one);
+    // A reply's text kept to one line, with no %%.
+    assert.match(r.addReply(md, 0, { author: 'D', date: '2026-10-24',
+        text: 'a\nb %% c' }), /%%\[!reply\] D, 2026-10-24: a b % c%%/);
+});
+
+test('the review endpoint answers GET /dendrite/threads with the ' +
+     'plugin\'s threads for a manuscript, with its key only', async () => {
+    const api = require('../src/reviewapi.js');
+    const asked = [];
+    const server = await api.start({
+        port: 0, token: 'k3y',
+        async submit() { return { status: 500, json: {} }; },
+        async status() { return { status: 404, json: {} }; },
+        async threads(prefix, author) {
+            asked.push([prefix, author]);
+            return { status: 200, json: { manuscript: prefix, threads: [] } };
+        } });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const call = async (path, headers = {}) => {
+        const res = await fetch(base + path, { headers });
+        return [res.status, await res.json()];
+    };
+    try {
+        const auth = { authorization: 'Bearer k3y' };
+        assert.deepEqual(await call('/dendrite/threads?manuscript=G' +
+            '&author=Claude', auth),
+            [200, { manuscript: 'G', threads: [] }]);
+        assert.deepEqual(asked, [['G', 'Claude']]);
+        assert.equal((await call('/dendrite/threads?manuscript=G'))[0], 401);
+        assert.equal((await call('/dendrite/threads', auth))[0], 400,
+                     'which manuscript');
+    } finally {
+        server.close();
+    }
+});

@@ -1512,11 +1512,40 @@ function findPatterns(query, opts = {}) {
     return { patterns: terms.map((t) => new RegExp(esc(t), flags)) };
 }
 
+// A review comment, suggested change or reply in a card's text: its
+// reviewer, its date and what it says, the last ending in an optional
+// link to its thread.
+const REVIEW_NOTE = new RegExp('%%\\[!(review|suggest|reply)\\]\\s*' +
+    '([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%', 'g');
+
+/**
+ * The stretches of a card's text that review comments show, as
+ * [start, end, kind]: each one's reviewer and what it says, without its
+ * date, its markup or its link, which the board does not show.
+ */
+function reviewText(body) {
+    const out = [];
+    REVIEW_NOTE.lastIndex = 0;
+    let m;
+    while ((m = REVIEW_NOTE.exec(body)) !== null) {
+        const who = m.index + m[0].indexOf(m[2], 3);
+        out.push([who, who + m[2].length, m[1]]);
+        const at = m.index + m[0].length - 2 - m[3].length;
+        const link = /\s+https?:\/\/\S+\s*$/.exec(m[3]);
+        out.push([at, at + (link ? link.index : m[3].length), m[1]]);
+    }
+    return out;
+}
+
 /**
  * Every match of a query in reading order: `ids` in reading order,
  * `bodyOf(id)` a card's text. A card matches only when every pattern
- * does. Returns { matches: [{ id, start, end, comment }], error }, where
- * `comment` marks a match inside %% comments %%.
+ * does. Returns { matches: [{ id, start, end, comment, note }], error },
+ * where `comment` marks a match inside %% comments %% and `note` one in
+ * what a review comment or reply shows in its callout. A review
+ * comment's date, markup and link are not searched, since nothing on the
+ * board shows them; a suggested change's text is not a note, being shown
+ * in the text.
  */
 function findMatches(ids, bodyOf, query, opts = {}) {
     const { patterns, error } = findPatterns(query, opts);
@@ -1532,6 +1561,21 @@ function findMatches(ids, bodyOf, query, opts = {}) {
                            card: true });
         }
         const body = bodyOf(id) || '';
+        // Printed text only: what the card prints, by its role.
+        const printed = opts.printed ? opts.printed(id, body) : null;
+        if (printed && !printed.length) continue;
+        const shown = reviewText(body);
+        const notes = [];
+        REVIEW_NOTE.lastIndex = 0;
+        let rn;
+        while ((rn = REVIEW_NOTE.exec(body)) !== null) {
+            notes.push([rn.index, rn.index + rn[0].length]);
+        }
+        // In a review comment, only what it shows counts.
+        const counts = (a, b) => (!printed ||
+            printed.some(([x, y]) => a >= x && b <= y)) &&
+            (!notes.some(([x, y]) => a < y && b > x) ||
+             shown.some(([x, y]) => a >= x && b <= y));
         const found = [];
         let all = true;
         for (const p of patterns) {
@@ -1543,8 +1587,10 @@ function findMatches(ids, bodyOf, query, opts = {}) {
                     p.lastIndex += 1;
                     continue;
                 }
+                const end = m.index + m[0].length;
+                if (!counts(m.index, end)) continue;
                 hit = true;
-                found.push({ start: m.index, end: m.index + m[0].length });
+                found.push({ start: m.index, end });
             }
             if (!hit) {
                 all = false;
@@ -1566,10 +1612,75 @@ function findMatches(ids, bodyOf, query, opts = {}) {
             last = f.end;
             matches.push({ id, start: f.start, end: f.end,
                            comment: comments.some(
-                               ([a, b]) => f.start >= a && f.end <= b) });
+                               ([a, b]) => f.start >= a && f.end <= b),
+                           note: shown.some(([a, b, kind]) =>
+                               kind !== 'suggest' && f.start >= a &&
+                               f.end <= b) });
         }
     }
     return { matches, error };
+}
+
+/**
+ * The stretches of a card's text that print, as [start, end], by the
+ * card's role: a prose card all of it, a section its heading line, and
+ * scaffolding or a left-out card nothing; never a %% comment %%.
+ */
+function printedRanges(body, role) {
+    const text = String(body || '');
+    let keep = [];
+    if (role === 'prose') keep = [[0, text.length]];
+    else if (role === 'section') {
+        const m = /^\s*/.exec(text);
+        const start = m[0].length;
+        const nl = text.indexOf('\n', start);
+        const end = nl < 0 ? text.length : nl;
+        if (HEADING.test(text.slice(start, end))) keep = [[start, end]];
+    }
+    const out = [];
+    const cre = /%%[\s\S]*?%%/g;
+    for (const [a, b] of keep) {
+        let at = a;
+        cre.lastIndex = 0;
+        let c;
+        while ((c = cre.exec(text)) !== null) {
+            const cs = c.index;
+            const ce = cs + c[0].length;
+            if (ce <= at || cs >= b) continue;
+            if (cs > at) out.push([at, cs]);
+            at = Math.max(at, ce);
+        }
+        if (at < b) out.push([at, b]);
+    }
+    return out;
+}
+
+// ---- review rounds -------------------------------------------------------
+
+/**
+ * A fingerprint of what each card prints, { id: crc(text) }, for a
+ * review round: the text by the card's role (printedRanges), comments
+ * left out, and nothing in a left-out branch. `roleOf(id)` the card's set
+ * role, `crc(text)` the fingerprint of a text.
+ */
+function roundFingerprints(root, bodyOf, roleOf, crc) {
+    const out = {};
+    const walk = (node) => {
+        const role = roleFor(node, roleOf);
+        if (role === 'notes') return;
+        const body = bodyOf(node.id) || '';
+        const text = printedRanges(body, role)
+            .map(([a, b]) => body.slice(a, b)).join('');
+        if (text.trim()) out[node.id] = crc(text);
+        node.children.forEach(walk);
+    };
+    root.children.forEach(walk);
+    return out;
+}
+
+/** The cards whose printed text differs from a round's, or is new. */
+function changedSince(sent, now) {
+    return new Set(Object.keys(now).filter((id) => sent[id] !== now[id]));
 }
 
 /** The part of a card id after the prefix: `DRAC-2026-lchl3` -> `lchl3`. */
@@ -1579,7 +1690,8 @@ function shortId(id) {
 }
 
 module.exports = {
-    findPatterns, findMatches, shortId,
+    findPatterns, findMatches, printedRanges, shortId,
+    roundFingerprints, changedSince,
     parseLimit, formatLimit, countText, wordsPerPage, measure,
     sectionNumbers,
     alignColumns, tallTop, caretOffset, parseAmount, convert, quotas, fmtNum,

@@ -1065,6 +1065,20 @@ var require_core = __commonJS({
       const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return { patterns: terms.map((t) => new RegExp(esc(t), flags)) };
     }
+    var REVIEW_NOTE = new RegExp("%%\\[!(review|suggest|reply)\\]\\s*([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%", "g");
+    function reviewText(body) {
+      const out = [];
+      REVIEW_NOTE.lastIndex = 0;
+      let m;
+      while ((m = REVIEW_NOTE.exec(body)) !== null) {
+        const who = m.index + m[0].indexOf(m[2], 3);
+        out.push([who, who + m[2].length, m[1]]);
+        const at = m.index + m[0].length - 2 - m[3].length;
+        const link = /\s+https?:\/\/\S+\s*$/.exec(m[3]);
+        out.push([at, at + (link ? link.index : m[3].length), m[1]]);
+      }
+      return out;
+    }
     function findMatches(ids, bodyOf, query, opts = {}) {
       const { patterns, error } = findPatterns(query, opts);
       const matches = [];
@@ -1081,6 +1095,16 @@ var require_core = __commonJS({
           });
         }
         const body = bodyOf(id) || "";
+        const printed = opts.printed ? opts.printed(id, body) : null;
+        if (printed && !printed.length) continue;
+        const shown = reviewText(body);
+        const notes = [];
+        REVIEW_NOTE.lastIndex = 0;
+        let rn;
+        while ((rn = REVIEW_NOTE.exec(body)) !== null) {
+          notes.push([rn.index, rn.index + rn[0].length]);
+        }
+        const counts = (a, b) => (!printed || printed.some(([x, y]) => a >= x && b <= y)) && (!notes.some(([x, y]) => a < y && b > x) || shown.some(([x, y]) => a >= x && b <= y));
         const found = [];
         let all = true;
         for (const p of patterns) {
@@ -1092,8 +1116,10 @@ var require_core = __commonJS({
               p.lastIndex += 1;
               continue;
             }
+            const end = m.index + m[0].length;
+            if (!counts(m.index, end)) continue;
             hit = true;
-            found.push({ start: m.index, end: m.index + m[0].length });
+            found.push({ start: m.index, end });
           }
           if (!hit) {
             all = false;
@@ -1118,11 +1144,56 @@ var require_core = __commonJS({
             end: f.end,
             comment: comments.some(
               ([a, b]) => f.start >= a && f.end <= b
-            )
+            ),
+            note: shown.some(([a, b, kind]) => kind !== "suggest" && f.start >= a && f.end <= b)
           });
         }
       }
       return { matches, error };
+    }
+    function printedRanges(body, role) {
+      const text = String(body || "");
+      let keep = [];
+      if (role === "prose") keep = [[0, text.length]];
+      else if (role === "section") {
+        const m = /^\s*/.exec(text);
+        const start = m[0].length;
+        const nl = text.indexOf("\n", start);
+        const end = nl < 0 ? text.length : nl;
+        if (HEADING.test(text.slice(start, end))) keep = [[start, end]];
+      }
+      const out = [];
+      const cre = /%%[\s\S]*?%%/g;
+      for (const [a, b] of keep) {
+        let at = a;
+        cre.lastIndex = 0;
+        let c;
+        while ((c = cre.exec(text)) !== null) {
+          const cs = c.index;
+          const ce = cs + c[0].length;
+          if (ce <= at || cs >= b) continue;
+          if (cs > at) out.push([at, cs]);
+          at = Math.max(at, ce);
+        }
+        if (at < b) out.push([at, b]);
+      }
+      return out;
+    }
+    function roundFingerprints(root, bodyOf, roleOf, crc) {
+      const out = {};
+      const walk = (node) => {
+        const role = roleFor(node, roleOf);
+        if (role === "notes") return;
+        const body = bodyOf(node.id) || "";
+        const text = printedRanges(body, role).map(([a, b]) => body.slice(a, b)).join("");
+        if (text.trim()) out[node.id] = crc(text);
+        node.children.forEach(walk);
+      };
+      root.children.forEach(walk);
+      return out;
+    }
+    function changedSince(sent, now) {
+      return new Set(Object.keys(now).filter((id) => sent[id] !== now[id]));
     }
     function shortId(id) {
       const s = String(id || "");
@@ -1131,7 +1202,10 @@ var require_core = __commonJS({
     module2.exports = {
       findPatterns,
       findMatches,
+      printedRanges,
       shortId,
+      roundFingerprints,
+      changedSince,
       parseLimit,
       formatLimit,
       countText,
@@ -3002,8 +3076,23 @@ var require_review = __commonJS({
       const end = e > s ? c.src(e - 1) + 1 : start;
       return { id: c.id, start, end: e > s ? end : start, how };
     }
-    var ITEM = /(?:==([^=\n]+?)==)?%%\[!(review|suggest)\]\s*([\s\S]*?)%%/g;
+    var ITEM = new RegExp("(?:==([^=\\n]+?)==)?%%\\[!(review|suggest)\\]\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)", "g");
+    var REPLY = /%%\[!reply\]\s*([\s\S]*?)%%/g;
     var HEAD = /^(.*?),\s*(\d{4}-\d{2}-\d{2}):\s?([\s\S]*)$/;
+    function readReplies(chunk) {
+      const out = [];
+      REPLY.lastIndex = 0;
+      let m;
+      while (m = REPLY.exec(chunk || "")) {
+        const h = HEAD.exec(m[1].replace(/^\s+/, ""));
+        out.push({
+          author: h ? h[1] : "",
+          date: h ? h[2] : "",
+          text: (h ? h[3] : m[1]).trim()
+        });
+      }
+      return out;
+    }
     function reviewItems(md) {
       const out = [];
       ITEM.lastIndex = 0;
@@ -3016,11 +3105,32 @@ var require_review = __commonJS({
           author: h ? h[1] : "",
           date: h ? h[2] : "",
           text: h ? m[2] === "suggest" ? h[3] : h[3].trim() : m[3].trim(),
+          replies: readReplies(m[4]),
           start: m.index,
           end: m.index + m[0].length
         });
       }
       return out;
+    }
+    function addReply(md, n, reply) {
+      const it = reviewItems(md)[n];
+      if (!it) return md;
+      const note = `%%[!reply] ${clean(reply.author) || "Me"}, ${reply.date}: ${clean(reply.text)}%%`;
+      return md.slice(0, it.end) + note + md.slice(it.end);
+    }
+    function removeReply(md, n, k) {
+      const it = reviewItems(md)[n];
+      if (!it) return md;
+      const whole = md.slice(it.start, it.end);
+      REPLY.lastIndex = 0;
+      let m;
+      let i = 0;
+      while (m = REPLY.exec(whole)) {
+        if (whole.slice(0, m.index).endsWith("%%") && i++ === k) {
+          return md.slice(0, it.start + m.index) + md.slice(it.start + m.index + m[0].length);
+        }
+      }
+      return md;
     }
     var clean = (s, edges = false) => {
       const t = String(s || "").replace(/%%/g, "%").replace(/\s*\n\s*/g, " ");
@@ -3255,7 +3365,60 @@ var require_review = __commonJS({
     function commentMenu(it) {
       return [...commentActions(it).map(([what, label]) => [what, label, false]), ["delete", "Delete from Dendrite", true]];
     }
-    function decorate(root, items, act, onMenu = null, colourOf = null) {
+    function replyBox(parent, send, typing = null) {
+      const doc = parent.ownerDocument;
+      const old = parent.querySelector(":scope > .dendrite-review-reply-form");
+      if (old) {
+        old.querySelector("textarea").focus();
+        return old;
+      }
+      const form = doc.createElement("div");
+      form.className = "dendrite-review-reply-form";
+      const box = doc.createElement("textarea");
+      box.className = "dendrite-review-reply-box";
+      box.rows = 2;
+      box.placeholder = "Reply";
+      const row = doc.createElement("div");
+      row.className = "dendrite-review-reply-btns";
+      const go = doc.createElement("button");
+      go.className = "dendrite-review-btn mod-cta";
+      go.textContent = "Send";
+      const no = doc.createElement("button");
+      no.className = "dendrite-review-btn";
+      no.textContent = "Cancel";
+      const done = () => form.remove();
+      go.onclick = async (e) => {
+        if (e && e.stopPropagation) e.stopPropagation();
+        const t = box.value.trim();
+        if (!t) return;
+        done();
+        await send(t);
+      };
+      no.onclick = (e) => {
+        if (e && e.stopPropagation) e.stopPropagation();
+        done();
+      };
+      box.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          go.onclick();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          done();
+        }
+        e.stopPropagation();
+      });
+      for (const ev of ["click", "dblclick", "pointerdown"]) {
+        form.addEventListener(ev, (e) => e.stopPropagation());
+      }
+      row.append(go, no);
+      form.append(box, row);
+      parent.append(form);
+      if (typing) typing(box);
+      box.focus();
+      return form;
+    }
+    function decorate(root, items, act, onMenu = null, colourOf = null, typing = null) {
       const nums = [...root.querySelectorAll("sup.dendrite-review-n")];
       const doc = root.ownerDocument;
       const blocks = /* @__PURE__ */ new Map();
@@ -3308,8 +3471,32 @@ var require_review = __commonJS({
           }
           text.textContent = it.kind !== "suggest" ? said : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
           main.append(meta, text);
+          (it.replies || []).forEach((r, k) => {
+            const el = doc.createElement("div");
+            el.className = "dendrite-review-reply";
+            const by = doc.createElement("div");
+            by.className = "dendrite-review-meta";
+            const b2 = doc.createElement("b");
+            b2.textContent = r.author || "Me";
+            by.append(b2, ` \xB7 ${shortDate(r.date)}`);
+            const said2 = doc.createElement("div");
+            said2.className = "dendrite-review-text";
+            said2.textContent = r.text;
+            el.append(by, said2);
+            if (onMenu) {
+              el.addEventListener("contextmenu", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onMenu(i, e, k);
+              });
+            }
+            main.append(el);
+          });
           note.append(n, main);
-          const buttons = commentActions(it);
+          const buttons = [
+            ...commentActions(it),
+            ["reply", "Reply", "Answer this comment"]
+          ];
           if (onMenu) {
             note.addEventListener("contextmenu", (e) => {
               e.preventDefault();
@@ -3324,7 +3511,8 @@ var require_review = __commonJS({
             if (tip) btn.title = tip;
             btn.addEventListener("click", (e) => {
               e.stopPropagation();
-              act(i, what);
+              if (what === "reply") replyBox(main, (t) => act(i, "reply", t), typing);
+              else act(i, what);
             });
             note.append(btn);
           }
@@ -3358,6 +3546,9 @@ var require_review = __commonJS({
       assignColours,
       reviewerEntries,
       entryList,
+      addReply,
+      removeReply,
+      replyBox,
       firstOfComment,
       countComments,
       itemText,
@@ -4387,6 +4578,17 @@ var require_reviewapi = __commonJS({
         const out = await opts.submit(data);
         return send(res, out.status, out.json);
       }
+      if (url.pathname === "/dendrite/threads" && req.method === "GET" && opts.threads) {
+        const prefix = (url.searchParams.get("manuscript") || "").trim();
+        if (!prefix) {
+          return send(res, 400, { error: "say which manuscript, by its prefix, as ?manuscript=" });
+        }
+        const out = await opts.threads(
+          prefix,
+          url.searchParams.get("author") || null
+        );
+        return send(res, out.status, out.json);
+      }
       const m = /^\/dendrite\/review\/([\w-]+)$/.exec(url.pathname);
       if (m && req.method === "GET") {
         const out = await opts.status(m[1]);
@@ -4513,6 +4715,8 @@ var DEFAULTS = {
   reviewApi: false,
   reviewApiPort: 27130,
   reviewApiKey: "",
+  // The name a reply to a review comment is signed with.
+  replyName: "",
   // Reviews submitted, pending until added or ignored on the board,
   // and the latest ones decided, so a submitter can ask.
   reviewQueue: [],
@@ -4615,6 +4819,19 @@ function openExternal(url) {
 function dendriteMenu(icons = true) {
   const { Menu } = require("obsidian");
   return styleMenu(new Menu(), icons);
+}
+function ownKeys(app, el) {
+  const scope = new Scope(app.scope);
+  el.addEventListener("focus", () => {
+    if (app.keymap) app.keymap.pushScope(scope);
+  });
+  el.addEventListener("blur", () => {
+    if (app.keymap) app.keymap.popScope(scope);
+  });
+}
+function localDay(d = /* @__PURE__ */ new Date()) {
+  const two = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
 }
 function showCommentMenu(items, event, act, colours = null) {
   const m = dendriteMenu(false);
@@ -5150,6 +5367,7 @@ var DendriteView = class extends ItemView {
     this.updateRoles();
     this.updateStatuses();
     this.updateCounts();
+    this.scheduleChanged();
   }
   renderBar(el) {
     const bar = el.createDiv({ cls: "dendrite-bar" });
@@ -5364,9 +5582,10 @@ var DendriteView = class extends ItemView {
         review.decorate(
           out,
           notes,
-          (n, what) => this.reviewAction(id, n, what),
-          (n, e) => this.commentMenu(id, n, e),
-          this.colourOf()
+          (n, what, arg) => this.reviewAction(id, n, what, arg),
+          (n, e, k) => this.commentMenu(id, n, e, k),
+          this.colourOf(),
+          (el) => ownKeys(this.app, el)
         );
       }
     } else if (!kind) {
@@ -7690,9 +7909,10 @@ var DendriteView = class extends ItemView {
       review.decorate(
         out,
         notes,
-        (n, what) => this.reviewAction(id, n, what),
-        (n, e) => this.commentMenu(id, n, e),
-        this.colourOf()
+        (n, what, arg) => this.reviewAction(id, n, what, arg),
+        (n, e, k) => this.commentMenu(id, n, e, k),
+        this.colourOf(),
+        (el2) => ownKeys(this.app, el2)
       );
     }
   }
@@ -7850,6 +8070,7 @@ var DendriteView = class extends ItemView {
   // ---- changes from outside the view -----------------------------------
   async onModify(f) {
     if (!(f instanceof TFile) || !this.file) return;
+    this.scheduleChanged();
     if (f === this.file) {
       const text2 = await this.app.vault.cachedRead(f);
       if (this.selfWrites.delete(text2)) {
@@ -8674,6 +8895,7 @@ var DendriteView = class extends ItemView {
     m.addSeparator();
     m.addItem((i) => i.setTitle("Import a Word or JSON file\u2026").onClick(() => this.importReview()));
     m.addItem((i) => i.setTitle("Reviewers\u2026").onClick(() => new ReviewersModal(this).open()));
+    m.addItem((i) => i.setTitle("Mark as sent for review\u2026").onClick(() => new RoundModal(this).open()));
     if (this.inbox.length) {
       m.addSeparator();
       for (const entry of this.inbox) {
@@ -8925,12 +9147,20 @@ var DendriteView = class extends ItemView {
    * first. One step to undo either way.
    */
   /** A review comment's right-click menu, Delete from Dendrite in it. */
-  commentMenu(id, n, event) {
+  commentMenu(id, n, event, reply = null) {
     const f = this.cardFile(id);
     if (!f) return;
     this.app.vault.cachedRead(f).then((data) => {
       const it = review.reviewItems(core.splitFrontmatter(data).body)[n];
       if (!it) return;
+      if (reply !== null && reply !== void 0) {
+        showCommentMenu(
+          [["unreply", "Delete reply", true]],
+          event,
+          () => this.reviewAction(id, n, "unreply", reply)
+        );
+        return;
+      }
       const who = it.author || "Reviewer";
       showCommentMenu(
         review.commentMenu(it),
@@ -9069,7 +9299,7 @@ var DendriteView = class extends ItemView {
       await this.fanReady;
     }
   }
-  async reviewAction(id, n, what) {
+  async reviewAction(id, n, what, arg = null) {
     const f = this.cardFile(id);
     if (!f) return;
     if (this.editing && this.editing.id === id) await this.endEdit();
@@ -9095,6 +9325,18 @@ var DendriteView = class extends ItemView {
       }
     };
     const item = review.reviewItems(body)[n];
+    if (what === "reply") {
+      await write(review.addReply(body, n, {
+        author: this.plugin.settings.replyName || "Me",
+        date: localDay(),
+        text: arg
+      }));
+      return;
+    }
+    if (what === "unreply") {
+      await write(review.removeReply(body, n, arg));
+      return;
+    }
     if (what === "apply") {
       const after = review.removeItem(body, n, true);
       new SuggestModal(this, id, body, after, async () => {
@@ -9142,6 +9384,80 @@ var DendriteView = class extends ItemView {
    * A printing card shows its own status, a structural card the least
    * finished state below it and how many cards there are flagged.
    */
+  // ---- review rounds ---------------------------------------------------
+  /** The review rounds' file, beside the index: Grant.rounds.json. */
+  roundsPath() {
+    return this.file ? this.file.path.replace(/\.md$/, "") + ".rounds.json" : null;
+  }
+  async readRounds() {
+    const f = this.app.vault.getAbstractFileByPath(this.roundsPath());
+    if (!(f instanceof TFile)) return [];
+    try {
+      const data = JSON.parse(await this.app.vault.read(f));
+      return Array.isArray(data.rounds) ? data.rounds : [];
+    } catch (err) {
+      return [];
+    }
+  }
+  /** What each card prints now, fingerprinted as a round keeps it. */
+  async fingerprints() {
+    const bodies = await this.loadBodies();
+    const crc = require_docx().crc32;
+    return core.roundFingerprints(
+      this.root,
+      (id) => bodies.get(id),
+      (id) => this.printRoleOf(id),
+      (t) => String(crc(Buffer.from(t, "utf8")))
+    );
+  }
+  /**
+   * A review round: the manuscript as sent, today, to `to`, kept in
+   * the rounds' file so the board can show what changed since.
+   */
+  async recordRound(to) {
+    const rounds = await this.readRounds();
+    rounds.push({
+      date: localDay(),
+      to: String(to || "").trim(),
+      cards: await this.fingerprints()
+    });
+    const path = this.roundsPath();
+    const text = JSON.stringify({ rounds }, null, 2) + "\n";
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) await this.app.vault.modify(f, text);
+    else await this.app.vault.create(path, text);
+    await this.updateChanged();
+  }
+  /** After an export: a notice offering to mark it as sent. */
+  offerRound() {
+    const frag = this.pageDoc().createDocumentFragment();
+    const el = createDiv({ text: "Dendrite: sent this for review? " });
+    const b = el.createEl("button", { text: "Mark as sent for review\u2026" });
+    b.addEventListener("click", () => new RoundModal(this).open());
+    frag.append(el);
+    new Notice(frag, 15e3);
+  }
+  scheduleChanged() {
+    clearTimeout(this.changedTimer);
+    this.changedTimer = setTimeout(() => this.updateChanged(), 500);
+  }
+  /** Which cards' printed text changed since the latest round. */
+  async updateChanged() {
+    if (!this.root) return;
+    const rounds = await this.readRounds();
+    const last = rounds[rounds.length - 1];
+    const before = this.changed;
+    this.changed = last ? {
+      date: last.date,
+      to: last.to,
+      ids: core.changedSince(
+        last.cards || {},
+        await this.fingerprints()
+      )
+    } : null;
+    const key = (c) => c ? `${c.date}|${[...c.ids].join(",")}` : "";
+    if (key(before) !== key(this.changed)) this.updateStatuses();
+  }
   /** Statuses shown again once, after the cards being drawn. */
   scheduleStatuses() {
     if (this.statusTimer) return;
@@ -9184,6 +9500,10 @@ var DendriteView = class extends ItemView {
           this.reviewVersion(id);
         };
       }
+      if (this.changed && this.changed.ids.has(id)) {
+        const s = show("changed", "changed since " + review.shortDate(this.changed.date));
+        s.setAttr("aria-label", "What this card prints changed since it was sent to " + (this.changed.to || "review"));
+      }
       if (info.own === "done") show("done", "done \u2713");
       else if (info.own === "revise") show("revise", "revise \u2691");
       else if (info.own === "unsplit") show("unsplit", "unsplit");
@@ -9217,6 +9537,10 @@ var DendriteView = class extends ItemView {
       if (t.revise) parts.push(`${t.revise} revise`);
       if (t.unsplit) parts.push(`${t.unsplit} unsplit`);
       parts.push(`${t.draft} draft`, `${t.done} done`);
+      const ch = this.changed;
+      if (ch && ch.ids.size) {
+        parts.push(`${ch.ids.size} changed since sent ` + review.shortDate(ch.date));
+      }
       this.statusEl.setText(parts.join(" \xB7 "));
       this.statusEl.toggleClass("has-flags", t.revise + t.unsplit > 0);
       if (this.reverted.has("index")) {
@@ -9691,6 +10015,12 @@ var DendriteView = class extends ItemView {
     );
     toggle("regex", "regex", "Regular expression", () => !f.regex);
     toggle(
+      "printed",
+      "printer",
+      "Only text that prints",
+      () => !f.printed
+    );
+    toggle(
       "branch",
       "git-branch",
       "Only the selected card's branch",
@@ -9770,7 +10100,11 @@ var DendriteView = class extends ItemView {
     const top = f.branch && this.byId.get(f.branch);
     const nodes = (top ? [top, ...core.descendants(top)] : core.allNodes(this.root)).filter((n) => !this.shown || this.shown.parent.has(n.id));
     const ids = nodes.map((n) => n.id);
-    const r = core.findMatches(ids, bodyOf, f.query, f);
+    const r = core.findMatches(ids, bodyOf, f.query, Object.assign(
+      {},
+      f,
+      { printed: f.printed ? this.printedOf() : null }
+    ));
     const was = f.matches[f.index];
     f.matches = r.matches;
     f.error = r.error || null;
@@ -9787,6 +10121,29 @@ var DendriteView = class extends ItemView {
     }
     if (!keep && f.index >= 0) await this.goToMatch(f.index);
     else this.showFind();
+  }
+  /**
+   * What a card prints, for find: its text by its role, nothing in a
+   * left-out branch.
+   */
+  printedOf() {
+    const roleOf = (x) => this.printRoleOf(x);
+    const out = /* @__PURE__ */ new Set();
+    const walk = (node) => {
+      if (core.roleFor(node, roleOf) === "notes") {
+        for (const d of [node, ...core.descendants(node)]) {
+          out.add(d.id);
+        }
+        return;
+      }
+      node.children.forEach(walk);
+    };
+    this.root.children.forEach(walk);
+    return (id, body) => {
+      const node = this.byId.get(id);
+      if (!node || out.has(id)) return [];
+      return core.printedRanges(body, core.roleFor(node, roleOf));
+    };
   }
   /** Count, fading, the matches below each card, and highlights. */
   showFind() {
@@ -9902,7 +10259,7 @@ var DendriteView = class extends ItemView {
     if (!f || !f.matches.length) return;
     const { patterns } = core.findPatterns(f.query, f);
     const cur = f.matches[f.index];
-    const nth = cur && !cur.card ? f.matches.filter((m) => m.id === cur.id && !m.card && m.start < cur.start).length : -1;
+    const nth = cur && !cur.card ? f.matches.filter((m) => m.id === cur.id && !m.card && !!m.note === !!cur.note && m.start < cur.start).length : -1;
     const doc = this.pageDoc();
     const all = [];
     let current = null;
@@ -9943,13 +10300,20 @@ var DendriteView = class extends ItemView {
         while (i > 0 && nodes[i].at > k) i -= 1;
         return [nodes[i].t, k - nodes[i].at];
       };
-      spans.forEach(([a, b], k) => {
+      const inNote = (r) => {
+        const el = r.startContainer.parentElement;
+        return !!(el && el.closest(".dendrite-review-notes"));
+      };
+      const seen = { true: 0, false: 0 };
+      for (const [a, b] of spans) {
         const r = doc.createRange();
         r.setStart(...point(a));
         r.setEnd(...point(b));
-        if (id === (cur && cur.id) && k === nth) current = r;
+        const note = inNote(r);
+        const k = seen[note]++;
+        if (id === (cur && cur.id) && note === !!cur.note && k === nth) current = r;
         else all.push(r);
-      });
+      }
     }
     reg.set("dendrite-find", new win.Highlight(...all));
     if (current) {
@@ -10129,6 +10493,7 @@ var DendriteView = class extends ItemView {
     }
     const cites = result.keys.length ? ` with ${result.keys.length} citation(s)` : "";
     new Notice(`Dendrite: exported to ${rel}${cites}.`);
+    if (whole) this.offerRound();
     const bodies = whole ? await this.loadBodies() : null;
     const counted = whole ? core.countManuscript(
       this.root.children,
@@ -10609,6 +10974,13 @@ var DendritePreview = class extends ItemView {
         cls: "dendrite-pbubble-text",
         text: it.kind !== "suggest" ? text : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`
       });
+      for (const r of it.replies || []) {
+        const rel = el.createDiv({ cls: "dendrite-review-reply" });
+        const by = rel.createDiv({ cls: "dendrite-review-meta" });
+        by.createEl("b", { text: r.author || "Me" });
+        by.appendText(` \xB7 ${review.shortDate(r.date)}`);
+        rel.createDiv({ cls: "dendrite-review-text", text: r.text });
+      }
       const row = el.createDiv({ cls: "dendrite-pbubble-btns" });
       el.addEventListener("contextmenu", (e) => {
         e.preventDefault();
@@ -10643,6 +11015,23 @@ var DendritePreview = class extends ItemView {
           }
         };
       }
+      const answer = row.createEl("button", { text: "Reply" });
+      answer.title = "Answer this comment";
+      answer.addEventListener("click", (e) => {
+        e.stopPropagation();
+        review.replyBox(el, async (t) => {
+          if (this.plugin.reviewFromPreview) {
+            await this.plugin.reviewFromPreview(
+              this.file,
+              id,
+              n,
+              "reply",
+              t
+            );
+          }
+        }, (box) => ownKeys(this.app, box));
+        this.scheduleBubbles();
+      });
     }
     const order = new Map(this.reviewList.map((x, k) => [`${x.id}\0${x.n}`, k]));
     const key = (el) => order.get(`${el.dataset.id}\0${el.dataset.n}`) ?? 1e9;
@@ -11670,6 +12059,39 @@ function noteSuggest(app, input, pick, images = false) {
   }
   return new NoteSuggest(app, input);
 }
+var RoundModal = class extends Modal {
+  constructor(view) {
+    super(view.app);
+    this.view = view;
+  }
+  onOpen() {
+    this.titleEl.setText("Mark as sent for review");
+    this.contentEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Keeps what each card prints now, so the board can show which cards change from here on."
+    });
+    const input = this.contentEl.createEl("input", { type: "text" });
+    input.placeholder = "Sent to";
+    input.addClass("dendrite-round-to");
+    const row = this.contentEl.createDiv({ cls: "modal-button-container" });
+    const go = row.createEl("button", { text: "Record", cls: "mod-cta" });
+    go.onclick = async () => {
+      this.close();
+      await this.view.recordRound(input.value);
+      new Notice("Dendrite: recorded as sent for review.");
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        go.onclick();
+      }
+    });
+    input.focus();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var ReviewersModal = class extends Modal {
   constructor(view) {
     super(view.app);
@@ -12106,6 +12528,10 @@ var DendriteSettings = class extends PluginSettingTab {
       save();
     }));
     heading("Review");
+    new Setting(containerEl).setName("Your name, on replies").setDesc("Replies you write to review comments are signed with this, as a reviewer's comments are with theirs.").addText((t) => t.setPlaceholder("Me").setValue(s.replyName).onChange((v) => {
+      s.replyName = v.trim();
+      save();
+    }));
     new Setting(containerEl).setName("Accept reviews from programs on this computer").setDesc(`Listens on 127.0.0.1 for review comments sent by a program, such as an agent, with a key. Each waits on its manuscript's board, and nothing is written until you add it there. The port and key are in ${discoveryPath()} while Dendrite listens. Desktop only.`).addToggle((tg) => tg.setValue(!!s.reviewApi).onChange(async (v) => {
       s.reviewApi = v;
       await save();
@@ -12317,7 +12743,8 @@ module.exports = class DendritePlugin extends Plugin {
         port: want,
         token: s.reviewApiKey,
         submit: (d) => this.submitReview(d),
-        status: (id) => this.reviewStatus(id)
+        status: (id) => this.reviewStatus(id),
+        threads: (m, who) => this.threadsFor(m, who)
       });
     } catch (err) {
       new Notice(`Dendrite: could not listen for reviews on port ${want} (${err.message}). Another program, or Dendrite in another vault, may have it; choose another port in settings.`, 1e4);
@@ -12328,8 +12755,10 @@ module.exports = class DendritePlugin extends Plugin {
     const fs = require("fs");
     const file = discoveryPath();
     fs.mkdirSync(require("path").dirname(file), { recursive: true });
+    const base = `http://127.0.0.1:${this.reviewServer.address().port}/dendrite`;
     fs.writeFileSync(file, JSON.stringify({
-      url: `http://127.0.0.1:${this.reviewServer.address().port}/dendrite/review`,
+      url: `${base}/review`,
+      threads: `${base}/threads`,
       key: s.reviewApiKey,
       vault: this.app.vault.getName(),
       pid: process.pid
@@ -12484,6 +12913,49 @@ module.exports = class DendritePlugin extends Plugin {
       missing
     } };
   }
+  /**
+   * A manuscript's open review comments and suggested changes, each
+   * with its card, passage, reviewer, text, Google link and replies, in
+   * reading order; only `author`'s, if given. Read only, for a reviewer
+   * to read what was answered.
+   */
+  async threadsFor(prefix, author = null) {
+    const file = this.indexWithPrefix(prefix);
+    if (!file) {
+      return { status: 404, json: {
+        error: `no manuscript has the prefix ${prefix}`
+      } };
+    }
+    const app = this.app;
+    const text = await app.vault.cachedRead(file);
+    const root = core.parseIndex(core.splitFrontmatter(text).body).root;
+    const threads = [];
+    for (const n of core.allNodes(root)) {
+      const f = app.metadataCache.getFirstLinkpathDest(n.id, file.path);
+      if (!(f instanceof TFile)) continue;
+      const body = core.splitFrontmatter(
+        await app.vault.cachedRead(f)
+      ).body;
+      for (const it of review.reviewItems(body)) {
+        if (author && it.author !== author) continue;
+        const { text: said, url } = review.noteLink(it.text);
+        threads.push({
+          card: n.id,
+          kind: it.kind === "suggest" ? "suggestion" : "comment",
+          passage: it.passage,
+          author: it.author,
+          date: it.date,
+          text: it.kind === "suggest" ? it.text : said.trim(),
+          link: it.kind === "suggest" ? null : url || null,
+          replies: it.replies || []
+        });
+      }
+    }
+    return { status: 200, json: {
+      manuscript: prefixOf(app, file),
+      threads
+    } };
+  }
   async reviewStatus(id) {
     const r = this.reviewQueue().find((x) => x.id === id);
     return r ? { status: 200, json: {
@@ -12497,13 +12969,13 @@ module.exports = class DendritePlugin extends Plugin {
    * Act on a review comment from the preview, as from its card on the
    * board: the board for the manuscript is opened if it is not.
    */
-  async reviewFromPreview(indexFile, id, n, what) {
+  async reviewFromPreview(indexFile, id, n, what, arg = null) {
     let view = this.openViews().find((v) => v.file === indexFile);
     if (!view) {
       await this.focusCard(indexFile, id, false);
       view = this.openViews().find((v) => v.file === indexFile);
     }
-    if (view) await view.reviewAction(id, n, what);
+    if (view) await view.reviewAction(id, n, what, arg);
   }
   // ---- Google Docs ---------------------------------------------------
   /**

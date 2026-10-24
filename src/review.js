@@ -696,13 +696,30 @@ function place(c, s, e, how) {
 
 // ---- Review comments in a card's text ----------------------------------
 
-const ITEM = /(?:==([^=\n]+?)==)?%%\[!(review|suggest)\]\s*([\s\S]*?)%%/g;
+// A comment or suggested change, its passage, and the replies to it,
+// each written straight after it: %%[!reply] Author, date: text%%.
+const ITEM = new RegExp('(?:==([^=\\n]+?)==)?%%\\[!(review|suggest)\\]' +
+    '\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)', 'g');
+const REPLY = /%%\[!reply\]\s*([\s\S]*?)%%/g;
 const HEAD = /^(.*?),\s*(\d{4}-\d{2}-\d{2}):\s?([\s\S]*)$/;
+
+/** The replies written after a comment: [{ author, date, text }]. */
+function readReplies(chunk) {
+    const out = [];
+    REPLY.lastIndex = 0;
+    let m;
+    while ((m = REPLY.exec(chunk || ''))) {
+        const h = HEAD.exec(m[1].replace(/^\s+/, ''));
+        out.push({ author: h ? h[1] : '', date: h ? h[2] : '',
+                   text: (h ? h[3] : m[1]).trim() });
+    }
+    return out;
+}
 
 /**
  * The review comments in a card's markdown, in order: { kind: 'review'
- * or 'suggest', passage, author, date, text, start, end }, with the
- * offsets of the whole of it, highlight included.
+ * or 'suggest', passage, author, date, text, replies, start, end }, with
+ * the offsets of the whole of it, highlight and replies included.
  */
 function reviewItems(md) {
     const out = [];
@@ -714,9 +731,39 @@ function reviewItems(md) {
                    author: h ? h[1] : '', date: h ? h[2] : '',
                    text: h ? (m[2] === 'suggest' ? h[3] : h[3].trim()) :
                        m[3].trim(),
+                   replies: readReplies(m[4]),
                    start: m.index, end: m.index + m[0].length });
     }
     return out;
+}
+
+/**
+ * A card's markdown with a reply { author, date, text } to its `n`th
+ * review comment, after the replies it has.
+ */
+function addReply(md, n, reply) {
+    const it = reviewItems(md)[n];
+    if (!it) return md;
+    const note = `%%[!reply] ${clean(reply.author) || 'Me'}, ` +
+        `${reply.date}: ${clean(reply.text)}%%`;
+    return md.slice(0, it.end) + note + md.slice(it.end);
+}
+
+/** A card's markdown with the `k`th reply to its `n`th comment taken out. */
+function removeReply(md, n, k) {
+    const it = reviewItems(md)[n];
+    if (!it) return md;
+    const whole = md.slice(it.start, it.end);
+    REPLY.lastIndex = 0;
+    let m;
+    let i = 0;
+    while ((m = REPLY.exec(whole))) {
+        if (whole.slice(0, m.index).endsWith('%%') && i++ === k) {
+            return md.slice(0, it.start + m.index) +
+                md.slice(it.start + m.index + m[0].length);
+        }
+    }
+    return md;
 }
 
 /**
@@ -1088,12 +1135,73 @@ function commentMenu(it) {
 }
 
 /**
+ * A box under a comment to write a reply in, sent with Send or Ctrl+Enter
+ * and put away with Cancel or Escape; `send(text)` is given what was
+ * written. `typing(el)`, if given, is told of the box, so the keys typed
+ * in it stay in it.
+ */
+function replyBox(parent, send, typing = null) {
+    const doc = parent.ownerDocument;
+    const old = parent.querySelector(':scope > .dendrite-review-reply-form');
+    if (old) {
+        old.querySelector('textarea').focus();
+        return old;
+    }
+    const form = doc.createElement('div');
+    form.className = 'dendrite-review-reply-form';
+    const box = doc.createElement('textarea');
+    box.className = 'dendrite-review-reply-box';
+    box.rows = 2;
+    box.placeholder = 'Reply';
+    const row = doc.createElement('div');
+    row.className = 'dendrite-review-reply-btns';
+    const go = doc.createElement('button');
+    go.className = 'dendrite-review-btn mod-cta';
+    go.textContent = 'Send';
+    const no = doc.createElement('button');
+    no.className = 'dendrite-review-btn';
+    no.textContent = 'Cancel';
+    const done = () => form.remove();
+    go.onclick = async (e) => {
+        if (e && e.stopPropagation) e.stopPropagation();
+        const t = box.value.trim();
+        if (!t) return;
+        done();
+        await send(t);
+    };
+    no.onclick = (e) => {
+        if (e && e.stopPropagation) e.stopPropagation();
+        done();
+    };
+    box.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            go.onclick();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            done();
+        }
+        e.stopPropagation();
+    });
+    for (const ev of ['click', 'dblclick', 'pointerdown']) {
+        form.addEventListener(ev, (e) => e.stopPropagation());
+    }
+    row.append(go, no);
+    form.append(box, row);
+    parent.append(form);
+    if (typing) typing(box);
+    box.focus();
+    return form;
+}
+
+/**
  * Under each paragraph of a rendered card, a callout for each review
  * comment in it, numbered as in the text. `act(n, what)` is called with
  * the comment's index and 'resolve' or, for a suggestion, 'apply' or
  * 'dismiss'.
  */
-function decorate(root, items, act, onMenu = null, colourOf = null) {
+function decorate(root, items, act, onMenu = null, colourOf = null,
+                  typing = null) {
     const nums = [...root.querySelectorAll('sup.dendrite-review-n')];
     const doc = root.ownerDocument;
     const blocks = new Map();
@@ -1152,8 +1260,31 @@ function decorate(root, items, act, onMenu = null, colourOf = null) {
                 it.passage ? `Suggests: ${it.text.trim()}` :
                 `Suggests adding: ${it.text.trim()}`;
             main.append(meta, text);
+            // Its replies, under it, each with its own right-click menu.
+            (it.replies || []).forEach((r, k) => {
+                const el = doc.createElement('div');
+                el.className = 'dendrite-review-reply';
+                const by = doc.createElement('div');
+                by.className = 'dendrite-review-meta';
+                const b = doc.createElement('b');
+                b.textContent = r.author || 'Me';
+                by.append(b, ` · ${shortDate(r.date)}`);
+                const said = doc.createElement('div');
+                said.className = 'dendrite-review-text';
+                said.textContent = r.text;
+                el.append(by, said);
+                if (onMenu) {
+                    el.addEventListener('contextmenu', (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onMenu(i, e, k);
+                    });
+                }
+                main.append(el);
+            });
             note.append(n, main);
-            const buttons = commentActions(it);
+            const buttons = [...commentActions(it),
+                             ['reply', 'Reply', 'Answer this comment']];
             // Its menu on a right-click, its own, not the card's.
             if (onMenu) {
                 note.addEventListener('contextmenu', (e) => {
@@ -1169,7 +1300,9 @@ function decorate(root, items, act, onMenu = null, colourOf = null) {
                 if (tip) btn.title = tip;
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    act(i, what);
+                    if (what === 'reply') replyBox(main, (t) =>
+                        act(i, 'reply', t), typing);
+                    else act(i, what);
                 });
                 note.append(btn);
             }
@@ -1186,6 +1319,7 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    commentActions, commentMenu, googleData, googleOf,
                    REVIEWER_COLOURS, reviewerColours, colourList,
                    assignColours, reviewerEntries, entryList,
+                   addReply, removeReply, replyBox,
                    firstOfComment, countComments,
                    itemText,
                    addItems, removeItem,

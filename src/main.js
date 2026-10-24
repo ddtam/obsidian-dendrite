@@ -104,6 +104,8 @@ const DEFAULTS = {
     reviewApi: false,
     reviewApiPort: 27130,
     reviewApiKey: '',
+    // The name a reply to a review comment is signed with.
+    replyName: '',
     // Reviews submitted, pending until added or ignored on the board,
     // and the latest ones decided, so a submitter can ask.
     reviewQueue: [],
@@ -244,6 +246,26 @@ function openExternal(url) {
 function dendriteMenu(icons = true) {
     const { Menu } = require('obsidian');
     return styleMenu(new Menu(), icons);
+}
+
+/**
+ * A box typed in on a card or bubble keeps its keys while it has the
+ * focus, so Enter and the arrows are not the view's.
+ */
+function ownKeys(app, el) {
+    const scope = new Scope(app.scope);
+    el.addEventListener('focus', () => {
+        if (app.keymap) app.keymap.pushScope(scope);
+    });
+    el.addEventListener('blur', () => {
+        if (app.keymap) app.keymap.popScope(scope);
+    });
+}
+
+/** Today's date where the writer is, as 2026-10-24. */
+function localDay(d = new Date()) {
+    const two = (x) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
 }
 
 /**
@@ -876,6 +898,7 @@ class DendriteView extends ItemView {
         this.updateRoles();
         this.updateStatuses();
         this.updateCounts();
+        this.scheduleChanged();
     }
 
     renderBar(el) {
@@ -1079,8 +1102,9 @@ class DendriteView extends ItemView {
                     shown, out, f.path, comp);
             if (notes.length) {
                 review.decorate(out, notes,
-                    (n, what) => this.reviewAction(id, n, what),
-                    (n, e) => this.commentMenu(id, n, e), this.colourOf());
+                    (n, what, arg) => this.reviewAction(id, n, what, arg),
+                    (n, e, k) => this.commentMenu(id, n, e, k),
+                    this.colourOf(), (el) => ownKeys(this.app, el));
             }
         } else if (!kind) {
             out.createDiv({ cls: 'dendrite-placeholder',
@@ -3495,8 +3519,9 @@ class DendriteView extends ItemView {
                 text, out, f.path, comp);
         if (notes.length) {
             review.decorate(out, notes,
-                (n, what) => this.reviewAction(id, n, what),
-                (n, e) => this.commentMenu(id, n, e), this.colourOf());
+                (n, what, arg) => this.reviewAction(id, n, what, arg),
+                (n, e, k) => this.commentMenu(id, n, e, k),
+                this.colourOf(), (el) => ownKeys(this.app, el));
         }
     }
 
@@ -3670,6 +3695,8 @@ class DendriteView extends ItemView {
 
     async onModify(f) {
         if (!(f instanceof TFile) || !this.file) return;
+        // A card's text, or the rounds, changed: what changed since sent.
+        this.scheduleChanged();
         if (f === this.file) {
             const text = await this.app.vault.cachedRead(f);
             if (this.selfWrites.delete(text)) {
@@ -4601,6 +4628,8 @@ class DendriteView extends ItemView {
             .onClick(() => this.importReview()));
         m.addItem((i) => i.setTitle('Reviewers…')
             .onClick(() => new ReviewersModal(this).open()));
+        m.addItem((i) => i.setTitle('Mark as sent for review…')
+            .onClick(() => new RoundModal(this).open()));
         if (this.inbox.length) {
             m.addSeparator();
             for (const entry of this.inbox) {
@@ -4862,13 +4891,19 @@ class DendriteView extends ItemView {
      * first. One step to undo either way.
      */
     /** A review comment's right-click menu, Delete from Dendrite in it. */
-    commentMenu(id, n, event) {
+    commentMenu(id, n, event, reply = null) {
         const f = this.cardFile(id);
         if (!f) return;
         this.app.vault.cachedRead(f).then((data) => {
             const it = review.reviewItems(core.splitFrontmatter(data)
                 .body)[n];
             if (!it) return;
+            // A reply's own menu: taking it back.
+            if (reply !== null && reply !== undefined) {
+                showCommentMenu([['unreply', 'Delete reply', true]], event,
+                    () => this.reviewAction(id, n, 'unreply', reply));
+                return;
+            }
             const who = it.author || 'Reviewer';
             showCommentMenu(review.commentMenu(it), event,
                             (what) => this.reviewAction(id, n, what), {
@@ -5007,7 +5042,7 @@ class DendriteView extends ItemView {
         }
     }
 
-    async reviewAction(id, n, what) {
+    async reviewAction(id, n, what, arg = null) {
         const f = this.cardFile(id);
         if (!f) return;
         if (this.editing && this.editing.id === id) await this.endEdit();
@@ -5027,6 +5062,18 @@ class DendriteView extends ItemView {
             }
         };
         const item = review.reviewItems(body)[n];
+        // A reply, written under its comment, or taken back: a change to
+        // the card, undone as one.
+        if (what === 'reply') {
+            await write(review.addReply(body, n, {
+                author: this.plugin.settings.replyName || 'Me',
+                date: localDay(), text: arg }));
+            return;
+        }
+        if (what === 'unreply') {
+            await write(review.removeReply(body, n, arg));
+            return;
+        }
         if (what === 'apply') {
             const after = review.removeItem(body, n, true);
             new SuggestModal(this, id, body, after, async () => {
@@ -5076,6 +5123,78 @@ class DendriteView extends ItemView {
      * A printing card shows its own status, a structural card the least
      * finished state below it and how many cards there are flagged.
      */
+    // ---- review rounds ---------------------------------------------------
+
+    /** The review rounds' file, beside the index: Grant.rounds.json. */
+    roundsPath() {
+        return this.file ? this.file.path.replace(/\.md$/, '') +
+            '.rounds.json' : null;
+    }
+
+    async readRounds() {
+        const f = this.app.vault.getAbstractFileByPath(this.roundsPath());
+        if (!(f instanceof TFile)) return [];
+        try {
+            const data = JSON.parse(await this.app.vault.read(f));
+            return Array.isArray(data.rounds) ? data.rounds : [];
+        } catch (err) {
+            return [];
+        }
+    }
+
+    /** What each card prints now, fingerprinted as a round keeps it. */
+    async fingerprints() {
+        const bodies = await this.loadBodies();
+        const crc = require('./docx.js').crc32;
+        return core.roundFingerprints(this.root, (id) => bodies.get(id),
+            (id) => this.printRoleOf(id),
+            (t) => String(crc(Buffer.from(t, 'utf8'))));
+    }
+
+    /**
+     * A review round: the manuscript as sent, today, to `to`, kept in
+     * the rounds' file so the board can show what changed since.
+     */
+    async recordRound(to) {
+        const rounds = await this.readRounds();
+        rounds.push({ date: localDay(), to: String(to || '').trim(),
+                      cards: await this.fingerprints() });
+        const path = this.roundsPath();
+        const text = JSON.stringify({ rounds }, null, 2) + '\n';
+        const f = this.app.vault.getAbstractFileByPath(path);
+        if (f instanceof TFile) await this.app.vault.modify(f, text);
+        else await this.app.vault.create(path, text);
+        await this.updateChanged();
+    }
+
+    /** After an export: a notice offering to mark it as sent. */
+    offerRound() {
+        const frag = this.pageDoc().createDocumentFragment();
+        const el = createDiv({ text: 'Dendrite: sent this for review? ' });
+        const b = el.createEl('button', { text: 'Mark as sent for review…' });
+        b.addEventListener('click', () => new RoundModal(this).open());
+        frag.append(el);
+        new Notice(frag, 15000);
+    }
+
+    scheduleChanged() {
+        clearTimeout(this.changedTimer);
+        this.changedTimer = setTimeout(() => this.updateChanged(), 500);
+    }
+
+    /** Which cards' printed text changed since the latest round. */
+    async updateChanged() {
+        if (!this.root) return;
+        const rounds = await this.readRounds();
+        const last = rounds[rounds.length - 1];
+        const before = this.changed;
+        this.changed = last ? { date: last.date, to: last.to,
+            ids: core.changedSince(last.cards || {},
+                                   await this.fingerprints()) } : null;
+        const key = (c) => c ? `${c.date}|${[...c.ids].join(',')}` : '';
+        if (key(before) !== key(this.changed)) this.updateStatuses();
+    }
+
     /** Statuses shown again once, after the cards being drawn. */
     scheduleStatuses() {
         if (this.statusTimer) return;
@@ -5127,6 +5246,14 @@ class DendriteView extends ItemView {
                     this.reviewVersion(id);
                 };
             }
+            // Its printed text changed since the latest review round.
+            if (this.changed && this.changed.ids.has(id)) {
+                const s = show('changed', 'changed since ' +
+                               review.shortDate(this.changed.date));
+                s.setAttr('aria-label', 'What this card prints changed ' +
+                          'since it was sent to ' +
+                          (this.changed.to || 'review'));
+            }
             if (info.own === 'done') show('done', 'done ✓');
             else if (info.own === 'revise') show('revise', 'revise ⚑');
             else if (info.own === 'unsplit') show('unsplit', 'unsplit');
@@ -5166,6 +5293,11 @@ class DendriteView extends ItemView {
             if (t.revise) parts.push(`${t.revise} revise`);
             if (t.unsplit) parts.push(`${t.unsplit} unsplit`);
             parts.push(`${t.draft} draft`, `${t.done} done`);
+            const ch = this.changed;
+            if (ch && ch.ids.size) {
+                parts.push(`${ch.ids.size} changed since sent ` +
+                           review.shortDate(ch.date));
+            }
             this.statusEl.setText(parts.join(' · '));
             this.statusEl.toggleClass('has-flags', t.revise + t.unsplit > 0);
             if (this.reverted.has('index')) {
@@ -5644,6 +5776,8 @@ class DendriteView extends ItemView {
         toggle('matchCase', 'case-sensitive', 'Match case',
                () => !f.matchCase);
         toggle('regex', 'regex', 'Regular expression', () => !f.regex);
+        toggle('printed', 'printer', 'Only text that prints',
+               () => !f.printed);
         toggle('branch', 'git-branch', 'Only the selected card\'s branch',
                () => (f.branch ? null : this.active));
         f.countEl = row.createSpan({ cls: 'dendrite-find-count' });
@@ -5717,7 +5851,8 @@ class DendriteView extends ItemView {
             : core.allNodes(this.root))
             .filter((n) => !this.shown || this.shown.parent.has(n.id));
         const ids = nodes.map((n) => n.id);
-        const r = core.findMatches(ids, bodyOf, f.query, f);
+        const r = core.findMatches(ids, bodyOf, f.query, Object.assign({},
+            f, { printed: f.printed ? this.printedOf() : null }));
         const was = f.matches[f.index];
         f.matches = r.matches;
         f.error = r.error || null;
@@ -5735,6 +5870,30 @@ class DendriteView extends ItemView {
         }
         if (!keep && f.index >= 0) await this.goToMatch(f.index);
         else this.showFind();
+    }
+
+    /**
+     * What a card prints, for find: its text by its role, nothing in a
+     * left-out branch.
+     */
+    printedOf() {
+        const roleOf = (x) => this.printRoleOf(x);
+        const out = new Set();
+        const walk = (node) => {
+            if (core.roleFor(node, roleOf) === 'notes') {
+                for (const d of [node, ...core.descendants(node)]) {
+                    out.add(d.id);
+                }
+                return;
+            }
+            node.children.forEach(walk);
+        };
+        this.root.children.forEach(walk);
+        return (id, body) => {
+            const node = this.byId.get(id);
+            if (!node || out.has(id)) return [];
+            return core.printedRanges(body, core.roleFor(node, roleOf));
+        };
     }
 
     /** Count, fading, the matches below each card, and highlights. */
@@ -5864,8 +6023,12 @@ class DendriteView extends ItemView {
         if (!f || !f.matches.length) return;
         const { patterns } = core.findPatterns(f.query, f);
         const cur = f.matches[f.index];
+        // The current match counted among its card's matches of its kind:
+        // in the text, or in a review callout, drawn after its paragraph
+        // though written inside it.
         const nth = cur && !cur.card ? f.matches.filter((m) =>
-            m.id === cur.id && !m.card && m.start < cur.start).length : -1;
+            m.id === cur.id && !m.card && !!m.note === !!cur.note &&
+            m.start < cur.start).length : -1;
         const doc = this.pageDoc();
         const all = [];
         let current = null;
@@ -5904,13 +6067,21 @@ class DendriteView extends ItemView {
                 while (i > 0 && nodes[i].at > k) i -= 1;
                 return [nodes[i].t, k - nodes[i].at];
             };
-            spans.forEach(([a, b], k) => {
+            const inNote = (r) => {
+                const el = r.startContainer.parentElement;
+                return !!(el && el.closest('.dendrite-review-notes'));
+            };
+            const seen = { true: 0, false: 0 };
+            for (const [a, b] of spans) {
                 const r = doc.createRange();
                 r.setStart(...point(a));
                 r.setEnd(...point(b));
-                if (id === (cur && cur.id) && k === nth) current = r;
+                const note = inNote(r);
+                const k = seen[note]++;
+                if (id === (cur && cur.id) && note === !!cur.note &&
+                    k === nth) current = r;
                 else all.push(r);
-            });
+            }
         }
         reg.set('dendrite-find', new win.Highlight(...all));
         if (current) {
@@ -6087,6 +6258,7 @@ class DendriteView extends ItemView {
         const cites = result.keys.length ?
             ` with ${result.keys.length} citation(s)` : '';
         new Notice(`Dendrite: exported to ${rel}${cites}.`);
+        if (whole) this.offerRound();
         // A whole manuscript's PDF measures its words per page, which
         // page quotas and estimates use from then on.
         const bodies = whole ? await this.loadBodies() : null;
@@ -6599,6 +6771,14 @@ class DendritePreview extends ItemView {
                     !it.text.trim() ? 'Suggests deleting this.' :
                     it.passage ? `Suggests: ${it.text.trim()}` :
                     `Suggests adding: ${it.text.trim()}` });
+            // Its replies, under it; one taken back from the board.
+            for (const r of it.replies || []) {
+                const rel = el.createDiv({ cls: 'dendrite-review-reply' });
+                const by = rel.createDiv({ cls: 'dendrite-review-meta' });
+                by.createEl('b', { text: r.author || 'Me' });
+                by.appendText(` · ${review.shortDate(r.date)}`);
+                rel.createDiv({ cls: 'dendrite-review-text', text: r.text });
+            }
             const row = el.createDiv({ cls: 'dendrite-pbubble-btns' });
             el.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
@@ -6625,6 +6805,18 @@ class DendritePreview extends ItemView {
                     }
                 };
             }
+            const answer = row.createEl('button', { text: 'Reply' });
+            answer.title = 'Answer this comment';
+            answer.addEventListener('click', (e) => {
+                e.stopPropagation();
+                review.replyBox(el, async (t) => {
+                    if (this.plugin.reviewFromPreview) {
+                        await this.plugin.reviewFromPreview(this.file, id, n,
+                                                            'reply', t);
+                    }
+                }, (box) => ownKeys(this.app, box));
+                this.scheduleBubbles();
+            });
         }
         // In reading order, as they are gone through.
         const order = new Map(this.reviewList.map((x, k) =>
@@ -7838,6 +8030,40 @@ function noteSuggest(app, input, pick, images = false) {
  * where there is one, offered when a note has their name. A reviewer
  * that is not a person, such as Claude, keeps a plain name.
  */
+/** Who a draft went to, for its review round. */
+class RoundModal extends Modal {
+    constructor(view) {
+        super(view.app);
+        this.view = view;
+    }
+
+    onOpen() {
+        this.titleEl.setText('Mark as sent for review');
+        this.contentEl.createEl('p', { cls: 'setting-item-description',
+            text: 'Keeps what each card prints now, so the board can show ' +
+                'which cards change from here on.' });
+        const input = this.contentEl.createEl('input', { type: 'text' });
+        input.placeholder = 'Sent to';
+        input.addClass('dendrite-round-to');
+        const row = this.contentEl.createDiv({ cls: 'modal-button-container' });
+        const go = row.createEl('button', { text: 'Record', cls: 'mod-cta' });
+        go.onclick = async () => {
+            this.close();
+            await this.view.recordRound(input.value);
+            new Notice('Dendrite: recorded as sent for review.');
+        };
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                go.onclick();
+            }
+        });
+        input.focus();
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+
 class ReviewersModal extends Modal {
     constructor(view) {
         super(view.app);
@@ -8397,6 +8623,14 @@ class DendriteSettings extends PluginSettingTab {
             }));
 
         heading('Review');
+        new Setting(containerEl).setName('Your name, on replies')
+            .setDesc('Replies you write to review comments are signed ' +
+                     'with this, as a reviewer\'s comments are with theirs.')
+            .addText((t) => t.setPlaceholder('Me').setValue(s.replyName)
+                .onChange((v) => {
+                    s.replyName = v.trim();
+                    save();
+                }));
         new Setting(containerEl)
             .setName('Accept reviews from programs on this computer')
             .setDesc('Listens on 127.0.0.1 for review comments sent by a ' +
@@ -8650,7 +8884,8 @@ module.exports = class DendritePlugin extends Plugin {
             this.reviewServer = await require('./reviewapi.js').start({
                 port: want, token: s.reviewApiKey,
                 submit: (d) => this.submitReview(d),
-                status: (id) => this.reviewStatus(id) });
+                status: (id) => this.reviewStatus(id),
+                threads: (m, who) => this.threadsFor(m, who) });
         } catch (err) {
             new Notice(`Dendrite: could not listen for reviews on port ` +
                        `${want} (${err.message}). Another program, or ` +
@@ -8663,9 +8898,10 @@ module.exports = class DendritePlugin extends Plugin {
         const fs = require('fs');
         const file = discoveryPath();
         fs.mkdirSync(require('path').dirname(file), { recursive: true });
+        const base = 'http://127.0.0.1:' +
+            `${this.reviewServer.address().port}/dendrite`;
         fs.writeFileSync(file, JSON.stringify({
-            url: `http://127.0.0.1:${this.reviewServer.address().port}` +
-                '/dendrite/review',
+            url: `${base}/review`, threads: `${base}/threads`,
             key: s.reviewApiKey, vault: this.app.vault.getName(),
             pid: process.pid }, null, 2) + '\n', { mode: 0o600 });
     }
@@ -8822,6 +9058,42 @@ module.exports = class DendritePlugin extends Plugin {
                                       already, missing } };
     }
 
+    /**
+     * A manuscript's open review comments and suggested changes, each
+     * with its card, passage, reviewer, text, Google link and replies, in
+     * reading order; only `author`'s, if given. Read only, for a reviewer
+     * to read what was answered.
+     */
+    async threadsFor(prefix, author = null) {
+        const file = this.indexWithPrefix(prefix);
+        if (!file) {
+            return { status: 404, json: {
+                error: `no manuscript has the prefix ${prefix}` } };
+        }
+        const app = this.app;
+        const text = await app.vault.cachedRead(file);
+        const root = core.parseIndex(core.splitFrontmatter(text).body).root;
+        const threads = [];
+        for (const n of core.allNodes(root)) {
+            const f = app.metadataCache.getFirstLinkpathDest(n.id, file.path);
+            if (!(f instanceof TFile)) continue;
+            const body = core.splitFrontmatter(
+                await app.vault.cachedRead(f)).body;
+            for (const it of review.reviewItems(body)) {
+                if (author && it.author !== author) continue;
+                const { text: said, url } = review.noteLink(it.text);
+                threads.push({ card: n.id,
+                    kind: it.kind === 'suggest' ? 'suggestion' : 'comment',
+                    passage: it.passage, author: it.author, date: it.date,
+                    text: it.kind === 'suggest' ? it.text : said.trim(),
+                    link: it.kind === 'suggest' ? null : url || null,
+                    replies: it.replies || [] });
+            }
+        }
+        return { status: 200, json: { manuscript: prefixOf(app, file),
+                                      threads } };
+    }
+
     async reviewStatus(id) {
         const r = this.reviewQueue().find((x) => x.id === id);
         return r ? { status: 200, json: { id, state: r.state,
@@ -8834,13 +9106,13 @@ module.exports = class DendritePlugin extends Plugin {
      * Act on a review comment from the preview, as from its card on the
      * board: the board for the manuscript is opened if it is not.
      */
-    async reviewFromPreview(indexFile, id, n, what) {
+    async reviewFromPreview(indexFile, id, n, what, arg = null) {
         let view = this.openViews().find((v) => v.file === indexFile);
         if (!view) {
             await this.focusCard(indexFile, id, false);
             view = this.openViews().find((v) => v.file === indexFile);
         }
-        if (view) await view.reviewAction(id, n, what);
+        if (view) await view.reviewAction(id, n, what, arg);
     }
 
     // ---- Google Docs ---------------------------------------------------
