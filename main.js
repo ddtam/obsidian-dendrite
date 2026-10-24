@@ -3164,7 +3164,7 @@ var require_review = __commonJS({
     function countComments(items) {
       return firstOfComment(items).filter((f, i) => f === i).length;
     }
-    function renderMarkdown(md) {
+    function renderMarkdown(md, colourOf = null) {
       let n = 0;
       const numbers = /* @__PURE__ */ new Map();
       ITEM.lastIndex = 0;
@@ -3178,18 +3178,76 @@ var require_review = __commonJS({
         }
         const h = HEAD.exec(body.replace(/^\s+/, ""));
         const text = h ? h[3] : body.trim();
-        const cls = kind === "suggest" ? " is-suggest" : "";
+        const c = colourOf && h ? colourOf(h[1]) : null;
+        const tint = c ? ` is-c-${c}` : "";
+        const cls = (kind === "suggest" ? " is-suggest" : "") + tint;
         const sup = `<sup class="dendrite-review-n${cls}">${num}</sup>`;
         if (kind === "suggest" && !passage) {
           const lead = /^\s*/.exec(text)[0];
-          return `${lead}<span class="dendrite-review-new">${text.slice(lead.length)}</span>${sup}`;
+          return `${lead}<span class="dendrite-review-new${tint}">${text.slice(lead.length)}</span>${sup}`;
         }
         if (!passage) return sup;
         if (kind === "suggest") {
-          return `<span class="dendrite-review-old">${passage}</span>` + (text ? `<span class="dendrite-review-new">${text}</span>` : "") + sup;
+          const added = text ? `<span class="dendrite-review-new${tint}">${text}</span>` : "";
+          return `<span class="dendrite-review-old${tint}">${passage}</span>` + added + sup;
         }
-        return `<mark class="dendrite-review-mark">${passage}</mark>${sup}`;
+        return `<mark class="dendrite-review-mark${tint}">${passage}</mark>` + sup;
       });
+    }
+    var REVIEWER_COLOURS = [
+      "blue",
+      "green",
+      "purple",
+      "orange",
+      "cyan",
+      "pink",
+      "yellow",
+      "red"
+    ];
+    function reviewerColours(list) {
+      const out = /* @__PURE__ */ new Map();
+      for (const [name, , c] of colourEntries(list)) {
+        if (REVIEWER_COLOURS.includes(c)) out.set(name, c);
+      }
+      return out;
+    }
+    function colourEntries(list) {
+      const out = [];
+      for (const x of Array.isArray(list) ? list : []) {
+        const m = /^(.+):\s*([a-z]+)\s*$/.exec(String(x).trim());
+        if (!m) continue;
+        const written = m[1].trim();
+        const link = /^\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]$/.exec(written);
+        const note = link ? link[1].trim() : null;
+        const name = link ? (link[2] || "").trim() || note.split("/").pop() : written;
+        out.push([name, written, m[2], note]);
+      }
+      return out;
+    }
+    function reviewerEntries(list) {
+      return colourEntries(list).filter(([, , c]) => REVIEWER_COLOURS.includes(c)).map(([name, , colour, note]) => ({ name, note, colour }));
+    }
+    function entryList(entries) {
+      return entries.map(({ name, note, colour }) => {
+        if (!note) return `${name}: ${colour}`;
+        const base = note.split("/").pop();
+        return `[[${note}${base === name ? "" : `|${name}`}]]: ${colour}`;
+      });
+    }
+    function colourList(map, prior = []) {
+      const written = new Map(colourEntries(prior).map(([n, w]) => [n, w]));
+      return [...map].map(([name, c]) => `${written.get(name) || name}: ${c}`);
+    }
+    function assignColours(map, names) {
+      const out = new Map(map);
+      let added = false;
+      for (const name of names) {
+        if (!name || out.has(name)) continue;
+        const taken = new Set(out.values());
+        out.set(name, REVIEWER_COLOURS.find((c) => !taken.has(c)) || REVIEWER_COLOURS[out.size % REVIEWER_COLOURS.length]);
+        added = true;
+      }
+      return { map: out, added };
     }
     function commentActions(it) {
       return it.kind === "suggest" ? [["apply", "Apply\u2026", ""], ["dismiss", "Dismiss", ""]] : [["resolve", "Resolve", "Dealt with: taken out, and not brought back by a pull"]];
@@ -3197,7 +3255,7 @@ var require_review = __commonJS({
     function commentMenu(it) {
       return [...commentActions(it).map(([what, label]) => [what, label, false]), ["delete", "Delete from Dendrite", true]];
     }
-    function decorate(root, items, act, onMenu = null) {
+    function decorate(root, items, act, onMenu = null, colourOf = null) {
       const nums = [...root.querySelectorAll("sup.dendrite-review-n")];
       const doc = root.ownerDocument;
       const blocks = /* @__PURE__ */ new Map();
@@ -3223,7 +3281,8 @@ var require_review = __commonJS({
         for (const i of list) {
           const it = items[i];
           const note = doc.createElement("div");
-          note.className = "dendrite-review-note" + (it.kind === "suggest" ? " is-suggest" : "");
+          const c = colourOf && colourOf(it.author || "Reviewer");
+          note.className = "dendrite-review-note" + (it.kind === "suggest" ? " is-suggest" : "") + (c ? ` is-c-${c}` : "");
           const n = doc.createElement("span");
           n.className = "dendrite-review-n";
           n.textContent = nums[i] ? nums[i].textContent : String(i + 1);
@@ -3293,6 +3352,12 @@ var require_review = __commonJS({
       commentMenu,
       googleData,
       googleOf,
+      REVIEWER_COLOURS,
+      reviewerColours,
+      colourList,
+      assignColours,
+      reviewerEntries,
+      entryList,
       firstOfComment,
       countComments,
       itemText,
@@ -3847,8 +3912,12 @@ var require_float = __commonJS({
     function embedFor(path) {
       return `![[${path}]]`;
     }
-    function asLink(embed) {
-      return String(embed || "").replace(/^!\[\[/, "[[");
+    function imageTarget(embed) {
+      const s = String(embed || "").trim();
+      const wiki = /^!?\[\[([^\]|#]+)/.exec(s);
+      if (wiki) return wiki[1].trim();
+      const md = /^!?\[[^\]]*\]\(([^)]+)\)/.exec(s);
+      return md ? md[1].trim() : s;
     }
     function linkedImage(text) {
       const s = String(text || "");
@@ -3881,11 +3950,8 @@ var require_float = __commonJS({
         if (opts.onAsText) opts.onAsText();
       });
       const changed = () => opts.onChange();
-      const field = (label, cls, value, onInput, onLeave = null) => {
-        const left = () => {
-          if (onLeave) onLeave();
-          opts.onBlur();
-        };
+      const field = (label, cls, value, onInput) => {
+        const left = () => opts.onBlur();
         const wrap = root.createDiv({ cls: "dendrite-float-field" + (cls ? ` ${cls}` : "") });
         wrap.createDiv({ cls: "dendrite-float-label", text: label });
         if (opts.makeEditor) {
@@ -3978,19 +4044,40 @@ var require_float = __commonJS({
         );
       } else {
         shown = root.createDiv({ cls: "dendrite-float-shown is-image" });
-        image = field(
-          "Image: type [[ to find one, or paste or drop one",
-          "dendrite-float-image",
-          asLink(content),
-          (v) => {
-            content = linkedImage(v) || v.trim();
-            draw();
-          },
-          () => {
-            const v = image.value;
-            if (asLink(v) !== v) image.set(asLink(v));
+        const wrap = root.createDiv({ cls: "dendrite-float-field dendrite-float-image" });
+        wrap.createDiv({
+          cls: "dendrite-float-label",
+          text: "Image: search for one, or paste or drop one"
+        });
+        const input = wrap.createEl("input", {
+          type: "text",
+          cls: "dendrite-float-input"
+        });
+        input.placeholder = "Image file name";
+        input.value = imageTarget(content);
+        const choose = (v) => {
+          const t = String(v || "").trim();
+          content = !t ? "" : linkedImage(t) || embedFor(t);
+          input.value = imageTarget(content);
+          draw();
+          changed();
+        };
+        input.addEventListener("change", () => choose(input.value));
+        input.addEventListener("blur", () => opts.onBlur());
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Escape" && !e.defaultPrevented) {
+            e.preventDefault();
+            opts.onEscape();
           }
-        );
+        });
+        if (opts.findImage) opts.findImage(input, (link) => choose(link));
+        image = {
+          set(text) {
+            input.value = imageTarget(text);
+          },
+          destroy() {
+          }
+        };
         cap = field(
           "Caption, printed below the figure",
           null,
@@ -4008,7 +4095,7 @@ var require_float = __commonJS({
         if (!embed) embed = linkedImage(dt.getData && dt.getData("text/plain"));
         if (!embed) return false;
         content = embed;
-        if (image) image.set(asLink(embed));
+        if (image) image.set(embed);
         draw();
         changed();
         return true;
@@ -4048,7 +4135,7 @@ var require_float = __commonJS({
           ({ caption, content } = split(text, kind));
           cap.set(caption);
           if (table) table.set(content);
-          if (image) image.set(asLink(content));
+          if (image) image.set(content);
           draw();
         },
         focusAt() {
@@ -4075,7 +4162,7 @@ var require_float = __commonJS({
       compose,
       embedFor,
       linkedImage,
-      asLink,
+      imageTarget,
       textWidthPt,
       floatEditor,
       STARTER_TABLE
@@ -4350,7 +4437,9 @@ var {
   Platform,
   normalizePath,
   Keymap,
-  requestUrl
+  requestUrl,
+  AbstractInputSuggest,
+  prepareFuzzySearch
 } = require("obsidian");
 var core = require_core();
 var textedit = require_textedit();
@@ -4527,12 +4616,27 @@ function dendriteMenu(icons = true) {
   const { Menu } = require("obsidian");
   return styleMenu(new Menu(), icons);
 }
-function showCommentMenu(items, event, act) {
+function showCommentMenu(items, event, act, colours = null) {
   const m = dendriteMenu(false);
   for (const [what, label, warn] of items) {
     m.addItem((i) => {
       i.setTitle(label).onClick(() => act(what));
       if (warn && typeof i.setWarning === "function") i.setWarning(true);
+    });
+  }
+  if (colours) {
+    m.addSeparator();
+    m.addItem((i) => {
+      i.setTitle(`Colour for ${colours.author}`);
+      const sub = i.setSubmenu();
+      for (const c of review.REVIEWER_COLOURS) {
+        sub.addItem((x) => {
+          x.setTitle(c[0].toUpperCase() + c.slice(1)).onClick(() => colours.pick(c));
+          if (typeof x.setChecked === "function") {
+            x.setChecked(c === colours.current);
+          }
+        });
+      }
     });
   }
   if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
@@ -5247,10 +5351,11 @@ var DendriteView = class extends ItemView {
       float.split(text, "figure").caption,
       float.split(text, "figure").content
     ) : text;
+    this.noteReviewers(id, notes);
     if (text.trim()) {
       await MarkdownRenderer.render(
         this.app,
-        notes.length ? review.renderMarkdown(text) : shown,
+        notes.length ? review.renderMarkdown(text, this.colourOf()) : shown,
         out,
         f.path,
         comp
@@ -5260,7 +5365,8 @@ var DendriteView = class extends ItemView {
           out,
           notes,
           (n, what) => this.reviewAction(id, n, what),
-          (n, e) => this.commentMenu(id, n, e)
+          (n, e) => this.commentMenu(id, n, e),
+          this.colourOf()
         );
       }
     } else if (!kind) {
@@ -6567,6 +6673,11 @@ var DendriteView = class extends ItemView {
       onAsText: () => this.editAsText(id),
       render: (md, el) => this.renderInto(md, el, f.path),
       image: (file) => this.saveFigureImage(id, file),
+      // Images found by name, linked as Obsidian links them.
+      findImage: (input, pick) => noteSuggest(this.app, input, (img) => pick(this.app.metadataCache.getFirstLinkpathDest(
+        img.name,
+        f.path
+      ) === img ? img.name : img.path), true),
       // Each field in the card editor: Obsidian's live preview
       // edits a table as a grid, rows, columns and alignment from
       // its own menu.
@@ -7570,7 +7681,7 @@ var DendriteView = class extends ItemView {
     }
     await MarkdownRenderer.render(
       this.app,
-      notes.length ? review.renderMarkdown(text) : text,
+      notes.length ? review.renderMarkdown(text, this.colourOf()) : text,
       out,
       f.path,
       comp
@@ -7580,7 +7691,8 @@ var DendriteView = class extends ItemView {
         out,
         notes,
         (n, what) => this.reviewAction(id, n, what),
-        (n, e) => this.commentMenu(id, n, e)
+        (n, e) => this.commentMenu(id, n, e),
+        this.colourOf()
       );
     }
   }
@@ -7823,6 +7935,11 @@ var DendriteView = class extends ItemView {
     }
     if (f === this.file) {
       this.checkArriving();
+      const was = review.colourList(this.reviewers());
+      this.reviewerMap = null;
+      if (review.colourList(this.reviewers()).join("\n") !== was.join("\n")) {
+        this.recolour();
+      }
       this.updateNumbers();
       this.updateCounts();
       return;
@@ -8556,6 +8673,7 @@ var DendriteView = class extends ItemView {
     }
     m.addSeparator();
     m.addItem((i) => i.setTitle("Import a Word or JSON file\u2026").onClick(() => this.importReview()));
+    m.addItem((i) => i.setTitle("Reviewers\u2026").onClick(() => new ReviewersModal(this).open()));
     if (this.inbox.length) {
       m.addSeparator();
       for (const entry of this.inbox) {
@@ -8813,12 +8931,105 @@ var DendriteView = class extends ItemView {
     this.app.vault.cachedRead(f).then((data) => {
       const it = review.reviewItems(core.splitFrontmatter(data).body)[n];
       if (!it) return;
+      const who = it.author || "Reviewer";
       showCommentMenu(
         review.commentMenu(it),
         event,
-        (what) => this.reviewAction(id, n, what)
+        (what) => this.reviewAction(id, n, what),
+        {
+          author: who,
+          current: this.colourOf()(who),
+          pick: (c) => this.setReviewerColour(who, c)
+        }
       );
     });
+  }
+  // ---- a colour per reviewer -------------------------------------------
+  /** The manuscript's reviewer colours, as kept in its index. */
+  reviewers() {
+    if (!this.reviewerMap) {
+      const fm = this.file && this.app.metadataCache.getFileCache(this.file)?.frontmatter || {};
+      this.reviewerMap = review.reviewerColours(
+        fm.dendrite_reviewer_colours
+      );
+    }
+    return this.reviewerMap;
+  }
+  colourOf() {
+    const map = this.reviewers();
+    return (who) => map.get(who) || null;
+  }
+  /**
+   * The reviewers of a card's comments, noted as it is drawn; one not
+   * yet given a colour is given one, once the cards drawn now are.
+   */
+  noteReviewers(id, notes) {
+    this.reviewersOf = this.reviewersOf || /* @__PURE__ */ new Map();
+    const names = [...new Set(notes.map((x) => x.author || "Reviewer"))];
+    this.reviewersOf.set(id, names);
+    const map = this.reviewers();
+    if (names.some((x) => !map.has(x)) && !this.colourTimer) {
+      this.colourTimer = this.pageWin().setTimeout(() => {
+        this.colourTimer = null;
+        this.assignReviewers();
+      }, 0);
+    }
+  }
+  /**
+   * Colours for the reviewers not yet given one, in reading order, so
+   * the first to comment in the manuscript is given the first colour;
+   * written to the index, and their comments drawn again in them.
+   */
+  async assignReviewers() {
+    const names = [];
+    for (const n of core.allNodes(this.root)) {
+      names.push(...(this.reviewersOf || /* @__PURE__ */ new Map()).get(n.id) || []);
+    }
+    const { map, added } = review.assignColours(this.reviewers(), names);
+    if (added) await this.saveReviewers(map);
+  }
+  /** Reviewers [{ name, note, colour }] kept, as the dialog sets them. */
+  async saveEntries(entries) {
+    if (!this.file) return;
+    this.reviewerMap = new Map(entries.map((e) => [e.name, e.colour]));
+    await writeProps(
+      this.app,
+      this.file,
+      { dendrite_reviewer_colours: review.entryList(entries) }
+    );
+    this.recolour();
+  }
+  /** A reviewer's colour, and so every name linked to their note. */
+  async setReviewerColour(who, colour) {
+    const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter || {};
+    const kept = review.reviewerEntries(fm.dendrite_reviewer_colours);
+    const note = (kept.find((e) => e.name === who) || {}).note;
+    const map = new Map(this.reviewers());
+    map.set(who, colour);
+    for (const e of kept) {
+      if (note && e.note === note) map.set(e.name, colour);
+    }
+    await this.saveReviewers(map);
+  }
+  async saveReviewers(map) {
+    if (!this.file) return;
+    const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter || {};
+    const list = review.colourList(map, fm.dendrite_reviewer_colours);
+    this.reviewerMap = map;
+    await writeProps(
+      this.app,
+      this.file,
+      { dendrite_reviewer_colours: list }
+    );
+    this.recolour();
+  }
+  /** The cards with comments drawn again in their reviewers' colours. */
+  recolour() {
+    for (const [id, names] of this.reviewersOf || /* @__PURE__ */ new Map()) {
+      if (!names.length) continue;
+      this.invalidate(id);
+      this.renderCard(id);
+    }
   }
   /**
    * Take a Google comment, known by `gid` ('g:' and its id), out of
@@ -10144,6 +10355,8 @@ var DendritePreview = class extends ItemView {
     const text = await this.app.vault.cachedRead(this.file);
     const root = core.parseIndex(core.splitFrontmatter(text).body).root;
     const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter || {};
+    this.colours = review.reviewerColours(fm.dendrite_reviewer_colours);
+    const colourOf = (who) => this.colours.get(who) || null;
     const top = Number(fm.dendrite_heading_top);
     const headingTop = top >= 1 && top <= 6 ? top : this.plugin.settings.headingTop;
     for (const n of core.allNodes(root)) {
@@ -10182,7 +10395,7 @@ var DendritePreview = class extends ItemView {
         core.exportSegments(root.children, (id) => {
           const b = this.bodies.get(id);
           if (!b) return "";
-          return this.showComments ? review.renderMarkdown(b.body) : b.body;
+          return this.showComments ? review.renderMarkdown(b.body, colourOf) : b.body;
         }, headingTop, numbers, roleOf, { kindOf })
       ).segments,
       this.notesAt
@@ -10362,7 +10575,8 @@ var DendritePreview = class extends ItemView {
     for (const entry of this.reviewList.filter((x) => x.id === id)) {
       const { n } = entry;
       const it = items[n];
-      const el = gutter.createDiv({ cls: "dendrite-pbubble" + (it.kind === "suggest" ? " is-suggest" : "") });
+      const c = this.colours && this.colours.get(it.author || "Reviewer");
+      const el = gutter.createDiv({ cls: "dendrite-pbubble" + (it.kind === "suggest" ? " is-suggest" : "") + (c ? ` is-c-${c}` : "") });
       el.dataset.id = id;
       el.dataset.n = String(n);
       el.addEventListener("mouseenter", () => mark(entry, true));
@@ -10399,11 +10613,20 @@ var DendritePreview = class extends ItemView {
       el.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
+        const who = it.author || "Reviewer";
         showCommentMenu(review.commentMenu(it), e, (what) => {
           if (this.plugin.reviewFromPreview) {
             this.plugin.reviewFromPreview(this.file, id, n, what);
           }
-        });
+        }, this.plugin.reviewerColourFor ? {
+          author: who,
+          current: c,
+          pick: (to) => this.plugin.reviewerColourFor(
+            this.file,
+            who,
+            to
+          )
+        } : null);
       });
       for (const [what, label, tip] of review.commentActions(it)) {
         const btn = row.createEl("button", { text: label });
@@ -11331,7 +11554,8 @@ var ReviewImportModal = class extends Modal {
     let go = null;
     for (const row of rows) {
       const it = row.item;
-      const el = list.createDiv({ cls: "dendrite-review-row" + (it.kind === "change" ? " is-suggest" : "") });
+      const c = view.colourOf()(it.author || "Reviewer");
+      const el = list.createDiv({ cls: "dendrite-review-row" + (it.kind === "change" ? " is-suggest" : "") + (c ? ` is-c-${c}` : "") });
       const box = el.createEl("input", { type: "checkbox" });
       box.checked = row.use;
       box.disabled = !row.at && !active;
@@ -11407,6 +11631,157 @@ var ReviewImportModal = class extends Modal {
       };
     }
     buttons.createEl("button", { text: "Cancel" }).onclick = () => this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var IMAGE_EXT = /^(png|jpe?g|gif|svg|webp|bmp|tiff?|avif)$/i;
+function noteSuggest(app, input, pick, images = false) {
+  if (typeof AbstractInputSuggest !== "function") return null;
+  class NoteSuggest extends AbstractInputSuggest {
+    getSuggestions(query) {
+      const q = query.replace(/^\s*!?\[\[|\]\]\s*$/g, "").trim();
+      const files = images ? app.vault.getFiles().filter((f) => IMAGE_EXT.test(f.extension)) : app.vault.getMarkdownFiles();
+      if (!q) return files.slice(0, 20);
+      const match = typeof prepareFuzzySearch === "function" ? prepareFuzzySearch(q) : null;
+      const scored = [];
+      for (const f of files) {
+        const name = f.path.replace(/\.md$/, "");
+        const m = match ? match(name) : name.toLowerCase().includes(q.toLowerCase()) ? { score: 0 } : null;
+        if (m) scored.push([m.score, f]);
+      }
+      return scored.sort((a, b) => b[0] - a[0]).slice(0, 20).map(([, f]) => f);
+    }
+    renderSuggestion(f, el) {
+      el.createDiv({ text: images ? f.name : f.basename });
+      if (f.parent && f.parent.path !== "/") {
+        el.createDiv({
+          cls: "dendrite-reviewer-path",
+          text: f.parent.path
+        });
+      }
+    }
+    selectSuggestion(f) {
+      this.setValue(images ? f.name : f.basename);
+      this.close();
+      pick(f);
+    }
+  }
+  return new NoteSuggest(app, input);
+}
+var ReviewersModal = class extends Modal {
+  constructor(view) {
+    super(view.app);
+    this.view = view;
+  }
+  /** The reviewers as kept, then any only in the cards, in order. */
+  entries() {
+    const view = this.view;
+    const fm = this.app.metadataCache.getFileCache(view.file)?.frontmatter || {};
+    const kept = review.reviewerEntries(fm.dendrite_reviewer_colours);
+    const map = view.reviewers();
+    const order = [];
+    for (const n of core.allNodes(view.root)) {
+      for (const who of (view.reviewersOf || /* @__PURE__ */ new Map()).get(n.id) || []) {
+        if (!order.includes(who)) order.push(who);
+      }
+    }
+    for (const e of kept) if (!order.includes(e.name)) order.push(e.name);
+    const all = order.map((name) => kept.find((e) => e.name === name) || { name, note: null, colour: map.get(name) || "blue" });
+    const out = [];
+    for (const e of all) {
+      if (out.includes(e)) continue;
+      out.push(e, ...all.filter((x) => x !== e && e.note && x.note === e.note));
+    }
+    return out;
+  }
+  onOpen() {
+    this.titleEl.setText("Reviewers");
+    this.contentEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "Each reviewer's comments and suggested changes are drawn in their colour, kept for this manuscript. A reviewer who is a person can be linked to their note."
+    });
+    this.list = this.contentEl.createDiv({ cls: "dendrite-reviewers" });
+    this.draw();
+  }
+  draw() {
+    this.list.empty();
+    const entries = this.entries();
+    const save = async () => {
+      await this.view.saveEntries(entries);
+    };
+    for (const e of entries) {
+      const row = this.list.createDiv({ cls: "dendrite-reviewer" });
+      row.dataset.name = e.name;
+      const dot = row.createSpan({ cls: "dendrite-reviewer-dot" });
+      const paint = () => {
+        dot.style.background = `var(--color-${e.colour})`;
+      };
+      paint();
+      row.createSpan({ cls: "dendrite-reviewer-name", text: e.name });
+      const sel = row.createEl("select", { cls: "dropdown" });
+      for (const c of review.REVIEWER_COLOURS) {
+        const o = sel.createEl("option", {
+          text: c[0].toUpperCase() + c.slice(1)
+        });
+        o.value = c;
+      }
+      sel.value = e.colour;
+      const same = () => entries.filter((x) => x !== e && e.note && x.note === e.note);
+      sel.addEventListener("change", async () => {
+        for (const x of [e, ...same()]) x.colour = sel.value;
+        await save();
+        this.draw();
+      });
+      const note = row.createEl("input", {
+        type: "text",
+        cls: "dendrite-reviewer-note"
+      });
+      note.placeholder = "Their note, if a person";
+      note.value = e.note ? e.note.split("/").pop() : "";
+      const said = row.createDiv({ cls: "dendrite-reviewer-said" });
+      const link = async (f) => {
+        e.note = f ? this.linktext(f) : null;
+        const known = same()[0];
+        if (known) e.colour = known.colour;
+        await save();
+        this.draw();
+      };
+      if (same().length) {
+        said.setText("Same person as " + same().map((x) => x.name).join(", "));
+      }
+      noteSuggest(this.app, note, (f) => link(f));
+      note.addEventListener("change", async () => {
+        const v = note.value.trim().replace(/^\[\[|\]\]$/g, "");
+        if (!v) {
+          await link(null);
+          return;
+        }
+        const f = this.app.metadataCache.getFirstLinkpathDest(
+          v,
+          this.view.file.path
+        );
+        if (f) await link(f);
+        else said.setText(`No note named ${v}`);
+      });
+      const named = !e.note && this.app.metadataCache.getFirstLinkpathDest(e.name, this.view.file.path);
+      if (named) {
+        const b = row.createEl("button", {
+          cls: "dendrite-reviewer-offer",
+          text: `Link [[${named.basename}]]`
+        });
+        b.onclick = () => link(named);
+      }
+    }
+  }
+  /** A note as a link reaches it: by its name, or its path if shared. */
+  linktext(f) {
+    const by = this.app.metadataCache.getFirstLinkpathDest(
+      f.basename,
+      this.view.file.path
+    );
+    return by === f ? f.basename : f.path.replace(/\.md$/, "");
   }
   onClose() {
     this.contentEl.empty();
@@ -12375,6 +12750,18 @@ module.exports = class DendritePlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW)) {
       leaf.view.render();
     }
+  }
+  /** A reviewer's colour in a manuscript, set from its preview. */
+  async reviewerColourFor(file, who, colour) {
+    const board = this.app.workspace.getLeavesOfType(VIEW).map((l) => l.view).find((v) => v.file === file);
+    if (board) {
+      await board.setReviewerColour(who, colour);
+      return;
+    }
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const map = review.reviewerColours(fm.dendrite_reviewer_colours);
+    map.set(who, colour);
+    await writeProps(this.app, file, { dendrite_reviewer_colours: review.colourList(map, fm.dendrite_reviewer_colours) });
   }
   async openIndex(file, card = null, leaf = null) {
     const target = leaf || this.app.workspace.getLeaf("tab");

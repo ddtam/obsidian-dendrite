@@ -1271,10 +1271,12 @@
     content: attr(data-k);
 }
 
-/* Review comments from a returned Word file. A comment is in the accent
-   colour: its passage tinted, a number after it, and a callout under its
-   paragraph. A suggested change is in the revise flag's colour: the text
-   it would take out faded and struck through, its new text tinted. */
+/* Review comments, drawn as Word and Google Docs draw them. A comment
+   tints its passage, with a number after it and a callout under its
+   paragraph; a suggested change strikes the text it would take out and
+   underlines its new text, with no tint. Each is in its reviewer's colour
+   (is-c-<colour>, kept per manuscript), or, for a reviewer without one,
+   the accent for a comment and the revise colour for a change. */
 .dendrite-board,
 .dendrite-preview,
 .modal {
@@ -1291,15 +1293,16 @@
 }
 .dendrite-md .dendrite-review-old,
 .dendrite-preview-doc .dendrite-review-old {
-    color: var(--text-faint);
+    color: var(--dendrite-suggest);
     text-decoration: line-through;
+    text-decoration-color: var(--dendrite-suggest);
 }
 .dendrite-md .dendrite-review-new,
 .dendrite-preview-doc .dendrite-review-new {
-    background: color-mix(in srgb, var(--dendrite-suggest) 22%,
-                          transparent);
-    border-radius: 2px;
-    padding: 0 1px;
+    color: var(--dendrite-suggest);
+    text-decoration: underline;
+    text-decoration-color: var(--dendrite-suggest);
+    text-underline-offset: 2px;
     margin-left: 3px;
 }
 .dendrite-md sup.dendrite-review-n,
@@ -1332,7 +1335,7 @@
 }
 .dendrite-review-note.is-suggest,
 .dendrite-review-row.is-suggest {
-    border-left-color: var(--dendrite-suggest);
+    border-left: 2px dashed var(--dendrite-suggest);
 }
 .dendrite-review-note > .dendrite-review-n {
     color: var(--dendrite-review);
@@ -1660,14 +1663,14 @@ button.dendrite-review-btn:hover {
     right: 0;
     padding: 6px 8px;
     border: 1px solid var(--background-modifier-border);
-    border-left: 3px solid var(--text-accent);
+    border-left: 3px solid var(--dendrite-review);
     border-radius: 6px;
     background: var(--background-primary);
     font-size: var(--font-ui-small);
     line-height: 1.4;
 }
 .dendrite-pbubble.is-suggest {
-    border-left-color: var(--dendrite-revise, var(--color-orange));
+    border-left: 3px dashed var(--dendrite-suggest);
 }
 .dendrite-pbubble.is-current {
     box-shadow: 0 0 0 2px var(--interactive-accent);
@@ -1946,4 +1949,59 @@ button.dendrite-review-btn:hover {
 .theme-dark .dendrite-float-shown img:hover,
 .theme-dark .dendrite-version img:hover {
     opacity: 1;
+}
+
+/* A reviewer's colour, one of the theme's, for their comments and
+   suggested changes alike. */
+.is-c-red { --dendrite-review: var(--color-red);
+            --dendrite-suggest: var(--color-red); }
+.is-c-orange { --dendrite-review: var(--color-orange);
+               --dendrite-suggest: var(--color-orange); }
+.is-c-yellow { --dendrite-review: var(--color-yellow);
+               --dendrite-suggest: var(--color-yellow); }
+.is-c-green { --dendrite-review: var(--color-green);
+              --dendrite-suggest: var(--color-green); }
+.is-c-cyan { --dendrite-review: var(--color-cyan);
+             --dendrite-suggest: var(--color-cyan); }
+.is-c-blue { --dendrite-review: var(--color-blue);
+             --dendrite-suggest: var(--color-blue); }
+.is-c-purple { --dendrite-review: var(--color-purple);
+               --dendrite-suggest: var(--color-purple); }
+.is-c-pink { --dendrite-review: var(--color-pink);
+             --dendrite-suggest: var(--color-pink); }
+
+/* The Reviewers dialog: a row per reviewer, their colour, name, colour
+   choice and note. */
+.dendrite-reviewers {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.dendrite-reviewer {
+    display: grid;
+    grid-template-columns: 12px minmax(8em, 1fr) auto minmax(10em, 1fr);
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 2px;
+}
+.dendrite-reviewer-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+.dendrite-reviewer-offer,
+.dendrite-reviewer-said {
+    grid-column: 4;
+    justify-self: start;
+    font-size: var(--font-ui-smaller);
+}
+.dendrite-reviewer-said {
+    color: var(--text-faint);
+}
+.dendrite-reviewer-said:empty {
+    display: none;
+}
+.dendrite-reviewer-path {
+    color: var(--text-faint);
+    font-size: var(--font-ui-smaller);
 }

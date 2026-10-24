@@ -935,7 +935,7 @@ function countComments(items) {
     return firstOfComment(items).filter((f, i) => f === i).length;
 }
 
-function renderMarkdown(md) {
+function renderMarkdown(md, colourOf = null) {
     let n = 0;
     // A Google comment on several passages keeps one number for them.
     const numbers = new Map();
@@ -951,22 +951,117 @@ function renderMarkdown(md) {
         }
         const h = HEAD.exec(body.replace(/^\s+/, ''));
         const text = h ? h[3] : body.trim();
-        const cls = kind === 'suggest' ? ' is-suggest' : '';
+        // The reviewer's colour, where the manuscript gives them one.
+        const c = colourOf && h ? colourOf(h[1]) : null;
+        const tint = c ? ` is-c-${c}` : '';
+        const cls = (kind === 'suggest' ? ' is-suggest' : '') + tint;
         const sup = `<sup class="dendrite-review-n${cls}">${num}</sup>`;
         if (kind === 'suggest' && !passage) {
-            // An insertion's leading space is the text's, not the tint's.
+            // An insertion's leading space is the text's, not the mark's.
             const lead = /^\s*/.exec(text)[0];
-            return `${lead}<span class="dendrite-review-new">` +
+            return `${lead}<span class="dendrite-review-new${tint}">` +
                 `${text.slice(lead.length)}</span>${sup}`;
         }
         if (!passage) return sup;
         if (kind === 'suggest') {
-            return `<span class="dendrite-review-old">${passage}</span>` +
-                (text ? `<span class="dendrite-review-new">${text}</span>`
-                    : '') + sup;
+            const added = text ?
+                `<span class="dendrite-review-new${tint}">${text}</span>` : '';
+            return `<span class="dendrite-review-old${tint}">${passage}` +
+                '</span>' + added + sup;
         }
-        return `<mark class="dendrite-review-mark">${passage}</mark>${sup}`;
+        return `<mark class="dendrite-review-mark${tint}">${passage}</mark>` +
+            sup;
     });
+}
+
+// ---- a colour per reviewer -------------------------------------------
+
+/**
+ * The theme's colours a reviewer can take, in the order they are given
+ * out; Obsidian's --color-<name>.
+ */
+const REVIEWER_COLOURS = ['blue', 'green', 'purple', 'orange', 'cyan',
+                          'pink', 'yellow', 'red'];
+
+/**
+ * A manuscript's reviewer colours from its property, a list of
+ * "Name: colour"; entries not of that form, or naming no theme colour,
+ * are passed over. A name may be a link to the person's note, [[Name]],
+ * read as the note's name.
+ */
+function reviewerColours(list) {
+    const out = new Map();
+    for (const [name, , c] of colourEntries(list)) {
+        if (REVIEWER_COLOURS.includes(c)) out.set(name, c);
+    }
+    return out;
+}
+
+/**
+ * The property's entries as [name, the name as written, colour, note]:
+ * `note` the path of the person's note it links to, or null.
+ */
+function colourEntries(list) {
+    const out = [];
+    for (const x of Array.isArray(list) ? list : []) {
+        const m = /^(.+):\s*([a-z]+)\s*$/.exec(String(x).trim());
+        if (!m) continue;
+        const written = m[1].trim();
+        const link = /^\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]$/
+            .exec(written);
+        const note = link ? link[1].trim() : null;
+        const name = link ? (link[2] || '').trim() ||
+            note.split('/').pop() : written;
+        out.push([name, written, m[2], note]);
+    }
+    return out;
+}
+
+/** Reviewers as the property keeps them: [{ name, note, colour }]. */
+function reviewerEntries(list) {
+    return colourEntries(list).filter(([, , c]) =>
+        REVIEWER_COLOURS.includes(c)).map(([name, , colour, note]) =>
+        ({ name, note, colour }));
+}
+
+/**
+ * The property from reviewers [{ name, note, colour }]: one with a note
+ * as a link to it, aliased with their name where the note's differs.
+ */
+function entryList(entries) {
+    return entries.map(({ name, note, colour }) => {
+        if (!note) return `${name}: ${colour}`;
+        const base = note.split('/').pop();
+        return `[[${note}${base === name ? '' : `|${name}`}]]: ${colour}`;
+    });
+}
+
+/**
+ * The property from reviewer colours; a name written as a link in
+ * `prior`, the property as it was, kept as written.
+ */
+function colourList(map, prior = []) {
+    const written = new Map(colourEntries(prior).map(([n, w]) => [n, w]));
+    return [...map].map(([name, c]) => `${written.get(name) || name}: ${c}`);
+}
+
+/**
+ * Colours for reviewers without one: each the first not yet taken, in
+ * the order given, or once all are taken, the next in turn. One given a
+ * colour keeps it, so a reviewer added later moves no one. Answers
+ * { map, added }.
+ */
+function assignColours(map, names) {
+    const out = new Map(map);
+    let added = false;
+    for (const name of names) {
+        if (!name || out.has(name)) continue;
+        const taken = new Set(out.values());
+        out.set(name, REVIEWER_COLOURS.find((c) => !taken.has(c)) ||
+            REVIEWER_COLOURS[out.size % REVIEWER_COLOURS.length]);
+        added = true;
+    }
+    return { map: out, added };
 }
 
 /**
@@ -998,7 +1093,7 @@ function commentMenu(it) {
  * the comment's index and 'resolve' or, for a suggestion, 'apply' or
  * 'dismiss'.
  */
-function decorate(root, items, act, onMenu = null) {
+function decorate(root, items, act, onMenu = null, colourOf = null) {
     const nums = [...root.querySelectorAll('sup.dendrite-review-n')];
     const doc = root.ownerDocument;
     const blocks = new Map();
@@ -1025,8 +1120,10 @@ function decorate(root, items, act, onMenu = null) {
         for (const i of list) {
             const it = items[i];
             const note = doc.createElement('div');
+            const c = colourOf && colourOf(it.author || 'Reviewer');
             note.className = 'dendrite-review-note' +
-                (it.kind === 'suggest' ? ' is-suggest' : '');
+                (it.kind === 'suggest' ? ' is-suggest' : '') +
+                (c ? ` is-c-${c}` : '');
             const n = doc.createElement('span');
             n.className = 'dendrite-review-n';
             n.textContent = nums[i] ? nums[i].textContent : String(i + 1);
@@ -1087,6 +1184,8 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    plainMap, normalise, locate, reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
                    commentActions, commentMenu, googleData, googleOf,
+                   REVIEWER_COLOURS, reviewerColours, colourList,
+                   assignColours, reviewerEntries, entryList,
                    firstOfComment, countComments,
                    itemText,
                    addItems, removeItem,

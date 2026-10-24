@@ -57,12 +57,15 @@ function embedFor(path) {
 }
 
 /**
- * An image's embed as the Image field shows it: a wiki embed as its link,
- * which the editor's live preview draws as the link, not as the image a
- * second time.
+ * What an image's embed links to, as the Image field shows it: the file
+ * by its name or path, with no [[ or ![[.
  */
-function asLink(embed) {
-    return String(embed || '').replace(/^!\[\[/, '[[');
+function imageTarget(embed) {
+    const s = String(embed || '').trim();
+    const wiki = /^!?\[\[([^\]|#]+)/.exec(s);
+    if (wiki) return wiki[1].trim();
+    const md = /^!?\[[^\]]*\]\(([^)]+)\)/.exec(s);
+    return md ? md[1].trim() : s;
 }
 
 /** An image link in pasted or dropped text, as an embed; null if none. */
@@ -94,8 +97,9 @@ function textWidthPt(st) {
  * interface (see editor.js). `opts`: value, kind, label ('Table 1'),
  * onChange, onBlur, onEscape, onAsText, render(md, el) to draw markdown,
  * image(file) resolving to a saved image's embed, for one pasted or
- * dropped, and makeEditor(value, { onChange, onBlur, onEscape }) giving
- * a card editor for each field.
+ * dropped, makeEditor(value, { onChange, onBlur, onEscape }) giving
+ * a card editor for each field, and findImage(input, pick) putting a
+ * search for images under the Image field, calling pick(link).
  */
 function floatEditor(opts) {
     const kind = opts.kind;
@@ -115,11 +119,8 @@ function floatEditor(opts) {
     // A field: the card editor, Obsidian's where it has one, whose live
     // preview edits a table as a grid, given by `opts.makeEditor`; else a
     // text box. Answers { el, value, set(text), focus(atStart) }.
-    const field = (label, cls, value, onInput, onLeave = null) => {
-        const left = () => {
-            if (onLeave) onLeave();
-            opts.onBlur();
-        };
+    const field = (label, cls, value, onInput) => {
+        const left = () => opts.onBlur();
         const wrap = root.createDiv({ cls: 'dendrite-float-field' +
             (cls ? ` ${cls}` : '') });
         wrap.createDiv({ cls: 'dendrite-float-label', text: label });
@@ -182,20 +183,34 @@ function floatEditor(opts) {
                       (v) => { content = v; });
     } else {
         shown = root.createDiv({ cls: 'dendrite-float-shown is-image' });
-        // Its image as a link, typed with the editor's link search ([[),
-        // or filled in by an image pasted or dropped.
-        image = field('Image: type [[ to find one, or paste or drop one',
-                      'dendrite-float-image', asLink(content), (v) => {
-                          // Saved as an embed, as the link search writes
-                          // it without the !.
-                          content = linkedImage(v) || v.trim();
-                          draw();
-                      }, () => {
-                          // One typed with ![[ shown as its link once
-                          // the field is left.
-                          const v = image.value;
-                          if (asLink(v) !== v) image.set(asLink(v));
-                      });
+        // Its image by name, found with a search as it is typed, or
+        // filled in by an image pasted or dropped; saved as an embed.
+        const wrap = root.createDiv({ cls: 'dendrite-float-field ' +
+                                           'dendrite-float-image' });
+        wrap.createDiv({ cls: 'dendrite-float-label',
+                         text: 'Image: search for one, or paste or drop one' });
+        const input = wrap.createEl('input', { type: 'text',
+                                               cls: 'dendrite-float-input' });
+        input.placeholder = 'Image file name';
+        input.value = imageTarget(content);
+        const choose = (v) => {
+            const t = String(v || '').trim();
+            content = !t ? '' : linkedImage(t) || embedFor(t);
+            input.value = imageTarget(content);
+            draw();
+            changed();
+        };
+        input.addEventListener('change', () => choose(input.value));
+        input.addEventListener('blur', () => opts.onBlur());
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !e.defaultPrevented) {
+                e.preventDefault();
+                opts.onEscape();
+            }
+        });
+        if (opts.findImage) opts.findImage(input, (link) => choose(link));
+        image = { set(text) { input.value = imageTarget(text); },
+                  destroy() {} };
         cap = field('Caption, printed below the figure', null, caption,
                     (v) => { caption = v; });
     }
@@ -209,7 +224,7 @@ function floatEditor(opts) {
         if (!embed) embed = linkedImage(dt.getData && dt.getData('text/plain'));
         if (!embed) return false;
         content = embed;
-        if (image) image.set(asLink(embed));
+        if (image) image.set(embed);
         draw();
         changed();
         return true;
@@ -247,7 +262,7 @@ function floatEditor(opts) {
             ({ caption, content } = split(text, kind));
             cap.set(caption);
             if (table) table.set(content);
-            if (image) image.set(asLink(content));
+            if (image) image.set(content);
             draw();
         },
         focusAt() { cap.focus(false); },
@@ -264,6 +279,6 @@ function floatEditor(opts) {
     };
 }
 
-module.exports = { split, compose, embedFor, linkedImage, asLink,
+module.exports = { split, compose, embedFor, linkedImage, imageTarget,
                    textWidthPt,
                    floatEditor, STARTER_TABLE };

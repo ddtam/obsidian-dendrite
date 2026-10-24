@@ -2728,7 +2728,8 @@ test('a manuscript linked to a Google Doc pulls its comments and ' +
     view.reviewMenu({ preventDefault() {} });
     assert.deepEqual(h.obsidian.lastMenu.items.map((i) => i.title), [
         'Pull from Google Docs', 'Open the linked doc',
-        'Change the linked doc…', 'Import a Word or JSON file…']);
+        'Change the linked doc…', 'Import a Word or JSON file…',
+        'Reviewers…']);
     const m = await view.pullGdoc();
     assert.equal(asked, view.gdocUrl());
     assert.match(m.titleEl.textContent, /RAC draft \(Google Docs\)/);
@@ -2894,8 +2895,9 @@ test('the Review menu offers linking a doc when none is, and each review ' +
     view.reviewMenu({ preventDefault() {} });
     const titles = h.obsidian.lastMenu.items.map((i) => i.title);
     assert.deepEqual(titles, ['Link a Google Doc…',
-        'Import a Word or JSON file…', 'RAC review: 2 from Claude']);
-    await h.obsidian.lastMenu.items[2].click();
+        'Import a Word or JSON file…', 'Reviewers…',
+        'RAC review: 2 from Claude']);
+    await h.obsidian.lastMenu.items[3].click();
     assert.equal(opened.id, 'r1');
 });
 
@@ -3692,8 +3694,9 @@ test('a comment deleted here leaves the card and is not remembered, so a ' +
     await tick(10);
     const cm = h.obsidian.lastMenu;
     assert.ok(cm, 'a menu of its own');
-    assert.deepEqual(cm.titles, ['Resolve', 'Delete from Dendrite']);
-    assert.deepEqual(cm.items.map((i) => !!i.warning), [false, true],
+    assert.deepEqual(cm.titles, ['Resolve', 'Delete from Dendrite', '---',
+                                 'Colour for Joshua Bridgers']);
+    assert.deepEqual(cm.items.map((i) => !!i.warning), [false, true, false],
                      'a deletion, in the warning colour');
     await cm.items[1].click();
     await tick(10);
@@ -3763,31 +3766,39 @@ test('resolving one passage of a comment on several resolves it on all ' +
                  `And ${n('scDNA panels')} there, bulk too.`, 'one step');
 });
 
-test('a figure\'s image can be typed as a link in its own field, where ' +
-     'the editor\'s link search works', async () => {
-    const { view, text } = await open(FLOAT_INDEX, floatCards());
+test('a figure\'s image is found with Obsidian\'s search in its own ' +
+     'field, shown by its name, with no [[ or ![[ to write', async () => {
+    const { app, view, text } = await open(FLOAT_INDEX, floatCards());
+    app.vault.folders.add('W/Grant/figures');
+    await app.vault.createBinary('W/Grant/figures/umap_by_clone.png',
+                                 new ArrayBuffer(4));
+    await app.vault.createBinary('W/Grant/figures/notes.pdf',
+                                 new ArrayBuffer(4));
     await view.startEdit('G-aaaaa');
     const form = view.contentEl.querySelector('.dendrite-float-edit');
-    const image = form.querySelector('.dendrite-float-image textarea');
-    assert.ok(image, 'an Image field');
-    // Shown as a link, not an embed, so the editor's live preview does
-    // not draw the image a second time under the one shown above.
-    assert.equal(image.value, '[[old.png]]');
-    // Typed as an embed, with ![[: shown as a link once the field is left.
-    image.value = '![[typed.png]]';
-    image.dispatchEvent(new h.window.Event('input'));
-    image.dispatchEvent(new h.window.Event('blur'));
-    assert.equal(image.value, '[[typed.png]]');
-    // As Obsidian's link search writes it, without the !: an embed all
-    // the same.
-    image.value = '[[umap_by_clone.png]]';
-    image.dispatchEvent(new h.window.Event('input'));
-    // A dropped image fills the field in.
+    const image = form.querySelector('.dendrite-float-image input');
+    assert.ok(image, 'an Image field, a search box');
+    assert.ok(!form.querySelector('.dendrite-float-image textarea'),
+              'not an editor, whose live preview drew the image again');
+    assert.equal(image.value, 'old.png', 'by its name');
+    // Images only, found as typed, [[ or not.
+    const suggest = h.obsidian.lastSuggest;
+    assert.equal(suggest.inputEl, image);
+    const names = (q) => suggest.getSuggestions(q).map((f) => f.name);
+    assert.deepEqual(names('umap'), ['umap_by_clone.png']);
+    assert.deepEqual(names('![[umap'), ['umap_by_clone.png']);
+    assert.deepEqual(names('notes'), [], 'a PDF is not an image');
+    suggest.selectSuggestion(app.vault.getAbstractFileByPath(
+        'W/Grant/figures/umap_by_clone.png'));
+    assert.equal(image.value, 'umap_by_clone.png');
+    // A dropped image fills the field in, by its name.
     await view.editing.editor.take({ files: [],
         getData: () => '[[other.png]]' });
-    assert.equal(image.value, '[[other.png]]');
-    image.value = '[[umap_by_clone.png]]';
-    image.dispatchEvent(new h.window.Event('input'));
+    assert.equal(image.value, 'other.png');
+    // A link typed by hand, with ![[ or [[, is taken too.
+    image.value = '![[umap_by_clone.png]]';
+    image.dispatchEvent(new h.window.Event('change'));
+    assert.equal(image.value, 'umap_by_clone.png');
     await view.endEdit();
     assert.equal(text(cardPath('G-aaaaa')),
                  '![[umap_by_clone.png]]\n\nOld caption.');
@@ -3939,7 +3950,8 @@ test('a heading card carrying a review comment shows revise, not the ' +
     const { view } = await open(
         '---\ndendrite_prefix: G\n---\n' +
         '- [[G-aaaaa|Cluster]]\n    - [[G-bbbbb|p1]]\n',
-        { 'G-aaaaa': '# ==Cluster Selection==%%[!review] J, ' +
+        { 'G-aaaaa': '---\ndendrite_role: section\n---\n' +
+              '# ==Cluster Selection==%%[!review] J, ' +
               '2026-10-23: Unnecessary?%%',
           'G-bbbbb': '---\ndendrite_status: done\n---\nFir it is.' });
     await tick(30);
@@ -3950,4 +3962,194 @@ test('a heading card carrying a review comment shows revise, not the ' +
     await view.reviewAction('G-aaaaa', 0, 'resolve');
     await tick(30);
     assert.deepEqual(chips('G-aaaaa'), ['done ✓']);
+});
+
+const REVIEWED = {
+    'G-aaaaa': 'First ==one==%%[!review] Joshua Bridgers, 2026-10-23: ' +
+        'Why?%%.',
+    'G-bbbbb': 'Second ==two==%%[!review] Aly Karsan, 2026-10-23: Hm.%% ' +
+        'and ==three==%%[!suggest] Joshua Bridgers, 2026-10-23: 3%%.' };
+const REVIEWED_INDEX = '---\ndendrite_prefix: G\n---\n' +
+    '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n';
+
+test('each reviewer is given a colour for the manuscript, in reading ' +
+     'order, kept in its index; right-click changes it', async () => {
+    const { app, view, read } = await open(REVIEWED_INDEX, REVIEWED);
+    await tick(30);
+    const fm = () => app.metadataCache.getFileCache(
+        app.vault.getAbstractFileByPath(INDEX)).frontmatter;
+    assert.deepEqual(fm().dendrite_reviewer_colours,
+                     ['Joshua Bridgers: blue', 'Aly Karsan: green']);
+    const card = (id) => view.cardEls.get(id);
+    assert.ok(card('G-aaaaa').querySelector('mark.is-c-blue'));
+    assert.ok(card('G-aaaaa').querySelector('.dendrite-review-note.is-c-blue'));
+    assert.ok(card('G-bbbbb').querySelector('mark.is-c-green'));
+    assert.ok(card('G-bbbbb').querySelector(
+        '.dendrite-review-old.is-c-blue'), 'a suggestion too');
+    // Right-click on Aly's comment: a colour for Aly.
+    const note = card('G-bbbbb').querySelector('.dendrite-review-note');
+    note.dispatchEvent(new h.window.MouseEvent('contextmenu',
+                                               { bubbles: true }));
+    await tick(10);
+    const menu = h.obsidian.lastMenu;
+    const colour = menu.items.find((i) => i.title === 'Colour for ' +
+                                   'Aly Karsan');
+    assert.ok(colour && colour.submenu, 'a colour submenu');
+    const orange = colour.submenu.items.find((i) => i.title === 'Orange');
+    await orange.click();
+    await tick(30);
+    assert.deepEqual(fm().dendrite_reviewer_colours,
+                     ['Joshua Bridgers: blue', 'Aly Karsan: orange']);
+    assert.ok(card('G-bbbbb').querySelector('mark.is-c-orange'));
+    assert.ok(card('G-aaaaa').querySelector('mark.is-c-blue'),
+              'the others keep theirs');
+    assert.ok(read(INDEX).includes('- [[G-aaaaa|a]]'), 'the tree kept');
+});
+
+test('in the preview a reviewer\'s comments take the manuscript\'s ' +
+     'colour for them', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n' +
+        'dendrite_reviewer_colours:\n  - Joshua Bridgers: pink\n---\n' +
+        '- [[G-aaaaa|a]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), REVIEWED['G-aaaaa']);
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(30);
+    assert.ok(view.contentEl.querySelector('.dendrite-pbubble.is-c-pink'));
+    assert.ok(view.contentEl.querySelector('mark.is-c-pink'));
+});
+
+test('Reviewers… in the Review menu sets each reviewer\'s colour and links ' +
+     'one to their note, offered where a note has their name', async () => {
+    const { app, view } = await open(REVIEWED_INDEX, REVIEWED);
+    app.vault.folders.add('People');
+    await app.vault.create('People/Joshua Bridgers.md', 'A person.');
+    await tick(30);
+    const fm = () => app.metadataCache.getFileCache(
+        app.vault.getAbstractFileByPath(INDEX)).frontmatter
+        .dendrite_reviewer_colours;
+    const menu = view.reviewMenu();
+    await menuItem(menu, 'Reviewers…').click();
+    const modal = h.obsidian.lastModal;
+    // Rows looked up again after each link, which draws them again.
+    const rows = () => [...modal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')];
+    assert.deepEqual(rows().map((r) => r.dataset.name),
+                     ['Joshua Bridgers', 'Aly Karsan'], 'in reading order');
+    let [josh, aly] = rows();
+    assert.equal(josh.querySelector('select').value, 'blue');
+    // A colour chosen: saved, the comments drawn in it.
+    const sel = aly.querySelector('select');
+    sel.value = 'pink';
+    sel.dispatchEvent(new h.window.Event('change'));
+    await tick(30);
+    assert.deepEqual(fm(), ['Joshua Bridgers: blue', 'Aly Karsan: pink']);
+    assert.ok(view.cardEls.get('G-bbbbb').querySelector('mark.is-c-pink'));
+    // Only Joshua has a note of that name to offer.
+    assert.ok(!aly.querySelector('.dendrite-reviewer-offer'));
+    await josh.querySelector('.dendrite-reviewer-offer').onclick();
+    await tick(10);
+    [josh, aly] = rows();
+    assert.deepEqual(fm(), ['[[Joshua Bridgers]]: blue', 'Aly Karsan: pink']);
+    // A note typed for Aly: none of that name; then cleared.
+    const note = aly.querySelector('input.dendrite-reviewer-note');
+    note.value = 'Nobody here';
+    note.dispatchEvent(new h.window.Event('change'));
+    await tick(10);
+    assert.match(aly.textContent, /No note named Nobody here/);
+    assert.deepEqual(fm(), ['[[Joshua Bridgers]]: blue', 'Aly Karsan: pink']);
+    // Joshua's link taken off again.
+    const jn = josh.querySelector('input.dendrite-reviewer-note');
+    assert.equal(jn.value, 'Joshua Bridgers');
+    jn.value = '';
+    jn.dispatchEvent(new h.window.Event('change'));
+    await tick(10);
+    assert.deepEqual(fm(), ['Joshua Bridgers: blue', 'Aly Karsan: pink']);
+    // Colours stay per reviewer though the link changed.
+    assert.ok(view.cardEls.get('G-aaaaa').querySelector('mark.is-c-blue'));
+});
+
+test('names linked to the same note are one person: one colour for all ' +
+     'of them, set from any, and shown together', async () => {
+    const { app, view } = await open(REVIEWED_INDEX + '- [[G-ccccc|c]]\n',
+        Object.assign({}, REVIEWED, { 'G-ccccc': 'Third ==four==' +
+            '%%[!review] jbridgers, 2026-10-24: From Word.%%.' }));
+    app.vault.folders.add('People');
+    await app.vault.create('People/Joshua Bridgers.md', 'A person.');
+    await tick(30);
+    const fm = () => app.metadataCache.getFileCache(
+        app.vault.getAbstractFileByPath(INDEX)).frontmatter
+        .dendrite_reviewer_colours;
+    assert.deepEqual(fm(), ['Joshua Bridgers: blue', 'Aly Karsan: green',
+                            'jbridgers: purple']);
+    await menuItem(view.reviewMenu(), 'Reviewers…').click();
+    const modal = h.obsidian.lastModal;
+    const row = (name) => [...modal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')].find((r) => r.dataset.name === name);
+    await row('Joshua Bridgers').querySelector('.dendrite-reviewer-offer')
+        .onclick();
+    await tick(10);
+    // The Word name linked to the same note: Joshua's colour.
+    const note = row('jbridgers').querySelector('input');
+    note.value = 'Joshua Bridgers';
+    note.dispatchEvent(new h.window.Event('change'));
+    await tick(30);
+    assert.deepEqual(fm(), ['[[Joshua Bridgers]]: blue', 'Aly Karsan: green',
+        '[[Joshua Bridgers|jbridgers]]: blue']);
+    assert.ok(view.cardEls.get('G-ccccc').querySelector('mark.is-c-blue'));
+    // Shown together, each said to be the same person.
+    assert.deepEqual([...modal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')].map((r) => r.dataset.name),
+        ['Joshua Bridgers', 'jbridgers', 'Aly Karsan']);
+    assert.match(row('jbridgers').textContent,
+                 /Same person as Joshua Bridgers/);
+    // A colour set for one, in the dialog: both.
+    const sel = row('jbridgers').querySelector('select');
+    sel.value = 'cyan';
+    sel.dispatchEvent(new h.window.Event('change'));
+    await tick(30);
+    assert.deepEqual(fm(), ['[[Joshua Bridgers]]: cyan',
+        '[[Joshua Bridgers|jbridgers]]: cyan', 'Aly Karsan: green'],
+        'kept with the same person\'s names together');
+    assert.equal(row('Joshua Bridgers').querySelector('select').value,
+                 'cyan');
+    // From a comment's right-click: both.
+    await view.setReviewerColour('Joshua Bridgers', 'pink');
+    await tick(30);
+    assert.deepEqual(fm(), ['[[Joshua Bridgers]]: pink',
+        '[[Joshua Bridgers|jbridgers]]: pink', 'Aly Karsan: green'],
+        'kept with the same person\'s names together');
+    assert.ok(view.cardEls.get('G-ccccc').querySelector('mark.is-c-pink'));
+});
+
+test('a reviewer\'s note is found with Obsidian\'s note search as it is ' +
+     'typed, [[ or not, and linked when one is chosen', async () => {
+    const { app, view } = await open(REVIEWED_INDEX, REVIEWED);
+    app.vault.folders.add('People');
+    await app.vault.create('People/Aly Karsan.md', 'A person.');
+    await app.vault.create('People/Joshua Bridgers.md', 'A person.');
+    await tick(30);
+    await menuItem(view.reviewMenu(), 'Reviewers…').click();
+    const modal = h.obsidian.lastModal;
+    const aly = [...modal.contentEl.querySelectorAll('.dendrite-reviewer')]
+        .find((r) => r.dataset.name === 'Aly Karsan');
+    const input = aly.querySelector('input.dendrite-reviewer-note');
+    const suggest = h.obsidian.lastSuggest;
+    assert.equal(suggest.inputEl, input,
+                 'the last row\'s box has the search, as each does');
+    const names = (q) => suggest.getSuggestions(q).map((f) => f.basename);
+    assert.deepEqual(names('[[aly'), ['Aly Karsan']);
+    assert.deepEqual(names('bridg'), ['Joshua Bridgers']);
+    suggest.selectSuggestion(app.vault.getAbstractFileByPath(
+        'People/Aly Karsan.md'));
+    await tick(30);
+    assert.deepEqual(app.metadataCache.getFileCache(
+        app.vault.getAbstractFileByPath(INDEX)).frontmatter
+        .dendrite_reviewer_colours,
+        ['Joshua Bridgers: blue', '[[Aly Karsan]]: green']);
 });

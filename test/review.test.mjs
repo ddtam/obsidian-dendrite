@@ -553,3 +553,59 @@ test('a comment on a numbered heading is placed on that heading\'s card, ' +
     assert.equal(part.before, '');
     assert.equal(r.locate(part, [contents, sizes, heading]).id, 'G-head');
 });
+
+test('reviewer colours: kept per manuscript as "Name: colour", a new ' +
+     'reviewer given the next colour not taken, none moved', () => {
+    const m = r.reviewerColours(['Joshua Bridgers: green', 'bad entry',
+                                 'Aly Karsan: nope']);
+    assert.deepEqual([...m], [['Joshua Bridgers', 'green']]);
+    const out = r.assignColours(m, ['Aly Karsan', 'Joshua Bridgers',
+                                    'Reviewer 2']);
+    assert.equal(out.added, true);
+    assert.deepEqual([...out.map], [['Joshua Bridgers', 'green'],
+        ['Aly Karsan', 'blue'], ['Reviewer 2', 'purple']],
+        'blue first, green skipped as taken');
+    assert.deepEqual(r.colourList(out.map), ['Joshua Bridgers: green',
+        'Aly Karsan: blue', 'Reviewer 2: purple']);
+    assert.equal(r.assignColours(out.map, ['Aly Karsan']).added, false);
+    // Past the eight, colours are used again.
+    const many = r.assignColours(new Map(),
+        ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']).map;
+    assert.equal(many.get('i'), 'blue');
+    // A name written as a link to the person's note is the note's name,
+    // or the link's alias, the name as the comments give it.
+    assert.deepEqual([...r.reviewerColours(['[[Aly Karsan]]: pink',
+        '[[People/Josh B|Joshua Bridgers]]: cyan'])],
+        [['Aly Karsan', 'pink'], ['Joshua Bridgers', 'cyan']]);
+    assert.deepEqual(r.reviewerEntries(['[[People/Josh B|Joshua Bridgers]]: ' +
+        'cyan', 'Claude: red']), [
+        { name: 'Joshua Bridgers', note: 'People/Josh B', colour: 'cyan' },
+        { name: 'Claude', note: null, colour: 'red' }]);
+    assert.deepEqual(r.entryList([
+        { name: 'Joshua Bridgers', note: 'People/Josh B', colour: 'cyan' },
+        { name: 'Aly Karsan', note: 'Aly Karsan', colour: 'pink' },
+        { name: 'Claude', note: null, colour: 'red' }]),
+        ['[[People/Josh B|Joshua Bridgers]]: cyan', '[[Aly Karsan]]: pink',
+         'Claude: red']);
+    // Written back, a link stays a link.
+    const prior = ['[[Aly Karsan]]: pink'];
+    assert.deepEqual(r.colourList(new Map([['Aly Karsan', 'red'],
+        ['Reviewer 2', 'blue']]), prior),
+        ['[[Aly Karsan]]: red', 'Reviewer 2: blue']);
+});
+
+test('a reviewer\'s comments and suggested changes take their colour', () => {
+    const md = 'A ==one==%%[!review] Aly Karsan, 2026-10-23: Why?%% and ' +
+        '==two==%%[!suggest] Joshua Bridgers, 2026-10-23: 2%% and ' +
+        '==three==%%[!review] Nobody, 2026-10-23: Eh.%%';
+    const colours = new Map([['Aly Karsan', 'blue'],
+                             ['Joshua Bridgers', 'green']]);
+    const html = r.renderMarkdown(md, (who) => colours.get(who) || null);
+    assert.match(html, /<mark class="dendrite-review-mark is-c-blue">one/);
+    assert.match(html, /<span class="dendrite-review-old is-c-green">two/);
+    assert.match(html, /<span class="dendrite-review-new is-c-green">2/);
+    assert.match(html, /<mark class="dendrite-review-mark">three/,
+                 'no colour: the default');
+    assert.equal(r.reviewItems(md).map((x) => x.author).join(),
+                 'Aly Karsan,Joshua Bridgers,Nobody');
+});

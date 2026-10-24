@@ -96,12 +96,15 @@ class TFile extends TAbstractFile {
     constructor(path) {
         super();
         this.setPath(path);
-        this.extension = 'md';
         this.stat = { mtime: 1 };
     }
     setPath(path) {
         this.path = path;
-        this.basename = path.split('/').pop().replace(/\.md$/, '');
+        // As Obsidian's: name with its extension, basename without.
+        this.name = path.split('/').pop();
+        const dot = this.name.lastIndexOf('.');
+        this.extension = dot > 0 ? this.name.slice(dot + 1) : '';
+        this.basename = dot > 0 ? this.name.slice(0, dot) : this.name;
         const dir = path.split('/').slice(0, -1).join('/');
         this.parent = { path: dir || '/' };
     }
@@ -182,7 +185,10 @@ function makeApp() {
             await vault.modify(f, out);
             return out;
         },
-        getMarkdownFiles() { return [...files.values()]; },
+        getMarkdownFiles() {
+            return [...files.values()].filter((f) => f.path.endsWith('.md'));
+        },
+        getFiles() { return [...files.values()]; },
         /** Move a note, links to it left as they are. */
         async rename(f, to) {
             if (files.has(to)) throw new Error('exists: ' + to);
@@ -241,6 +247,9 @@ function makeApp() {
         getFirstLinkpathDest(link) {
             for (const f of files.values()) {
                 if (f.basename === link || f.path === link + '.md') return f;
+                // A file other than a note, by its name or path.
+                if (f.extension !== 'md' &&
+                    (f.name === link || f.path === link)) return f;
             }
             return null;
         },
@@ -368,6 +377,16 @@ const obsidian = {
             this.app = app;
             this.containerEl = make('div');
         }
+    },
+    // Obsidian's suggestions under a text box; the test calls them.
+    AbstractInputSuggest: class {
+        constructor(app, inputEl) {
+            this.app = app;
+            this.inputEl = inputEl;
+            obsidian.lastSuggest = this;
+        }
+        setValue(v) { this.inputEl.value = v; }
+        close() {}
     },
     Modal: class {
         constructor(app) {
