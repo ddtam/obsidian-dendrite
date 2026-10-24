@@ -318,6 +318,8 @@ npm test          # core and view tests against an in-memory vault
 npm run build     # bundles src/ into main.js
 ```
 
+**Finding what is slow.** **Record timings**, under Diagnostics in the settings, writes a line every 10 seconds to `~/.config/dendrite/timings.jsonl` while it is on: for each step of the board and the preview, such as drawing a card or refreshing the preview, how often it ran, its total time and its longest, longest first, and the window's long tasks, those of 50 ms or more whoever ran them. A step that waits, such as one reading files, is timed until it finishes, waiting included. It is off by default, on the desktop only, and the file starts again once past 5 MB.
+
 
 Icons follow the rules of Nikita Prokopov's [critique of icons in every menu item](https://tonsky.me/blog/tahoe-icons): an icon means one thing everywhere, the same action having the same icon on the bar, in menus and on a card, and two that look alike never mean different things; a row has an icon only where it earns one, by being frequent, matching what the card shows, or warning, so a fold-out, a heading for its group, has none; and since Obsidian gives a row without an icon no room for one, Dendrite's menus keep that room on every row, so labels line up, while a menu with no icons keeps none. A bar button that opens a menu ends in a caret, and a choice between two views is a switch with the one shown lit. `test/view.test.mjs` fails when an icon is used for two meanings, a fold-out has an icon, or a menu's icons and its room for them disagree. Every deletion in a menu, a card's, several cards', or a comment's, is shown in the theme's warning colour.
 

@@ -35,6 +35,7 @@ const pandoc = require('./pandoc.js');
 const review = require('./review.js');
 const google = require('./google.js');
 const float = require('./float.js');
+const timing = require('./timing.js');
 const { History, idbStore } = require('./history.js');
 
 const VIEW = 'dendrite-view';
@@ -106,6 +107,7 @@ const DEFAULTS = {
     reviewApiKey: '',
     // The name a reply to a review comment is signed with.
     replyName: '',
+    recordTimings: false,
     // Reviews submitted, pending until added or ignored on the board,
     // and the latest ones decided, so a submitter can ask.
     reviewQueue: [],
@@ -8825,16 +8827,77 @@ class DendriteSettings extends PluginSettingTab {
                 s.lintCards = v;
                 save();
             }));
+
+        heading('Diagnostics');
+        new Setting(containerEl).setName('Record timings')
+            .setDesc('While on, writes how long each of Dendrite\'s steps ' +
+                     'took, and how often the window stalled, to ' +
+                     `${configFile(TIMINGS)} every 10 seconds, to find ` +
+                     'what makes it slow. Only step names and times are ' +
+                     'written, never text. Desktop only.')
+            .addToggle((t) => t.setValue(!!s.recordTimings)
+                .setDisabled(!Platform.isDesktopApp)
+                .onChange((v) => {
+                    s.recordTimings = v;
+                    timing.setOn(v && Platform.isDesktopApp);
+                    save();
+                }));
     }
 }
+
+// Timed while Record timings is on (timing.js): the steps that draw the
+// board and the preview, and those run on every change.
+timing.wrap(DendriteView.prototype, 'board', ['render', 'renderCard',
+    'updateStatuses', 'updateChanged', 'updateNumbers', 'updateCounts',
+    'applyActive', 'drawFlow', 'loadBodies', 'onModify', 'onMetadata',
+    'sweepStatuses', 'startEdit', 'endEdit']);
+timing.wrap(DendritePreview.prototype, 'preview', ['refresh',
+    'renderSegments', 'renderBlock', 'drawBubbles', 'layoutBubbles',
+    'keepPace', 'fitComments', 'listComments', 'highlight']);
+
+const TIMINGS = 'timings.jsonl';
 
 module.exports = class DendritePlugin extends Plugin {
     onunload() {
         this.stopReviewApi();
+        this.writeTimings();
+    }
+
+    /**
+     * What was timed since last written, appended to the timings file as
+     * one line; the file kept under 5 MB by starting it again.
+     */
+    writeTimings() {
+        if (!timing.isOn()) return;
+        timing.watch(window);
+        for (const t of [VIEW, PREVIEW]) {
+            for (const l of this.app.workspace.getLeavesOfType(t)) {
+                timing.watch(l.view.containerEl.ownerDocument.defaultView);
+            }
+        }
+        const got = timing.take();
+        if (!got) return;
+        try {
+            const fs = require('fs');
+            const file = configFile(TIMINGS);
+            fs.mkdirSync(require('path').dirname(file), { recursive: true });
+            if (fs.existsSync(file) && fs.statSync(file).size > 5e6) {
+                fs.renameSync(file, file + '.old');
+            }
+            fs.appendFileSync(file, JSON.stringify(Object.assign({
+                at: new Date().toISOString(),
+                version: this.manifest && this.manifest.version }, got)) +
+                '\n', { mode: 0o600 });
+        } catch (err) {
+            console.error('Dendrite: timings not written', err);
+        }
     }
 
     async onload() {
         this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+        timing.setOn(this.settings.recordTimings && Platform.isDesktopApp);
+        this.registerInterval(window.setInterval(() => this.writeTimings(),
+                                                 10000));
         // Versions per device, outside the vault and data.json, which
         // sync plugins copy.
         this.history = new History(idbStore());

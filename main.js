@@ -4367,6 +4367,95 @@ var require_float = __commonJS({
   }
 });
 
+// src/timing.js
+var require_timing = __commonJS({
+  "src/timing.js"(exports2, module2) {
+    "use strict";
+    var stats = /* @__PURE__ */ new Map();
+    var long = { n: 0, total: 0, max: 0 };
+    var watched = /* @__PURE__ */ new WeakSet();
+    var on = false;
+    var now = () => typeof performance !== "undefined" ? performance.now() : Date.now();
+    function setOn(value) {
+      on = !!value;
+      if (!on) {
+        stats.clear();
+        Object.assign(long, { n: 0, total: 0, max: 0 });
+      }
+    }
+    function isOn() {
+      return on;
+    }
+    function record(step, ms) {
+      if (!on) return;
+      const s = stats.get(step) || { n: 0, total: 0, max: 0 };
+      s.n++;
+      s.total += ms;
+      s.max = Math.max(s.max, ms);
+      stats.set(step, s);
+    }
+    function wrap(proto, prefix, names) {
+      for (const name of names) {
+        const fn = proto[name];
+        if (typeof fn !== "function") {
+          throw new Error(`timing: no method ${prefix}.${name}`);
+        }
+        const step = `${prefix}.${name}`;
+        proto[name] = function(...args) {
+          if (!on) return fn.apply(this, args);
+          const t0 = now();
+          let out;
+          try {
+            out = fn.apply(this, args);
+          } catch (err) {
+            record(step, now() - t0);
+            throw err;
+          }
+          if (out && typeof out.then === "function") {
+            return out.finally(() => record(step, now() - t0));
+          }
+          record(step, now() - t0);
+          return out;
+        };
+      }
+    }
+    function watch(win) {
+      if (!win || watched.has(win) || !win.PerformanceObserver) return;
+      watched.add(win);
+      try {
+        new win.PerformanceObserver((list) => {
+          if (!on) return;
+          for (const e of list.getEntries()) {
+            long.n++;
+            long.total += e.duration;
+            long.max = Math.max(long.max, e.duration);
+          }
+        }).observe({ entryTypes: ["longtask"] });
+      } catch (err) {
+      }
+    }
+    var round = (x) => Math.round(x * 10) / 10;
+    function take() {
+      if (!stats.size && !long.n) return null;
+      const steps = [...stats].map(([step, s]) => ({
+        step,
+        n: s.n,
+        total_ms: round(s.total),
+        max_ms: round(s.max)
+      })).sort((a, b) => b.total_ms - a.total_ms);
+      const longtasks = {
+        n: long.n,
+        total_ms: round(long.total),
+        max_ms: round(long.max)
+      };
+      stats.clear();
+      Object.assign(long, { n: 0, total: 0, max: 0 });
+      return { steps, longtasks };
+    }
+    module2.exports = { setOn, isOn, record, wrap, watch, take };
+  }
+});
+
 // src/history.js
 var require_history = __commonJS({
   "src/history.js"(exports2, module2) {
@@ -4656,6 +4745,7 @@ var pandoc = require_pandoc();
 var review = require_review();
 var google = require_google();
 var float = require_float();
+var timing = require_timing();
 var { History, idbStore } = require_history();
 var VIEW = "dendrite-view";
 var ROLE_ITEMS = [
@@ -4723,6 +4813,7 @@ var DEFAULTS = {
   reviewApiKey: "",
   // The name a reply to a review comment is signed with.
   replyName: "",
+  recordTimings: false,
   // Reviews submitted, pending until added or ignored on the board,
   // and the latest ones decided, so a submitter can ask.
   reviewQueue: [],
@@ -12661,14 +12752,83 @@ var DendriteSettings = class extends PluginSettingTab {
       s.lintCards = v;
       save();
     }));
+    heading("Diagnostics");
+    new Setting(containerEl).setName("Record timings").setDesc(`While on, writes how long each of Dendrite's steps took, and how often the window stalled, to ${configFile(TIMINGS)} every 10 seconds, to find what makes it slow. Only step names and times are written, never text. Desktop only.`).addToggle((t) => t.setValue(!!s.recordTimings).setDisabled(!Platform.isDesktopApp).onChange((v) => {
+      s.recordTimings = v;
+      timing.setOn(v && Platform.isDesktopApp);
+      save();
+    }));
   }
 };
+timing.wrap(DendriteView.prototype, "board", [
+  "render",
+  "renderCard",
+  "updateStatuses",
+  "updateChanged",
+  "updateNumbers",
+  "updateCounts",
+  "applyActive",
+  "drawFlow",
+  "loadBodies",
+  "onModify",
+  "onMetadata",
+  "sweepStatuses",
+  "startEdit",
+  "endEdit"
+]);
+timing.wrap(DendritePreview.prototype, "preview", [
+  "refresh",
+  "renderSegments",
+  "renderBlock",
+  "drawBubbles",
+  "layoutBubbles",
+  "keepPace",
+  "fitComments",
+  "listComments",
+  "highlight"
+]);
+var TIMINGS = "timings.jsonl";
 module.exports = class DendritePlugin extends Plugin {
   onunload() {
     this.stopReviewApi();
+    this.writeTimings();
+  }
+  /**
+   * What was timed since last written, appended to the timings file as
+   * one line; the file kept under 5 MB by starting it again.
+   */
+  writeTimings() {
+    if (!timing.isOn()) return;
+    timing.watch(window);
+    for (const t of [VIEW, PREVIEW]) {
+      for (const l of this.app.workspace.getLeavesOfType(t)) {
+        timing.watch(l.view.containerEl.ownerDocument.defaultView);
+      }
+    }
+    const got = timing.take();
+    if (!got) return;
+    try {
+      const fs = require("fs");
+      const file = configFile(TIMINGS);
+      fs.mkdirSync(require("path").dirname(file), { recursive: true });
+      if (fs.existsSync(file) && fs.statSync(file).size > 5e6) {
+        fs.renameSync(file, file + ".old");
+      }
+      fs.appendFileSync(file, JSON.stringify(Object.assign({
+        at: (/* @__PURE__ */ new Date()).toISOString(),
+        version: this.manifest && this.manifest.version
+      }, got)) + "\n", { mode: 384 });
+    } catch (err) {
+      console.error("Dendrite: timings not written", err);
+    }
   }
   async onload() {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+    timing.setOn(this.settings.recordTimings && Platform.isDesktopApp);
+    this.registerInterval(window.setInterval(
+      () => this.writeTimings(),
+      1e4
+    ));
     this.history = new History(idbStore());
     this.registerView(VIEW, (leaf) => new DendriteView(leaf, this));
     this.registerView(PREVIEW, (leaf) => new DendritePreview(leaf, this));

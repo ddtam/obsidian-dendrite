@@ -14,5 +14,6 @@ Your sign-in token is stored on your computer, outside your vault, and is never 
 
 - **Zotero.** Dendrite asks Better BibTeX, running on your computer, for citations when you export.
 - **Reviews from programs.** When turned on, Dendrite listens on your computer only (127.0.0.1) for review comments from programs you run, and only with its key. A program with the key can also read a manuscript's open review comments and the replies to them, so a reviewing agent can see what was answered; it can read nothing else from the vault.
+- **Timings.** When **Record timings** is turned on, Dendrite writes how long its own steps took, and how often the window stalled, to `~/.config/dendrite/timings.jsonl` on your computer: step names, counts and times only, never text from the vault.
 
 Nothing in these leaves your computer.

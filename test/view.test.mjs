@@ -1101,6 +1101,7 @@ test('settings are grouped under headings by what they affect', () => {
         'Google account',
         '## Other plugins', 'Keep Linter out of the writing folder',
         'Clean up cards with Linter',
+        '## Diagnostics', 'Record timings',
     ]);
 });
 
