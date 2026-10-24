@@ -2028,3 +2028,14 @@ button.dendrite-review-btn:hover {
     display: flex;
     gap: 4px;
 }
+
+/* A colour's chip before its name in the reviewer colour menu. */
+.dendrite-colour-chip {
+    display: inline-block;
+    width: 0.8em;
+    height: 0.8em;
+    margin-right: 0.5em;
+    border-radius: 50%;
+    vertical-align: -0.05em;
+    background: var(--dendrite-chip);
+}

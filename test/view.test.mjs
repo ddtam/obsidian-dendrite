@@ -1267,6 +1267,26 @@ test('a PDF of the whole manuscript measures its words per page, which ' +
                  'the measured rate wins over the one set by hand');
 });
 
+test('the preview opens beside the board at a third of the width',
+     async () => {
+    const Plugin = require('../src/main.js');
+    const dims = [];
+    const item = (name, parent) => ({ name, parent,
+        setDimension: (d) => dims.push([name, Math.round(d)]) });
+    const split = { direction: 'vertical', children: [] };
+    const boardTabs = item('board', split);
+    const newTabs = item('preview', split);
+    split.children.push(boardTabs, newTabs);
+    const state = [];
+    const leaf = { parent: newTabs,
+                   setViewState: async (v) => state.push(v.type) };
+    const self = { app: { workspace: { getLeaf: () => leaf } },
+                   previewLeaf: () => null };
+    await Plugin.prototype.openPreview.call(self, new h.TFile('W/G.md'));
+    assert.deepEqual(state, ['dendrite-preview']);
+    assert.deepEqual(dims, [['preview', 33], ['board', 67]]);
+});
+
 test('an exported PDF opens beside the preview, or in the tab already ' +
      'showing an export, never by splitting the board', async () => {
     const Plugin = require('../src/main.js');
@@ -1330,7 +1350,7 @@ test('the index and every card get their type, kept beside existing ones',
     await view.reload();
     assert.equal(read(INDEX), before, 'opening adds nothing');
     await view.sweepTypes();
-    assert.match(read(INDEX), /type:\n  - \[\[dendrite index\]\]/);
+    assert.match(read(INDEX), /type:\n  - "\[\[dendrite index\]\]"/);
     assert.match(read(cardPath('G-aaaaa')),
                  /type:\n  - "\[\[journal article\]\]"\n  - dendrite card/,
                  'an existing type is kept');
@@ -3997,6 +4017,11 @@ test('each reviewer is given a colour for the manuscript, in reading ' +
                                    'Aly Karsan');
     assert.ok(colour && colour.submenu, 'a colour submenu');
     const orange = colour.submenu.items.find((i) => i.title === 'Orange');
+    const chip = orange.titleContent &&
+        orange.titleContent.querySelector('.dendrite-colour-chip');
+    assert.ok(chip, 'a chip of the colour beside its name');
+    assert.equal(chip.style.getPropertyValue('--dendrite-chip'),
+                 'var(--color-orange)');
     await orange.click();
     await tick(30);
     assert.deepEqual(fm().dendrite_reviewer_colours,
@@ -4294,6 +4319,68 @@ test('in the preview a bubble shows a comment\'s replies and takes a new ' +
     assert.equal(sent.length, 1);
     assert.deepEqual(sent[0].slice(1), ['G-aaaaa', 0, 'reply',
                                         'And the samples.']);
+});
+
+test('a comment\'s link to Google Docs opens outside Obsidian, on the ' +
+     'board and in the preview, never in the window Dendrite is in',
+     async () => {
+    const link = 'https://docs.google.com/document/d/D/edit?disco=x';
+    const card = `The ==cohort==%%[!review] Joshua Bridgers, 2026-10-23: ` +
+        `Why? ${link}%% is large.`;
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', { 'G-aaaaa': card });
+    const opened = [];
+    const was = global.window.open;
+    global.window.open = (u) => opened.push(u);
+    try {
+        const click = (a) => {
+            const e = new h.window.MouseEvent('click', { bubbles: true,
+                                                         cancelable: true });
+            a.dispatchEvent(e);
+            return e.defaultPrevented;
+        };
+        const a = view.cardEls.get('G-aaaaa')
+            .querySelector('a.dendrite-review-link');
+        assert.ok(click(a), 'the window does not follow the link');
+        const { DendritePreview } = require('../src/main.js');
+        const prev = new DendritePreview({ app, updateHeader() {} },
+            { settings: { headingTop: 1 }, focusCard() {} });
+        await prev.onOpen();
+        await prev.setState({ file: INDEX, showComments: true });
+        await tick(30);
+        const b = prev.contentEl.querySelector('a.dendrite-review-link');
+        assert.ok(click(b), 'nor in the preview');
+        assert.deepEqual(opened, [link, link]);
+    } finally {
+        global.window.open = was;
+    }
+});
+
+test('a reply written to a card shows in the preview\'s bubble, though ' +
+     'what the card prints is the same', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n');
+    const card = 'The ==cohort==%%[!review] Claude, 2026-10-23: Say how ' +
+        'many.%% is large.';
+    await app.vault.create(cardPath('G-aaaaa'), card);
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(30);
+    assert.equal(view.contentEl.querySelectorAll(
+        '.dendrite-pbubble .dendrite-review-reply').length, 0);
+    await app.vault.modify(app.vault.getAbstractFileByPath(
+        cardPath('G-aaaaa')), card.replace('many.%%',
+        'many.%%%%[!reply] Derek Tam, 2026-10-23: In Methods.%%'));
+    await tick(500);
+    const shown = view.contentEl.querySelector(
+        '.dendrite-pbubble .dendrite-review-reply');
+    assert.ok(shown, 'the reply is in the bubble');
+    assert.match(shown.textContent, /In Methods\./);
 });
 
 test('threads: each open comment of a manuscript with its card, passage ' +

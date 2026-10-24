@@ -238,6 +238,23 @@ function openExternal(url) {
 }
 
 /**
+ * A comment's links to Google Docs under `el` opened in the browser:
+ * followed in the window, they would take Dendrite's window away from
+ * Obsidian.
+ */
+function externalLinks(el) {
+    for (const a of el.querySelectorAll('a.dendrite-review-link')) {
+        a.target = '_blank';
+        a.rel = 'noopener nofollow';
+        a.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openExternal(a.href);
+        });
+    }
+}
+
+/**
  * A menu of Dendrite's. Obsidian gives a row without an icon no room for
  * one, so its label would start left of the others; here every row keeps
  * the room, and a row has an icon only where it earns one. A menu with
@@ -273,6 +290,19 @@ function localDay(d = new Date()) {
  * `act(action)`; a warning, a deletion, in the theme's warning colour.
  * `colours` { author, current, pick(colour) } adds the reviewer's colour.
  */
+/** A theme colour's name in a menu, after a chip of the colour. */
+function colourTitle(c) {
+    // The document of the window in use, a popout's if it is one.
+    const doc = typeof activeDocument !== 'undefined' ? activeDocument :
+        document;
+    const frag = doc.createDocumentFragment();
+    const chip = frag.appendChild(doc.createElement('span'));
+    chip.className = 'dendrite-colour-chip';
+    chip.style.setProperty('--dendrite-chip', `var(--color-${c})`);
+    frag.append(c[0].toUpperCase() + c.slice(1));
+    return frag;
+}
+
 function showCommentMenu(items, event, act, colours = null) {
     const m = dendriteMenu(false);
     for (const [what, label, warn] of items) {
@@ -288,7 +318,7 @@ function showCommentMenu(items, event, act, colours = null) {
             const sub = i.setSubmenu();
             for (const c of review.REVIEWER_COLOURS) {
                 sub.addItem((x) => {
-                    x.setTitle(c[0].toUpperCase() + c.slice(1))
+                    x.setTitle(colourTitle(c))
                         .onClick(() => colours.pick(c));
                     if (typeof x.setChecked === 'function') {
                         x.setChecked(c === colours.current);
@@ -313,6 +343,27 @@ function openInImageToolkit(app, e) {
         app.plugins.plugins['obsidian-image-toolkit'];
     if (!kit || typeof kit.clickImage !== 'function') return false;
     kit.clickImage(e);
+    return true;
+}
+
+/**
+ * A pane just split off beside another given `share` of the width, the
+ * other the rest: the item holding it in a side-by-side split, and its
+ * neighbour, sized through Obsidian's setDimension where it has one.
+ */
+function narrowSplit(leaf, share = 1 / 3) {
+    let item = leaf;
+    while (item && item.parent && !(item.parent.direction === 'vertical' &&
+        (item.parent.children || []).length > 1)) item = item.parent;
+    const split = item && item.parent;
+    if (!split || typeof item.setDimension !== 'function') return false;
+    const rest = split.children.filter((c) => c !== item);
+    item.setDimension(100 * share);
+    for (const c of rest) {
+        if (typeof c.setDimension === 'function') {
+            c.setDimension(100 * (1 - share) / rest.length);
+        }
+    }
     return true;
 }
 
@@ -1105,6 +1156,7 @@ class DendriteView extends ItemView {
                     (n, what, arg) => this.reviewAction(id, n, what, arg),
                     (n, e, k) => this.commentMenu(id, n, e, k),
                     this.colourOf(), (el) => ownKeys(this.app, el));
+                externalLinks(out);
             }
         } else if (!kind) {
             out.createDiv({ cls: 'dendrite-placeholder',
@@ -3522,6 +3574,7 @@ class DendriteView extends ItemView {
                 (n, what, arg) => this.reviewAction(id, n, what, arg),
                 (n, e, k) => this.commentMenu(id, n, e, k),
                 this.colourOf(), (el) => ownKeys(this.app, el));
+            externalLinks(out);
         }
     }
 
@@ -6765,6 +6818,7 @@ class DendritePreview extends ItemView {
                                                text: '↗' });
                 a.href = url;
                 a.title = 'Open this comment in Google Docs';
+                externalLinks(meta);
             }
             el.createDiv({ cls: 'dendrite-pbubble-text',
                 text: it.kind !== 'suggest' ? text :
@@ -6969,8 +7023,14 @@ class DendritePreview extends ItemView {
                 }
             }
         }
+        // Shown with comments, a block is drawn again when they or their
+        // replies change, though what it prints does not.
+        const said = (id) => !this.showComments ? '' : JSON.stringify(
+            review.reviewItems((this.bodies.get(id) || {}).body || '')
+                .map((x) => [x.text, x.replies]));
         for (const s of segs) {
             const key = (this.showComments ? 'c\u0000' : '') + s.text +
+                '\u0000' + said(s.id) +
                 '\u0000' +
                 core.footnoteBlock(s.cardNotes || []) +
                 '\u0000' + (this.showLeft ? s.left : '') + '\u0000' +
@@ -9503,6 +9563,7 @@ module.exports = class DendritePlugin extends Plugin {
             leaf = ws.createLeafInParent(preview.parent, at);
         } else {
             leaf = ws.getLeaf('split', 'vertical');
+            narrowSplit(leaf);
         }
         await leaf.openFile(file, { active: false });
         return leaf;
@@ -9531,7 +9592,9 @@ module.exports = class DendritePlugin extends Plugin {
             this.app.workspace.revealLeaf(open);
             return;
         }
+        // Beside the board, a third of the width, the board the rest.
         const leaf = this.app.workspace.getLeaf('split', 'vertical');
+        narrowSplit(leaf);
         await leaf.setViewState({ type: PREVIEW, active: false,
                                   state: { file: file.path } });
     }

@@ -238,7 +238,9 @@ function makeApp() {
                 else {
                     fm[kv[1]] = [];
                     while (/^\s+-\s/.test(lines[i + 1] || '')) {
-                        fm[kv[1]].push(lines[++i].replace(/^\s+-\s/, ''));
+                        // Quoted, as Obsidian writes a link or a colon.
+                        fm[kv[1]].push(lines[++i].replace(/^\s+-\s/, '')
+                            .replace(/^"(.*)"$/, '$1'));
                     }
                 }
             }
@@ -267,7 +269,11 @@ function makeApp() {
                 for (const [k, v] of Object.entries(fm)) {
                     if (Array.isArray(v)) {
                         lines.push(k + ':');
-                        for (const x of v) lines.push('  - ' + x);
+                        // Quoted where YAML needs it, as Obsidian writes.
+                        for (const x of v) {
+                            lines.push('  - ' + (/^\[|: /.test(String(x)) ?
+                                JSON.stringify(String(x)) : x));
+                        }
                     } else lines.push(`${k}: ${v}`);
                 }
                 const head = lines.length ?

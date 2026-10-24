@@ -1161,7 +1161,11 @@ function replyBox(parent, send, typing = null) {
     const no = doc.createElement('button');
     no.className = 'dendrite-review-btn';
     no.textContent = 'Cancel';
-    const done = () => form.remove();
+    // Blurred first, so whatever held the keys for it lets them go.
+    const done = () => {
+        box.blur();
+        form.remove();
+    };
     go.onclick = async (e) => {
         if (e && e.stopPropagation) e.stopPropagation();
         const t = box.value.trim();
@@ -1252,6 +1256,9 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                 a.href = url;
                 a.textContent = '↗';
                 a.title = 'Open this comment in Google Docs';
+                // Opened outside Obsidian, never in the window it is in.
+                a.target = '_blank';
+                a.rel = 'noopener nofollow';
                 a.addEventListener('click', (e) => e.stopPropagation());
                 meta.append(' ', a);
             }

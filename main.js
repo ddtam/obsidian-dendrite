@@ -3386,7 +3386,10 @@ var require_review = __commonJS({
       const no = doc.createElement("button");
       no.className = "dendrite-review-btn";
       no.textContent = "Cancel";
-      const done = () => form.remove();
+      const done = () => {
+        box.blur();
+        form.remove();
+      };
       go.onclick = async (e) => {
         if (e && e.stopPropagation) e.stopPropagation();
         const t = box.value.trim();
@@ -3466,6 +3469,8 @@ var require_review = __commonJS({
             a.href = url;
             a.textContent = "\u2197";
             a.title = "Open this comment in Google Docs";
+            a.target = "_blank";
+            a.rel = "noopener nofollow";
             a.addEventListener("click", (e) => e.stopPropagation());
             meta.append(" ", a);
           }
@@ -4816,6 +4821,17 @@ function openExternal(url) {
     window.open(url);
   }
 }
+function externalLinks(el) {
+  for (const a of el.querySelectorAll("a.dendrite-review-link")) {
+    a.target = "_blank";
+    a.rel = "noopener nofollow";
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openExternal(a.href);
+    });
+  }
+}
 function dendriteMenu(icons = true) {
   const { Menu } = require("obsidian");
   return styleMenu(new Menu(), icons);
@@ -4833,6 +4849,15 @@ function localDay(d = /* @__PURE__ */ new Date()) {
   const two = (x) => String(x).padStart(2, "0");
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
 }
+function colourTitle(c) {
+  const doc = typeof activeDocument !== "undefined" ? activeDocument : document;
+  const frag = doc.createDocumentFragment();
+  const chip = frag.appendChild(doc.createElement("span"));
+  chip.className = "dendrite-colour-chip";
+  chip.style.setProperty("--dendrite-chip", `var(--color-${c})`);
+  frag.append(c[0].toUpperCase() + c.slice(1));
+  return frag;
+}
 function showCommentMenu(items, event, act, colours = null) {
   const m = dendriteMenu(false);
   for (const [what, label, warn] of items) {
@@ -4848,7 +4873,7 @@ function showCommentMenu(items, event, act, colours = null) {
       const sub = i.setSubmenu();
       for (const c of review.REVIEWER_COLOURS) {
         sub.addItem((x) => {
-          x.setTitle(c[0].toUpperCase() + c.slice(1)).onClick(() => colours.pick(c));
+          x.setTitle(colourTitle(c)).onClick(() => colours.pick(c));
           if (typeof x.setChecked === "function") {
             x.setChecked(c === colours.current);
           }
@@ -4865,6 +4890,20 @@ function openInImageToolkit(app, e) {
   const kit = app.plugins && app.plugins.plugins && app.plugins.plugins["obsidian-image-toolkit"];
   if (!kit || typeof kit.clickImage !== "function") return false;
   kit.clickImage(e);
+  return true;
+}
+function narrowSplit(leaf, share = 1 / 3) {
+  let item = leaf;
+  while (item && item.parent && !(item.parent.direction === "vertical" && (item.parent.children || []).length > 1)) item = item.parent;
+  const split = item && item.parent;
+  if (!split || typeof item.setDimension !== "function") return false;
+  const rest = split.children.filter((c) => c !== item);
+  item.setDimension(100 * share);
+  for (const c of rest) {
+    if (typeof c.setDimension === "function") {
+      c.setDimension(100 * (1 - share) / rest.length);
+    }
+  }
   return true;
 }
 function styleMenu(m, icons) {
@@ -5587,6 +5626,7 @@ var DendriteView = class extends ItemView {
           this.colourOf(),
           (el) => ownKeys(this.app, el)
         );
+        externalLinks(out);
       }
     } else if (!kind) {
       out.createDiv({
@@ -7914,6 +7954,7 @@ var DendriteView = class extends ItemView {
         this.colourOf(),
         (el2) => ownKeys(this.app, el2)
       );
+      externalLinks(out);
     }
   }
   async deleteActive() {
@@ -10969,6 +11010,7 @@ var DendritePreview = class extends ItemView {
         });
         a.href = url;
         a.title = "Open this comment in Google Docs";
+        externalLinks(meta);
       }
       el.createDiv({
         cls: "dendrite-pbubble-text",
@@ -11172,8 +11214,11 @@ var DendritePreview = class extends ItemView {
         }
       }
     }
+    const said = (id) => !this.showComments ? "" : JSON.stringify(
+      review.reviewItems((this.bodies.get(id) || {}).body || "").map((x) => [x.text, x.replies])
+    );
     for (const s of segs) {
-      const key = (this.showComments ? "c\0" : "") + s.text + "\0" + core.footnoteBlock(s.cardNotes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "");
+      const key = (this.showComments ? "c\0" : "") + s.text + "\0" + said(s.id) + "\0" + core.footnoteBlock(s.cardNotes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "");
       let b = this.blocks.get(s.id);
       if (!b) {
         const el = createDiv({ cls: "dendrite-pblock" });
@@ -13389,6 +13434,7 @@ module.exports = class DendritePlugin extends Plugin {
       leaf = ws.createLeafInParent(preview.parent, at);
     } else {
       leaf = ws.getLeaf("split", "vertical");
+      narrowSplit(leaf);
     }
     await leaf.openFile(file, { active: false });
     return leaf;
@@ -13413,6 +13459,7 @@ module.exports = class DendritePlugin extends Plugin {
       return;
     }
     const leaf = this.app.workspace.getLeaf("split", "vertical");
+    narrowSplit(leaf);
     await leaf.setViewState({
       type: PREVIEW,
       active: false,
