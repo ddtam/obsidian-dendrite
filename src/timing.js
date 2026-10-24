@@ -5,6 +5,7 @@
 
 const stats = new Map();
 const long = { n: 0, total: 0, max: 0 };
+const frames = { n: 0, total: 0, max: 0, layout: 0, scripts: new Map() };
 const watched = new WeakSet();
 let on = false;
 
@@ -15,8 +16,14 @@ function setOn(value) {
     on = !!value;
     if (!on) {
         stats.clear();
-        Object.assign(long, { n: 0, total: 0, max: 0 });
+        clearLong();
     }
+}
+
+function clearLong() {
+    Object.assign(long, { n: 0, total: 0, max: 0 });
+    Object.assign(frames, { n: 0, total: 0, max: 0, layout: 0 });
+    frames.scripts.clear();
 }
 
 function isOn() {
@@ -64,44 +71,72 @@ function wrap(proto, prefix, names) {
     }
 }
 
+/** One long animation frame `e`: its time, layout and scripts. */
+function frame(e) {
+    frames.n++;
+    frames.total += e.duration;
+    frames.max = Math.max(frames.max, e.duration);
+    if (e.styleAndLayoutStart > 0) {
+        frames.layout += e.startTime + e.duration - e.styleAndLayoutStart;
+    }
+    for (const s of e.scripts || []) {
+        const url = String(s.sourceURL || '');
+        const source = url.slice(url.lastIndexOf('/') + 1) || '(unknown)';
+        frames.scripts.set(source,
+                           (frames.scripts.get(source) || 0) + s.duration);
+    }
+}
+
 /**
- * The window's long tasks, any taking 50 ms or more, whoever ran them,
- * Obsidian or another plugin included: how often the window stalls.
+ * The window's stalls, whoever caused them, Obsidian or another plugin
+ * included: long tasks, any taking 50 ms or more, and long animation
+ * frames, which add the time spent on style, layout and painting, and
+ * which scripts ran, by source file.
  */
 function watch(win) {
     if (!win || watched.has(win) || !win.PerformanceObserver) return;
     watched.add(win);
-    try {
-        new win.PerformanceObserver((list) => {
-            if (!on) return;
-            for (const e of list.getEntries()) {
-                long.n++;
-                long.total += e.duration;
-                long.max = Math.max(long.max, e.duration);
-            }
-        }).observe({ entryTypes: ['longtask'] });
-    } catch (err) {
-        // A window without long-task timing.
-    }
+    const observe = (type, each) => {
+        try {
+            new win.PerformanceObserver((list) => {
+                if (on) list.getEntries().forEach(each);
+            }).observe({ type, buffered: false });
+        } catch (err) {
+            // A window without this kind of timing.
+        }
+    };
+    observe('longtask', (e) => {
+        long.n++;
+        long.total += e.duration;
+        long.max = Math.max(long.max, e.duration);
+    });
+    observe('long-animation-frame', frame);
 }
 
 const round = (x) => Math.round(x * 10) / 10;
 
 /**
  * What was recorded since last taken, the steps longest in all first,
- * and cleared: { steps: [{ step, n, total_ms, max_ms }], longtasks },
+ * and cleared: { steps: [{ step, n, total_ms, max_ms }], longtasks,
+ * frames: { n, total_ms, max_ms, layout_ms, scripts: [{ source, ms }] } },
  * or null with nothing recorded.
  */
 function take() {
-    if (!stats.size && !long.n) return null;
+    if (!stats.size && !long.n && !frames.n) return null;
     const steps = [...stats].map(([step, s]) => ({ step, n: s.n,
         total_ms: round(s.total), max_ms: round(s.max) }))
         .sort((a, b) => b.total_ms - a.total_ms);
     const longtasks = { n: long.n, total_ms: round(long.total),
                         max_ms: round(long.max) };
+    const scripts = [...frames.scripts]
+        .map(([source, ms]) => ({ source, ms: round(ms) }))
+        .sort((a, b) => b.ms - a.ms).slice(0, 8);
+    const longframes = { n: frames.n, total_ms: round(frames.total),
+                         max_ms: round(frames.max),
+                         layout_ms: round(frames.layout), scripts };
     stats.clear();
-    Object.assign(long, { n: 0, total: 0, max: 0 });
-    return { steps, longtasks };
+    clearLong();
+    return { steps, longtasks, frames: longframes };
 }
 
-module.exports = { setOn, isOn, record, wrap, watch, take };
+module.exports = { setOn, isOn, record, wrap, watch, take, frame };

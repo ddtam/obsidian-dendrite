@@ -189,31 +189,46 @@ const PATH_PROPS = ['dendrite_csl', 'dendrite_pandoc_defaults',
                     'dendrite_reference_docx'];
 
 /**
- * Where Dendrite says, while it listens for reviews, which port and key
- * to use: outside every vault, readable only by this user.
+ * Dendrite's folder outside every vault, readable only by this user, for
+ * what should not sync with a vault.
  */
-function discoveryPath() {
-    let os;
-    let path;
+function configDir() {
+    const env = typeof process !== 'undefined' && process.env &&
+        process.env.DENDRITE_CONFIG_DIR;
+    if (env) return env;
     try {
-        os = require('os');
-        path = require('path');
+        return require('path').join(require('os').homedir(), '.config',
+                                    'dendrite');
     } catch (err) {
-        return '~/.config/dendrite/review-api.json';
+        return '~/.config/dendrite';
     }
-    return (typeof process !== 'undefined' && process.env &&
-            process.env.DENDRITE_REVIEW_API_FILE) ||
-        path.join(os.homedir(), '.config', 'dendrite', 'review-api.json');
 }
 
-/** Where Dendrite keeps a file of its own outside the vault. */
+/** A file in Dendrite's folder outside the vault, shared by every vault. */
 function configFile(name) {
     try {
-        return require('path').join(require('path').dirname(
-            discoveryPath()), name);
+        return require('path').join(configDir(), name);
     } catch (err) {
-        return `~/.config/dendrite/${name}`;
+        return `${configDir()}/${name}`;
     }
+}
+
+/**
+ * A file of one vault's own outside it, under vaults/<vault name>/, so
+ * that Dendrite in two vaults never writes the same one.
+ */
+function vaultFile(vault, name) {
+    const safe = String(vault).replace(/[^\w .-]/g, '_')
+        .replace(/^\./, '_') || '_';
+    return configFile(`vaults/${safe}/${name}`);
+}
+
+/**
+ * Where Dendrite says, while it listens for reviews in vault `vault`,
+ * which port and key to use.
+ */
+function discoveryPath(vault) {
+    return vaultFile(vault, 'review-api.json');
 }
 
 /** A request to Google through Obsidian, answered as { status, json }. */
@@ -8731,8 +8746,8 @@ class DendriteSettings extends PluginSettingTab {
                      'program, such as an agent, with a key. Each waits ' +
                      'on its manuscript\'s board, and nothing is written ' +
                      'until you add it there. The port and key are in ' +
-                     `${discoveryPath()} while Dendrite listens. Desktop ` +
-                     'only.')
+                     `${discoveryPath(this.app.vault.getName())} while ` +
+                     'Dendrite listens. Desktop only.')
             .addToggle((tg) => tg.setValue(!!s.reviewApi)
                 .onChange(async (v) => {
                     s.reviewApi = v;
@@ -8740,11 +8755,12 @@ class DendriteSettings extends PluginSettingTab {
                     await this.plugin.syncReviewApi();
                 }));
         new Setting(containerEl).setName('Review port')
-            .setDesc('Applied when settings are closed.')
+            .setDesc('0 for any free port. Taken, Dendrite listens on a ' +
+                     'free one instead. Applied when settings are closed.')
             .addText((t) => t.setValue(String(s.reviewApiPort))
                 .onChange((v) => {
                     const n = Number(v);
-                    s.reviewApiPort = Number.isInteger(n) && n > 0 &&
+                    s.reviewApiPort = Number.isInteger(n) && n >= 0 &&
                         n < 65536 ? n : 27130;
                     save();
                 }))
@@ -8753,8 +8769,8 @@ class DendriteSettings extends PluginSettingTab {
                 await save();
                 await this.plugin.syncReviewApi(true);
                 new Notice('Dendrite: a new review key is in ' +
-                           `${discoveryPath()}; the old one no longer ` +
-                           'works.');
+                           `${discoveryPath(this.app.vault.getName())}; ` +
+                           'the old one no longer works.');
             }));
 
         heading('Google Docs');
@@ -8832,7 +8848,8 @@ class DendriteSettings extends PluginSettingTab {
         new Setting(containerEl).setName('Record timings')
             .setDesc('While on, writes how long each of Dendrite\'s steps ' +
                      'took, and how often the window stalled, to ' +
-                     `${configFile(TIMINGS)} every 10 seconds, to find ` +
+                     `${vaultFile(this.app.vault.getName(), TIMINGS)} ` +
+                     'every 10 seconds, to find ' +
                      'what makes it slow. Only step names and times are ' +
                      'written, never text. Desktop only.')
             .addToggle((t) => t.setValue(!!s.recordTimings)
@@ -8868,7 +8885,7 @@ module.exports = class DendritePlugin extends Plugin {
      * one line; the file kept under 5 MB by starting it again.
      */
     writeTimings() {
-        if (!timing.isOn()) return;
+        if (!timing.isOn() || this.profiling) return;
         timing.watch(window);
         for (const t of [VIEW, PREVIEW]) {
             for (const l of this.app.workspace.getLeavesOfType(t)) {
@@ -8879,7 +8896,7 @@ module.exports = class DendritePlugin extends Plugin {
         if (!got) return;
         try {
             const fs = require('fs');
-            const file = configFile(TIMINGS);
+            const file = vaultFile(this.app.vault.getName(), TIMINGS);
             fs.mkdirSync(require('path').dirname(file), { recursive: true });
             if (fs.existsSync(file) && fs.statSync(file).size > 5e6) {
                 fs.renameSync(file, file + '.old');
@@ -8984,6 +9001,9 @@ module.exports = class DendritePlugin extends Plugin {
             false, (v) => v.merge('above'));
         viewCommand('merge-into-parent', 'Merge card into its parent',
             false, (v) => v.merge('parent'));
+        viewCommand('profile', 'Profile the board and preview, on a ' +
+            'manuscript marked dendrite_profile', false,
+            (v) => this.runProfile(v));
         // The same moves in the editor's own right-click menu, beside cut
         // and copy, when the editor is a card's.
         this.registerEvent(this.app.workspace.on('editor-menu',
@@ -9035,23 +9055,40 @@ module.exports = class DendritePlugin extends Plugin {
                 .toString('hex');
             await this.saveSettings();
         }
+        const start = (port) => require('./reviewapi.js').start({
+            port, token: s.reviewApiKey,
+            submit: (d) => this.submitReview(d),
+            status: (id) => this.reviewStatus(id),
+            threads: (m, who) => this.threadsFor(m, who) });
         try {
-            this.reviewServer = await require('./reviewapi.js').start({
-                port: want, token: s.reviewApiKey,
-                submit: (d) => this.submitReview(d),
-                status: (id) => this.reviewStatus(id),
-                threads: (m, who) => this.threadsFor(m, who) });
+            try {
+                this.reviewServer = await start(want);
+            } catch (err) {
+                // Taken, by another program or Dendrite in another
+                // vault: any free port, which the discovery file gives.
+                if (err.code !== 'EADDRINUSE' || want === 0) throw err;
+                this.reviewServer = await start(0);
+            }
         } catch (err) {
             new Notice(`Dendrite: could not listen for reviews on port ` +
-                       `${want} (${err.message}). Another program, or ` +
-                       'Dendrite in another vault, may have it; choose ' +
-                       'another port in settings.', 10000);
+                       `${want} (${err.message}).`, 10000);
             return;
         }
         this.reviewPort = want;
         this.reviewKey = s.reviewApiKey;
         const fs = require('fs');
-        const file = discoveryPath();
+        const vault = this.app.vault.getName();
+        const file = discoveryPath(vault);
+        // Before 0.23 the file was shared by every vault: this vault's is
+        // stale, and would send a program to the wrong place.
+        try {
+            const old = configFile('review-api.json');
+            if (JSON.parse(fs.readFileSync(old, 'utf8')).vault === vault) {
+                fs.unlinkSync(old);
+            }
+        } catch (err) {
+            // None, or another vault's.
+        }
         fs.mkdirSync(require('path').dirname(file), { recursive: true });
         const base = 'http://127.0.0.1:' +
             `${this.reviewServer.address().port}/dendrite`;
@@ -9071,7 +9108,7 @@ module.exports = class DendritePlugin extends Plugin {
         // its own since.
         try {
             const fs = require('fs');
-            const file = discoveryPath();
+            const file = discoveryPath(this.app.vault.getName());
             const d = JSON.parse(fs.readFileSync(file, 'utf8'));
             if (d.pid === process.pid && d.key === this.reviewKey) {
                 fs.unlinkSync(file);
@@ -9079,6 +9116,59 @@ module.exports = class DendritePlugin extends Plugin {
         } catch (err) {
             // Gone already, or not ours.
         }
+    }
+
+    // ---- profiling ------------------------------------------------------
+
+    /**
+     * Profile the board `view` (profile.js), when its index asks to be,
+     * and append a line per phase to this vault's profile.jsonl outside
+     * it. `opts` as profile.js takes them. Answers the rows, or null when
+     * not run.
+     */
+    async runProfile(view, opts = {}) {
+        const { allowed, profile } = require('./profile.js');
+        if (!allowed(this.app, view.file)) {
+            new Notice('Dendrite: profiling saves into a card, so it runs ' +
+                       'only on a manuscript whose index has ' +
+                       'dendrite_profile: true, such as a test copy.');
+            return null;
+        }
+        if (this.profiling) return null;
+        this.profiling = true;
+        new Notice('Dendrite: profiling, about 30 seconds.');
+        let rows;
+        try {
+            rows = await profile(view, Object.assign({}, opts, {
+                openPreview: async () => {
+                    await this.openPreview(view.file);
+                    const l = this.previewLeaf(view.file);
+                    return l && l.view;
+                },
+                closePreview: () => {
+                    const l = this.previewLeaf(view.file);
+                    if (l) l.detach();
+                } }));
+        } catch (err) {
+            new Notice(`Dendrite: profiling stopped (${err.message}).`);
+            return null;
+        } finally {
+            this.profiling = false;
+        }
+        const file = vaultFile(this.app.vault.getName(), 'profile.jsonl');
+        const head = { at: new Date().toISOString(),
+                       version: this.manifest && this.manifest.version };
+        try {
+            const fs = require('fs');
+            fs.mkdirSync(require('path').dirname(file), { recursive: true });
+            fs.appendFileSync(file, rows.map((r) => JSON.stringify(
+                Object.assign({}, head, r)) + '\n').join(''),
+                { mode: 0o600 });
+            new Notice(`Dendrite: profile written to ${file}.`);
+        } catch (err) {
+            new Notice(`Dendrite: profile not written (${err.message}).`);
+        }
+        return rows;
     }
 
     reviewQueue() {

@@ -4373,6 +4373,7 @@ var require_timing = __commonJS({
     "use strict";
     var stats = /* @__PURE__ */ new Map();
     var long = { n: 0, total: 0, max: 0 };
+    var frames = { n: 0, total: 0, max: 0, layout: 0, scripts: /* @__PURE__ */ new Map() };
     var watched = /* @__PURE__ */ new WeakSet();
     var on = false;
     var now = () => typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -4380,8 +4381,13 @@ var require_timing = __commonJS({
       on = !!value;
       if (!on) {
         stats.clear();
-        Object.assign(long, { n: 0, total: 0, max: 0 });
+        clearLong();
       }
+    }
+    function clearLong() {
+      Object.assign(long, { n: 0, total: 0, max: 0 });
+      Object.assign(frames, { n: 0, total: 0, max: 0, layout: 0 });
+      frames.scripts.clear();
     }
     function isOn() {
       return on;
@@ -4419,24 +4425,43 @@ var require_timing = __commonJS({
         };
       }
     }
+    function frame(e) {
+      frames.n++;
+      frames.total += e.duration;
+      frames.max = Math.max(frames.max, e.duration);
+      if (e.styleAndLayoutStart > 0) {
+        frames.layout += e.startTime + e.duration - e.styleAndLayoutStart;
+      }
+      for (const s of e.scripts || []) {
+        const url = String(s.sourceURL || "");
+        const source = url.slice(url.lastIndexOf("/") + 1) || "(unknown)";
+        frames.scripts.set(
+          source,
+          (frames.scripts.get(source) || 0) + s.duration
+        );
+      }
+    }
     function watch(win) {
       if (!win || watched.has(win) || !win.PerformanceObserver) return;
       watched.add(win);
-      try {
-        new win.PerformanceObserver((list) => {
-          if (!on) return;
-          for (const e of list.getEntries()) {
-            long.n++;
-            long.total += e.duration;
-            long.max = Math.max(long.max, e.duration);
-          }
-        }).observe({ entryTypes: ["longtask"] });
-      } catch (err) {
-      }
+      const observe = (type, each) => {
+        try {
+          new win.PerformanceObserver((list) => {
+            if (on) list.getEntries().forEach(each);
+          }).observe({ type, buffered: false });
+        } catch (err) {
+        }
+      };
+      observe("longtask", (e) => {
+        long.n++;
+        long.total += e.duration;
+        long.max = Math.max(long.max, e.duration);
+      });
+      observe("long-animation-frame", frame);
     }
     var round = (x) => Math.round(x * 10) / 10;
     function take() {
-      if (!stats.size && !long.n) return null;
+      if (!stats.size && !long.n && !frames.n) return null;
       const steps = [...stats].map(([step, s]) => ({
         step,
         n: s.n,
@@ -4448,11 +4473,19 @@ var require_timing = __commonJS({
         total_ms: round(long.total),
         max_ms: round(long.max)
       };
+      const scripts = [...frames.scripts].map(([source, ms]) => ({ source, ms: round(ms) })).sort((a, b) => b.ms - a.ms).slice(0, 8);
+      const longframes = {
+        n: frames.n,
+        total_ms: round(frames.total),
+        max_ms: round(frames.max),
+        layout_ms: round(frames.layout),
+        scripts
+      };
       stats.clear();
-      Object.assign(long, { n: 0, total: 0, max: 0 });
-      return { steps, longtasks };
+      clearLong();
+      return { steps, longtasks, frames: longframes };
     }
-    module2.exports = { setOn, isOn, record, wrap, watch, take };
+    module2.exports = { setOn, isOn, record, wrap, watch, take, frame };
   }
 });
 
@@ -4716,6 +4749,79 @@ var require_reviewapi = __commonJS({
   }
 });
 
+// src/profile.js
+var require_profile = __commonJS({
+  "src/profile.js"(exports2, module2) {
+    "use strict";
+    var timing2 = require_timing();
+    var PHASE_WAIT = 1500;
+    var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    function allowed(app, file) {
+      const c = file && app.metadataCache.getFileCache(file);
+      return !!(c && c.frontmatter && c.frontmatter.dendrite_profile === true);
+    }
+    async function profile(view, hooks) {
+      const app = view.app;
+      const saves = hooks.saves || 12;
+      const every = hooks.every === void 0 ? 400 : hooks.every;
+      const wait = hooks.wait === void 0 ? PHASE_WAIT : hooks.wait;
+      const first = view.root.children[0];
+      const card = first && view.cardFile(first.id);
+      if (!card) throw new Error("the manuscript has no card to save into");
+      const base = await app.vault.read(card);
+      const was = timing2.isOn();
+      const rows = [];
+      const phase = async (name, run) => {
+        timing2.take();
+        const t0 = performance.now();
+        await run();
+        const ran = performance.now() - t0;
+        await sleep(wait);
+        const got = timing2.take() || { steps: [] };
+        rows.push(Object.assign({
+          phase: name,
+          ran_ms: Math.round(ran)
+        }, got, {
+          steps: got.steps.slice(0, 10)
+        }));
+      };
+      const save = async () => {
+        for (let k = 1; k <= saves; k++) {
+          await app.vault.modify(card, base + "\nProfile " + "x".repeat(k));
+          await sleep(every);
+        }
+      };
+      timing2.setOn(true);
+      timing2.watch(view.contentEl.ownerDocument.defaultView);
+      let preview = null;
+      try {
+        await phase("redraw the board", () => view.render());
+        await phase("open the preview", async () => {
+          preview = await hooks.openPreview();
+        });
+        await phase(`${saves} saves, preview open`, save);
+        await phase("scroll the preview", async () => {
+          const doc = preview && preview.contentEl.querySelector(
+            ".dendrite-preview-doc"
+          );
+          for (let k = 0; k < 40 && doc; k++) {
+            doc.scrollTop += 120;
+            await sleep(16);
+          }
+        });
+        await phase("close the preview", () => hooks.closePreview());
+        await phase(`${saves} saves, preview closed`, save);
+      } finally {
+        await app.vault.modify(card, base);
+        timing2.take();
+        timing2.setOn(was);
+      }
+      return rows;
+    }
+    module2.exports = { allowed, profile };
+  }
+});
+
 // src/main.js
 var {
   ItemView,
@@ -4868,25 +4974,32 @@ var PATH_PROPS = [
   "dendrite_pandoc_defaults",
   "dendrite_reference_docx"
 ];
-function discoveryPath() {
-  let os;
-  let path;
+function configDir() {
+  const env = typeof process !== "undefined" && process.env && process.env.DENDRITE_CONFIG_DIR;
+  if (env) return env;
   try {
-    os = require("os");
-    path = require("path");
+    return require("path").join(
+      require("os").homedir(),
+      ".config",
+      "dendrite"
+    );
   } catch (err) {
-    return "~/.config/dendrite/review-api.json";
+    return "~/.config/dendrite";
   }
-  return typeof process !== "undefined" && process.env && process.env.DENDRITE_REVIEW_API_FILE || path.join(os.homedir(), ".config", "dendrite", "review-api.json");
 }
 function configFile(name) {
   try {
-    return require("path").join(require("path").dirname(
-      discoveryPath()
-    ), name);
+    return require("path").join(configDir(), name);
   } catch (err) {
-    return `~/.config/dendrite/${name}`;
+    return `${configDir()}/${name}`;
   }
+}
+function vaultFile(vault, name) {
+  const safe = String(vault).replace(/[^\w .-]/g, "_").replace(/^\./, "_") || "_";
+  return configFile(`vaults/${safe}/${name}`);
+}
+function discoveryPath(vault) {
+  return vaultFile(vault, "review-api.json");
 }
 async function googleRequest(req) {
   const res = await requestUrl({
@@ -12699,20 +12812,20 @@ var DendriteSettings = class extends PluginSettingTab {
       s.replyName = v.trim();
       save();
     }));
-    new Setting(containerEl).setName("Accept reviews from programs on this computer").setDesc(`Listens on 127.0.0.1 for review comments sent by a program, such as an agent, with a key. Each waits on its manuscript's board, and nothing is written until you add it there. The port and key are in ${discoveryPath()} while Dendrite listens. Desktop only.`).addToggle((tg) => tg.setValue(!!s.reviewApi).onChange(async (v) => {
+    new Setting(containerEl).setName("Accept reviews from programs on this computer").setDesc(`Listens on 127.0.0.1 for review comments sent by a program, such as an agent, with a key. Each waits on its manuscript's board, and nothing is written until you add it there. The port and key are in ${discoveryPath(this.app.vault.getName())} while Dendrite listens. Desktop only.`).addToggle((tg) => tg.setValue(!!s.reviewApi).onChange(async (v) => {
       s.reviewApi = v;
       await save();
       await this.plugin.syncReviewApi();
     }));
-    new Setting(containerEl).setName("Review port").setDesc("Applied when settings are closed.").addText((t) => t.setValue(String(s.reviewApiPort)).onChange((v) => {
+    new Setting(containerEl).setName("Review port").setDesc("0 for any free port. Taken, Dendrite listens on a free one instead. Applied when settings are closed.").addText((t) => t.setValue(String(s.reviewApiPort)).onChange((v) => {
       const n = Number(v);
-      s.reviewApiPort = Number.isInteger(n) && n > 0 && n < 65536 ? n : 27130;
+      s.reviewApiPort = Number.isInteger(n) && n >= 0 && n < 65536 ? n : 27130;
       save();
     })).addButton((b) => b.setButtonText("New key").onClick(async () => {
       s.reviewApiKey = "";
       await save();
       await this.plugin.syncReviewApi(true);
-      new Notice(`Dendrite: a new review key is in ${discoveryPath()}; the old one no longer works.`);
+      new Notice(`Dendrite: a new review key is in ${discoveryPath(this.app.vault.getName())}; the old one no longer works.`);
     }));
     heading("Google Docs");
     new Setting(containerEl).setName("Google OAuth client").setDesc("The JSON of a Desktop app client from your Google Cloud project, pasted whole. It syncs with the vault; Google treats a desktop client's secret as not confidential.").addTextArea((t) => t.setValue(s.googleClientJson || "").setPlaceholder('{"installed": {"client_id": ...}}').onChange((v) => {
@@ -12753,7 +12866,7 @@ var DendriteSettings = class extends PluginSettingTab {
       save();
     }));
     heading("Diagnostics");
-    new Setting(containerEl).setName("Record timings").setDesc(`While on, writes how long each of Dendrite's steps took, and how often the window stalled, to ${configFile(TIMINGS)} every 10 seconds, to find what makes it slow. Only step names and times are written, never text. Desktop only.`).addToggle((t) => t.setValue(!!s.recordTimings).setDisabled(!Platform.isDesktopApp).onChange((v) => {
+    new Setting(containerEl).setName("Record timings").setDesc(`While on, writes how long each of Dendrite's steps took, and how often the window stalled, to ${vaultFile(this.app.vault.getName(), TIMINGS)} every 10 seconds, to find what makes it slow. Only step names and times are written, never text. Desktop only.`).addToggle((t) => t.setValue(!!s.recordTimings).setDisabled(!Platform.isDesktopApp).onChange((v) => {
       s.recordTimings = v;
       timing.setOn(v && Platform.isDesktopApp);
       save();
@@ -12798,7 +12911,7 @@ module.exports = class DendritePlugin extends Plugin {
    * one line; the file kept under 5 MB by starting it again.
    */
   writeTimings() {
-    if (!timing.isOn()) return;
+    if (!timing.isOn() || this.profiling) return;
     timing.watch(window);
     for (const t of [VIEW, PREVIEW]) {
       for (const l of this.app.workspace.getLeavesOfType(t)) {
@@ -12809,7 +12922,7 @@ module.exports = class DendritePlugin extends Plugin {
     if (!got) return;
     try {
       const fs = require("fs");
-      const file = configFile(TIMINGS);
+      const file = vaultFile(this.app.vault.getName(), TIMINGS);
       fs.mkdirSync(require("path").dirname(file), { recursive: true });
       if (fs.existsSync(file) && fs.statSync(file).size > 5e6) {
         fs.renameSync(file, file + ".old");
@@ -12938,6 +13051,12 @@ module.exports = class DendritePlugin extends Plugin {
       false,
       (v) => v.merge("parent")
     );
+    viewCommand(
+      "profile",
+      "Profile the board and preview, on a manuscript marked dendrite_profile",
+      false,
+      (v) => this.runProfile(v)
+    );
     this.registerEvent(this.app.workspace.on(
       "editor-menu",
       (menu, editor, info) => {
@@ -12974,22 +13093,36 @@ module.exports = class DendritePlugin extends Plugin {
       s.reviewApiKey = require("crypto").randomBytes(24).toString("hex");
       await this.saveSettings();
     }
+    const start = (port) => require_reviewapi().start({
+      port,
+      token: s.reviewApiKey,
+      submit: (d) => this.submitReview(d),
+      status: (id) => this.reviewStatus(id),
+      threads: (m, who) => this.threadsFor(m, who)
+    });
     try {
-      this.reviewServer = await require_reviewapi().start({
-        port: want,
-        token: s.reviewApiKey,
-        submit: (d) => this.submitReview(d),
-        status: (id) => this.reviewStatus(id),
-        threads: (m, who) => this.threadsFor(m, who)
-      });
+      try {
+        this.reviewServer = await start(want);
+      } catch (err) {
+        if (err.code !== "EADDRINUSE" || want === 0) throw err;
+        this.reviewServer = await start(0);
+      }
     } catch (err) {
-      new Notice(`Dendrite: could not listen for reviews on port ${want} (${err.message}). Another program, or Dendrite in another vault, may have it; choose another port in settings.`, 1e4);
+      new Notice(`Dendrite: could not listen for reviews on port ${want} (${err.message}).`, 1e4);
       return;
     }
     this.reviewPort = want;
     this.reviewKey = s.reviewApiKey;
     const fs = require("fs");
-    const file = discoveryPath();
+    const vault = this.app.vault.getName();
+    const file = discoveryPath(vault);
+    try {
+      const old = configFile("review-api.json");
+      if (JSON.parse(fs.readFileSync(old, "utf8")).vault === vault) {
+        fs.unlinkSync(old);
+      }
+    } catch (err) {
+    }
     fs.mkdirSync(require("path").dirname(file), { recursive: true });
     const base = `http://127.0.0.1:${this.reviewServer.address().port}/dendrite`;
     fs.writeFileSync(file, JSON.stringify({
@@ -13008,13 +13141,69 @@ module.exports = class DendritePlugin extends Plugin {
     await new Promise((r) => server.close(() => r()));
     try {
       const fs = require("fs");
-      const file = discoveryPath();
+      const file = discoveryPath(this.app.vault.getName());
       const d = JSON.parse(fs.readFileSync(file, "utf8"));
       if (d.pid === process.pid && d.key === this.reviewKey) {
         fs.unlinkSync(file);
       }
     } catch (err) {
     }
+  }
+  // ---- profiling ------------------------------------------------------
+  /**
+   * Profile the board `view` (profile.js), when its index asks to be,
+   * and append a line per phase to this vault's profile.jsonl outside
+   * it. `opts` as profile.js takes them. Answers the rows, or null when
+   * not run.
+   */
+  async runProfile(view, opts = {}) {
+    const { allowed, profile } = require_profile();
+    if (!allowed(this.app, view.file)) {
+      new Notice("Dendrite: profiling saves into a card, so it runs only on a manuscript whose index has dendrite_profile: true, such as a test copy.");
+      return null;
+    }
+    if (this.profiling) return null;
+    this.profiling = true;
+    new Notice("Dendrite: profiling, about 30 seconds.");
+    let rows;
+    try {
+      rows = await profile(view, Object.assign({}, opts, {
+        openPreview: async () => {
+          await this.openPreview(view.file);
+          const l = this.previewLeaf(view.file);
+          return l && l.view;
+        },
+        closePreview: () => {
+          const l = this.previewLeaf(view.file);
+          if (l) l.detach();
+        }
+      }));
+    } catch (err) {
+      new Notice(`Dendrite: profiling stopped (${err.message}).`);
+      return null;
+    } finally {
+      this.profiling = false;
+    }
+    const file = vaultFile(this.app.vault.getName(), "profile.jsonl");
+    const head = {
+      at: (/* @__PURE__ */ new Date()).toISOString(),
+      version: this.manifest && this.manifest.version
+    };
+    try {
+      const fs = require("fs");
+      fs.mkdirSync(require("path").dirname(file), { recursive: true });
+      fs.appendFileSync(
+        file,
+        rows.map((r) => JSON.stringify(
+          Object.assign({}, head, r)
+        ) + "\n").join(""),
+        { mode: 384 }
+      );
+      new Notice(`Dendrite: profile written to ${file}.`);
+    } catch (err) {
+      new Notice(`Dendrite: profile not written (${err.message}).`);
+    }
+    return rows;
   }
   reviewQueue() {
     return this.settings.reviewQueue || [];

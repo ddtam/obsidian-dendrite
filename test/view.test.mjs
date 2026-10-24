@@ -26,6 +26,9 @@ const submenuOf = (menu, title) =>
     menu.items.find((i) => i.title === title).submenu;
 const INDEX = 'W/Grant/Grant.md';
 
+// The app the settings tab is given: only the vault's name is read.
+const SETTINGS_APP = { vault: { getName: () => 'Vault' } };
+
 async function open(indexText, cards = {}) {
     const app = h.makeApp();
     app.vault.folders.add('W/Grant/cards');
@@ -1076,7 +1079,7 @@ test('merging keeps the less mature status', async () => {
 test('settings are grouped under headings by what they affect', () => {
     const { DendriteSettings } = require('../src/main.js');
     h.obsidian.settingsLog = [];
-    const tab = new DendriteSettings({}, {
+    const tab = new DendriteSettings(SETTINGS_APP, {
         settings: { writingFolder: 'Writing', headingTop: 1, cardWidth: 380,
                     autosaveMs: 600, openInDendrite: true, vimKeys: true,
                     manageLinter: true, lintCards: true,
@@ -2577,8 +2580,11 @@ test('turned on, Dendrite listens for reviews with a key it writes to the ' +
     const os = require('os');
     const path = require('path');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dendrite-api-'));
-    const file = path.join(dir, 'review-api.json');
-    process.env.DENDRITE_REVIEW_API_FILE = file;
+    const file = path.join(dir, 'vaults', 'Vault', 'review-api.json');
+    process.env.DENDRITE_CONFIG_DIR = dir;
+    // Before 0.23 one file served every vault: this vault's goes.
+    const legacy = path.join(dir, 'review-api.json');
+    fs.writeFileSync(legacy, JSON.stringify({ vault: 'Vault' }));
     const { app } = await open(
         '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
         { 'G-aaaaa': 'Each patient gave paired samples.' });
@@ -2592,6 +2598,8 @@ test('turned on, Dendrite listens for reviews with a key it writes to the ' +
     try {
         await p.syncReviewApi();
         const d = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.ok(!fs.existsSync(legacy), 'the shared file is gone');
+        assert.equal(d.vault, 'Vault');
         assert.equal(d.key.length, 48, 'a key was made');
         assert.equal(d.key, p.settings.reviewApiKey);
         assert.equal(fs.statSync(file).mode & 0o777, 0o600);
@@ -2614,7 +2622,66 @@ test('turned on, Dendrite listens for reviews with a key it writes to the ' +
         await assert.rejects(fetch(d.url, { method: 'POST' }));
     } finally {
         await p.stopReviewApi();
-        delete process.env.DENDRITE_REVIEW_API_FILE;
+        delete process.env.DENDRITE_CONFIG_DIR;
+        fs.rmSync(dir, { recursive: true });
+    }
+});
+
+test('Dendrite in two vaults on one port: each listens, the second on a ' +
+     'free port, and writes its own discovery file', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dendrite-api-'));
+    process.env.DENDRITE_CONFIG_DIR = dir;
+    const legacy = path.join(dir, 'review-api.json');
+    fs.writeFileSync(legacy, JSON.stringify({ vault: 'elsewhere' }));
+    const taken = require('net').createServer();
+    await new Promise((r) => taken.listen(0, '127.0.0.1', r));
+    const port = taken.address().port;
+    const plugin = async (vault) => {
+        const { app } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+            { 'G-aaaaa': 'Text.' });
+        app.vault.getName = () => vault;
+        const p = new DendritePlugin();
+        p.app = app;
+        p.settings = { reviewApi: true, reviewApiPort: port,
+                       reviewApiKey: '', reviewQueue: [] };
+        p.saveData = async () => {};
+        p.openViews = () => [];
+        return p;
+    };
+    const a = await plugin('second_brain');
+    const b = await plugin('test_vault');
+    try {
+        await a.syncReviewApi();
+        await b.syncReviewApi();
+        const read = (v) => JSON.parse(fs.readFileSync(
+            path.join(dir, 'vaults', v, 'review-api.json'), 'utf8'));
+        const da = read('second_brain');
+        const db = read('test_vault');
+        assert.notEqual(da.url, db.url, 'two addresses');
+        assert.ok(!da.url.includes(`:${port}/`), 'the taken port avoided');
+        assert.notEqual(da.key, db.key);
+        assert.ok(fs.existsSync(legacy), 'another vault\'s file is kept');
+        for (const d of [da, db]) {
+            const res = await fetch(d.url, { method: 'POST', headers: {
+                authorization: `Bearer ${d.key}`,
+                'content-type': 'application/json' },
+                body: JSON.stringify({ manuscript: 'G', items: [
+                    { card: 'aaaaa', quote: 'Text', text: 'Why?',
+                      author: 'Claude' }] }) });
+            assert.equal(res.status, 202);
+        }
+        assert.equal(a.settings.reviewQueue.length, 1);
+        assert.equal(b.settings.reviewQueue.length, 1);
+    } finally {
+        await a.stopReviewApi();
+        await b.stopReviewApi();
+        taken.close();
+        delete process.env.DENDRITE_CONFIG_DIR;
         fs.rmSync(dir, { recursive: true });
     }
 });
@@ -2805,7 +2872,7 @@ test('the Google client and Picker key can be pasted into the settings, ' +
     const os = require('os');
     const path = require('path');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dendrite-g-'));
-    process.env.DENDRITE_REVIEW_API_FILE = path.join(dir, 'review-api.json');
+    process.env.DENDRITE_CONFIG_DIR = dir;
     try {
         const p = new DendritePlugin();
         p.settings = { googleClientJson: '', googlePickerKey: '' };
@@ -2825,7 +2892,7 @@ test('the Google client and Picker key can be pasted into the settings, ' +
         p.settings.googleClientJson = 'not json';
         assert.equal(p.googleClient(), null, 'unreadable: none');
     } finally {
-        delete process.env.DENDRITE_REVIEW_API_FILE;
+        delete process.env.DENDRITE_CONFIG_DIR;
         fs.rmSync(dir, { recursive: true });
     }
 });
@@ -2916,7 +2983,7 @@ test('pasting the Google client in the settings unlocks signing in ' +
     const plugin = { settings, saveSettings() {}, googleToken: () => null,
         googleClient: () => (settings.googleClientJson ?
             { clientId: 'x' } : null) };
-    const tab = new DendriteSettings({}, plugin);
+    const tab = new DendriteSettings(SETTINGS_APP, plugin);
     tab.display();
     const named = (n) => h.obsidian.settingsLog.find((x) => x.name === n);
     const account = named('Google account');
