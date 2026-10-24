@@ -197,6 +197,62 @@ test('a card drawn while a column is scrolled by hand does not pull the ' +
     assert.equal(centred, 3);
 });
 
+test('a board scrolled sideways by hand stays there as cards are drawn ' +
+     'and as a sync changes the index', async () => {
+    const { app, view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
+    view.active = 'G-aaaaa';
+    view.applyActive(false);
+    let centred = 0;
+    const centre = view.centre.bind(view);
+    view.centre = (...a) => { centred++; return centre(...a); };
+    // A sideways swipe on a trackpad, which the board scrolls itself.
+    const col = view.board.querySelectorAll('.dendrite-col')[1];
+    view.onWheel({ target: col, deltaX: 300, deltaY: 2, deltaMode: 0,
+                   preventDefault() {} });
+    view.board.scrollLeft = 300;
+    view.invalidate('G-aaaaa');
+    view.cardEls.get('G-aaaaa').addClass('is-pending');
+    await view.renderCard('G-aaaaa');
+    assert.equal(centred, 0, 'a card drawn does not pull the board back');
+    // Another device adds a card to the index.
+    const f = app.vault.getAbstractFileByPath(INDEX);
+    await app.vault.modify(f, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|A]]\n    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n' +
+        '- [[G-ddddd|D]]\n');
+    await tick(400);
+    assert.ok(view.byId.has('G-ddddd'), 'the index was re-read');
+    assert.equal(centred, 0, 'a sync does not pull the board back');
+    assert.equal(view.board.scrollLeft, 300, 'kept where it was scrolled');
+    assert.ok(view.cardEls.get('G-aaaaa').hasClass('is-active'),
+              'the active card is still shown as active');
+    // Moving to a card centres again.
+    await view.select('G-ccccc');
+    assert.equal(centred, 1);
+});
+
+test('a phone\'s touch scroll counts as by hand when the board is rebuilt',
+     async () => {
+    const { app, view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    view.active = 'G-aaaaa';
+    view.applyActive(false);
+    let centred = 0;
+    const centre = view.centre.bind(view);
+    view.centre = (...a) => { centred++; return centre(...a); };
+    view.scrolledByHand = true;
+    const f = app.vault.getAbstractFileByPath(INDEX);
+    await app.vault.modify(f, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-bbbbb|B]]\n- [[G-aaaaa|A]]\n');
+    await tick(400);
+    assert.deepEqual(view.root.children.map((n) => n.id),
+                     ['G-bbbbb', 'G-aaaaa'], 'the index was re-read');
+    assert.equal(centred, 0, 'not pulled back to the active card');
+});
+
 test('leaving the editor saves at once, before the autosave fires',
      async () => {
     const { view, read, text } = await open('---\ndendrite_prefix: G\n---\n');
@@ -987,6 +1043,41 @@ test('the preview prints by role, follows edits, and links to the board',
     assert.equal(scrolled[0].block, 'center',
                  'the card selected is brought to the middle');
     assert.ok(!b.hasClass('is-active'));
+});
+
+test('a preview whose parts are never seen scrolling into view draws ' +
+     'them itself, and a failure to draw says so', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|p]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), '# Aims');
+    await app.vault.create(cardPath('G-bbbbb'), 'The prose.');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    // As on the iPad: the observer that draws parts in view never fires.
+    view.observer = { observe() {}, unobserve() {}, disconnect() {} };
+    h.window.document.body.appendChild(view.contentEl);
+    h.notices.length = 0;
+    await view.setState({ file: INDEX });
+    const drawn = () => [...view.contentEl.querySelectorAll(
+        '.dendrite-pblock:not(.is-pending):not(.is-empty)')]
+        .map((b) => b.textContent.trim());
+    assert.deepEqual(drawn(), [], 'nothing drawn yet');
+    await tick(1700);
+    assert.deepEqual(drawn(), ['# Aims', 'The prose.']);
+    assert.match(h.notices.join('|'), /drew 2 of 2 parts itself/);
+    // A refresh that throws shows its message, once.
+    h.notices.length = 0;
+    app.vault.cachedRead = async () => { throw new Error('no read'); };
+    await view.refresh();
+    await view.refresh();
+    assert.deepEqual(h.notices,
+                     ['Dendrite: the preview could not draw: no read']);
+    await view.onClose();
+    view.contentEl.remove();
 });
 
 test('the preview gathers footnotes under each section or at the end',

@@ -20,6 +20,24 @@
     box-sizing: border-box;
     border-bottom: 1px solid var(--background-modifier-border);
     flex: 0 0 auto;
+    /* One line however narrow the pane, as on a tablet: the tally gives
+       way first, then the bar scrolls sideways. */
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+}
+
+.dendrite-bar > * {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.dendrite-bar > .dendrite-tally {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .dendrite-title {
@@ -1699,8 +1717,21 @@ button.dendrite-review-btn:hover {
 .dendrite-pcomments-pos {
     font-size: var(--font-ui-small);
     color: var(--text-muted);
-    min-width: 6em;
+    font-variant-numeric: tabular-nums;
+    min-width: 4.5em;
     text-align: center;
+}
+/* No comment to count: the arrows sit together. */
+.dendrite-pcomments-pos:empty {
+    min-width: 0;
+}
+
+/* Obsidian's buttons on a tablet or phone are wider and taller than
+   the bar's on the desktop, which pushes the bar past the pane. */
+.is-mobile .dendrite-bar-btn {
+    min-width: 0;
+    height: auto;
+    padding: 4px 6px;
 }
 
 /* A bar button that opens a menu: a small caret after its label. */

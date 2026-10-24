@@ -5363,7 +5363,7 @@ var DendriteView = class extends ItemView {
     this.loadedPrefix = indexPrefix(text);
     this.checkArriving(false);
     this.scheduleOldCopies();
-    this.render();
+    this.render(true);
     this.refreshInbox();
     this.versionsChecked = this.checkVersions().catch((err) => console.error("Dendrite: version check failed", err));
   }
@@ -5505,13 +5505,19 @@ var DendriteView = class extends ItemView {
     return true;
   }
   // ---- rendering -------------------------------------------------------
-  render() {
+  /**
+   * Draw the board again. `outside` is a rebuild for a change made
+   * elsewhere, such as a sync, which leaves a board scrolled by hand
+   * where it was scrolled to rather than centring the active card.
+   */
+  render(outside = false) {
+    const held = outside && this.scrolledByHand && this.board ? this.scrollState() : null;
     const ed = this.editing;
     const focused = this.pageDoc().activeElement;
     const keep = ed && ed.editor.el.contains(focused) && ed.editor.selection();
     const f = this.find;
     const typing = f && f.input === focused && [f.input.selectionStart, f.input.selectionEnd];
-    this.drawBoard();
+    this.drawBoard(held);
     if (keep && this.editing === ed && ed.editor.el.isConnected) {
       ed.editor.focusAt(keep[0], keep[1]);
     }
@@ -5523,7 +5529,7 @@ var DendriteView = class extends ItemView {
       }
     }
   }
-  drawBoard() {
+  drawBoard(held = null) {
     const el = this.contentEl;
     if (this.observer) this.observer.disconnect();
     if (this.resizer) this.resizer.disconnect();
@@ -5577,6 +5583,9 @@ var DendriteView = class extends ItemView {
         this.scrolledByHand = true;
       }, { passive: true });
     }
+    board.addEventListener("pointerdown", (e) => {
+      if (e.target === board) this.scrolledByHand = true;
+    });
     this.renderOrphans(stage);
     if (this.resizer) this.resizer.observe(board);
     board.toggleClass("is-print-only", this.printOnly);
@@ -5612,7 +5621,12 @@ var DendriteView = class extends ItemView {
       inner.createDiv({ cls: "dendrite-spacer" });
     });
     this.fanReady = this.renderFan(stage);
-    this.applyActive(false);
+    if (held) {
+      this.highlight();
+      this.restoreScroll(held);
+    } else {
+      this.applyActive(false);
+    }
     this.announceScroll();
     this.updateNumbers();
     this.updateRoles();
@@ -6100,6 +6114,21 @@ var DendriteView = class extends ItemView {
     return r && card ? `${ed.id}:${Math.round(r.top)}:${card.offsetHeight}` : null;
   }
   /** A column's scroll position, however it is scrolled. */
+  /** Where the board and each column are scrolled to. */
+  scrollState() {
+    const cols = this.board.querySelectorAll(".dendrite-col");
+    return {
+      left: this.board.scrollLeft,
+      cols: [...cols].map((c, d) => this.colOffset(d))
+    };
+  }
+  /** The board and its columns scrolled back to `held`, by hand. */
+  restoreScroll(held) {
+    this.board.scrollLeft = held.left;
+    held.cols.forEach((y, d) => this.setColOffset(d, y));
+    this.scrolledByHand = true;
+    this.scheduleFlow();
+  }
   colOffset(d) {
     const cols = this.board.querySelectorAll(".dendrite-col");
     if (this.nativeScroll) return cols[d] ? cols[d].scrollTop : 0;
@@ -6193,7 +6222,10 @@ var DendriteView = class extends ItemView {
   onWheel(e) {
     if (e.ctrlKey) return;
     const horizontal = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY);
-    if (horizontal) return;
+    if (horizontal) {
+      this.scrolledByHand = true;
+      return;
+    }
     const col = e.target.closest && e.target.closest(".dendrite-col");
     if (!col) return;
     e.preventDefault();
@@ -10910,6 +10942,7 @@ var DendritePreview = class extends ItemView {
     });
   }
   async onClose() {
+    clearTimeout(this.drawnTimer);
     if (this.observer) this.observer.disconnect();
     if (this.resizer) this.resizer.disconnect();
     for (const b of this.blocks.values()) {
@@ -10999,6 +11032,7 @@ var DendritePreview = class extends ItemView {
       this.doc.scrollTop = Math.max(0, to);
     }, { passive: false });
     this.doc.addEventListener("scroll", () => {
+      if (this.drawByHand) this.drawNear();
       if (this.shiftFrame) return;
       const win = this.doc.ownerDocument.defaultView;
       this.shiftFrame = win.requestAnimationFrame(() => {
@@ -11030,7 +11064,55 @@ var DendritePreview = class extends ItemView {
     );
     return f instanceof TFile ? f : null;
   }
+  /** Draw the preview again, saying so if it fails rather than blank. */
   async refresh() {
+    try {
+      await this.refreshNow();
+    } catch (err) {
+      this.failed(err);
+    }
+    this.checkDrawn();
+  }
+  /** A failure to draw, shown once while the preview is open. */
+  failed(err) {
+    console.error("Dendrite: the preview could not draw", err);
+    if (this.failShown) return;
+    this.failShown = true;
+    new Notice(`Dendrite: the preview could not draw: ${err && err.message || err}`, 15e3);
+  }
+  /**
+   * Parts are drawn as they scroll into view. If a moment after a
+   * refresh parts are waiting and none has been drawn, as seen on an
+   * iPad, those near the view are drawn here, and from then on as the
+   * text scrolls, with a notice saying so.
+   */
+  checkDrawn() {
+    clearTimeout(this.drawnTimer);
+    this.drawnTimer = setTimeout(() => {
+      if (this.drawByHand || !this.doc || !this.doc.isConnected) return;
+      const shown = [...this.blocks.values()].filter((b) => b.el.isConnected && !b.el.hasClass("is-empty"));
+      const waiting = shown.filter((b) => b.el.hasClass("is-pending"));
+      if (!waiting.length || waiting.length < shown.length) return;
+      this.drawByHand = true;
+      const n = this.drawNear();
+      new Notice(`Dendrite: the preview drew ${n} of ${waiting.length} parts itself, since none had been drawn (its text area ${Math.round(this.doc.clientHeight)} px high).`, 15e3);
+    }, 1500);
+  }
+  /** Waiting parts within a screen of the view drawn; how many. */
+  drawNear() {
+    const v = this.doc.getBoundingClientRect();
+    const reach = Math.max(800, v.height);
+    let n = 0;
+    for (const b of this.blocks.values()) {
+      if (!b.el.hasClass("is-pending") || b.el.hasClass("is-empty") || !b.el.isConnected) continue;
+      const r = b.el.getBoundingClientRect();
+      if (r.bottom < v.top - reach || r.top > v.bottom + reach) continue;
+      n++;
+      this.renderBlock(b.el.dataset.id).catch((err) => this.failed(err));
+    }
+    return n;
+  }
+  async refreshNow() {
     if (!this.file || !this.doc) return;
     const text = await this.app.vault.cachedRead(this.file);
     const root = core.parseIndex(core.splitFrontmatter(text).body).root;
@@ -11529,7 +11611,7 @@ var DendritePreview = class extends ItemView {
       if (!e.isIntersecting) continue;
       this.observer.unobserve(e.target);
       if (e.target.hasClass("is-pending")) {
-        this.renderBlock(e.target.dataset.id);
+        this.renderBlock(e.target.dataset.id).catch((err) => this.failed(err));
       }
     }
   }
