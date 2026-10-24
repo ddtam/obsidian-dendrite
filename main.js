@@ -1661,7 +1661,7 @@ var require_editor = __commonJS({
 var require_docx = __commonJS({
   "src/docx.js"(exports2, module2) {
     "use strict";
-    var { Buffer: Buffer2 } = require("buffer");
+    var nodeBuffer = () => require("buffer").Buffer;
     var CRC_TABLE = (() => {
       const t = new Uint32Array(256);
       for (let n = 0; n < 256; n++) {
@@ -1705,7 +1705,7 @@ var require_docx = __commonJS({
         const raw = buf.subarray(start, start + size);
         out.push({
           name,
-          data: method === 8 ? zlib.inflateRawSync(raw) : Buffer2.from(raw)
+          data: method === 8 ? zlib.inflateRawSync(raw) : nodeBuffer().from(raw)
         });
         at += 46 + nameLen + extraLen + noteLen;
       }
@@ -1716,10 +1716,10 @@ var require_docx = __commonJS({
       const dir = [];
       let offset = 0;
       for (const f of files) {
-        const name = Buffer2.from(f.name, "utf8");
+        const name = nodeBuffer().from(f.name, "utf8");
         const packed = zlib.deflateRawSync(f.data);
         const crc = crc32(f.data);
-        const head = Buffer2.alloc(30);
+        const head = nodeBuffer().alloc(30);
         head.writeUInt32LE(67324752, 0);
         head.writeUInt16LE(20, 4);
         head.writeUInt16LE(2048, 6);
@@ -1729,7 +1729,7 @@ var require_docx = __commonJS({
         head.writeUInt32LE(f.data.length, 22);
         head.writeUInt16LE(name.length, 26);
         parts.push(head, name, packed);
-        const entry = Buffer2.alloc(46);
+        const entry = nodeBuffer().alloc(46);
         entry.writeUInt32LE(33639248, 0);
         entry.writeUInt16LE(20, 4);
         entry.writeUInt16LE(20, 6);
@@ -1743,14 +1743,14 @@ var require_docx = __commonJS({
         dir.push(entry, name);
         offset += head.length + name.length + packed.length;
       }
-      const dirBuf = Buffer2.concat(dir);
-      const end = Buffer2.alloc(22);
+      const dirBuf = nodeBuffer().concat(dir);
+      const end = nodeBuffer().alloc(22);
       end.writeUInt32LE(101010256, 0);
       end.writeUInt16LE(files.length, 8);
       end.writeUInt16LE(files.length, 10);
       end.writeUInt32LE(dirBuf.length, 12);
       end.writeUInt32LE(offset, 16);
-      return Buffer2.concat([...parts, dirBuf, end]);
+      return nodeBuffer().concat([...parts, dirBuf, end]);
     }
     var PAGE_TWIPS = { letter: [12240, 15840], a4: [11906, 16838] };
     var escapeXml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -1819,7 +1819,7 @@ var require_docx = __commonJS({
         if (f.name === "word/styles.xml") {
           return {
             name: f.name,
-            data: Buffer2.from(
+            data: nodeBuffer().from(
               styleXml(f.data.toString("utf8"), st),
               "utf8"
             )
@@ -1828,7 +1828,7 @@ var require_docx = __commonJS({
         if (f.name === "word/document.xml") {
           return {
             name: f.name,
-            data: Buffer2.from(
+            data: nodeBuffer().from(
               pageXml(f.data.toString("utf8"), st),
               "utf8"
             )
@@ -1839,13 +1839,16 @@ var require_docx = __commonJS({
       return writeZip(files, zlib);
     }
     function keepDocument(buf, zlib) {
-      return writeZip(readZip(buf, zlib).map((f) => f.name === "word/document.xml" ? {
-        name: f.name,
-        data: Buffer2.from(
-          keepTables(f.data.toString("utf8")),
-          "utf8"
-        )
-      } : f), zlib);
+      return writeZip(
+        readZip(buf, zlib).map((f) => f.name === "word/document.xml" ? {
+          name: f.name,
+          data: nodeBuffer().from(
+            keepTables(f.data.toString("utf8")),
+            "utf8"
+          )
+        } : f),
+        zlib
+      );
     }
     module2.exports = {
       crc32,

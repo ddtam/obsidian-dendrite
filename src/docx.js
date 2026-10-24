@@ -4,7 +4,9 @@
 // all text black. A .docx is a zip of XML files; reading and writing one
 // takes only what Word and Pandoc write, through Node's zlib, passed in.
 
-const { Buffer } = require('buffer');
+// Node's Buffer, asked for only when a .docx is read or written, so
+// the plugin still loads on a phone or tablet, which has no Node.
+const nodeBuffer = () => require('buffer').Buffer;
 
 const CRC_TABLE = (() => {
     const t = new Uint32Array(256);
@@ -53,7 +55,7 @@ function readZip(buf, zlib) {
         const raw = buf.subarray(start, start + size);
         out.push({ name,
                    data: method === 8 ? zlib.inflateRawSync(raw) :
-                       Buffer.from(raw) });
+                       nodeBuffer().from(raw) });
         at += 46 + nameLen + extraLen + noteLen;
     }
     return out;
@@ -65,10 +67,10 @@ function writeZip(files, zlib) {
     const dir = [];
     let offset = 0;
     for (const f of files) {
-        const name = Buffer.from(f.name, 'utf8');
+        const name = nodeBuffer().from(f.name, 'utf8');
         const packed = zlib.deflateRawSync(f.data);
         const crc = crc32(f.data);
-        const head = Buffer.alloc(30);
+        const head = nodeBuffer().alloc(30);
         head.writeUInt32LE(0x04034b50, 0);
         head.writeUInt16LE(20, 4);
         head.writeUInt16LE(0x0800, 6);
@@ -78,7 +80,7 @@ function writeZip(files, zlib) {
         head.writeUInt32LE(f.data.length, 22);
         head.writeUInt16LE(name.length, 26);
         parts.push(head, name, packed);
-        const entry = Buffer.alloc(46);
+        const entry = nodeBuffer().alloc(46);
         entry.writeUInt32LE(0x02014b50, 0);
         entry.writeUInt16LE(20, 4);
         entry.writeUInt16LE(20, 6);
@@ -92,14 +94,14 @@ function writeZip(files, zlib) {
         dir.push(entry, name);
         offset += head.length + name.length + packed.length;
     }
-    const dirBuf = Buffer.concat(dir);
-    const end = Buffer.alloc(22);
+    const dirBuf = nodeBuffer().concat(dir);
+    const end = nodeBuffer().alloc(22);
     end.writeUInt32LE(0x06054b50, 0);
     end.writeUInt16LE(files.length, 8);
     end.writeUInt16LE(files.length, 10);
     end.writeUInt32LE(dirBuf.length, 12);
     end.writeUInt32LE(offset, 16);
-    return Buffer.concat([...parts, dirBuf, end]);
+    return nodeBuffer().concat([...parts, dirBuf, end]);
 }
 
 const PAGE_TWIPS = { letter: [12240, 15840], a4: [11906, 16838] };
@@ -188,13 +190,13 @@ function reference(buf, st, zlib) {
     const files = readZip(buf, zlib).map((f) => {
         if (f.name === 'word/styles.xml') {
             return { name: f.name,
-                     data: Buffer.from(styleXml(f.data.toString('utf8'), st),
-                                       'utf8') };
+                     data: nodeBuffer().from(
+                         styleXml(f.data.toString('utf8'), st), 'utf8') };
         }
         if (f.name === 'word/document.xml') {
             return { name: f.name,
-                     data: Buffer.from(pageXml(f.data.toString('utf8'), st),
-                                       'utf8') };
+                     data: nodeBuffer().from(
+                         pageXml(f.data.toString('utf8'), st), 'utf8') };
         }
         return f;
     });
@@ -206,8 +208,9 @@ function keepDocument(buf, zlib) {
     return writeZip(readZip(buf, zlib).map((f) => (
         f.name === 'word/document.xml' ?
             { name: f.name,
-              data: Buffer.from(keepTables(f.data.toString('utf8')),
-                                'utf8') } : f)), zlib);
+              data: nodeBuffer().from(
+                  keepTables(f.data.toString('utf8')), 'utf8') } : f)),
+        zlib);
 }
 
 module.exports = { crc32, readZip, writeZip, styleXml, pageXml, reference,
