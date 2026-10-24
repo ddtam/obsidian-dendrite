@@ -63,6 +63,18 @@
     background: var(--background-modifier-hover);
 }
 
+/* A bar button that turns a view on and off, while off: faded, as the
+   view a switch does not show, and kept so under the pointer, where the
+   hover's ground would make it look on. */
+.dendrite-bar-btn.is-toggle:not(.is-on),
+.dendrite-bar-btn.is-toggle:not(.is-on):hover {
+    color: var(--text-faint);
+    background: transparent;
+}
+.dendrite-bar-btn.is-toggle:not(.is-on):hover {
+    color: var(--text-muted);
+}
+
 .dendrite-bar-icon {
     display: inline-flex;
 }

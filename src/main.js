@@ -261,6 +261,21 @@ function showCommentMenu(items, event, act) {
     return m;
 }
 
+/**
+ * An image clicked, handed to the Image Toolkit plugin to show large,
+ * where it is installed; true if it took it. It listens only in note and
+ * image panes, so Dendrite's images are passed to it.
+ */
+function openInImageToolkit(app, e) {
+    const img = e.target;
+    if (!img || img.tagName !== 'IMG') return false;
+    const kit = app.plugins && app.plugins.plugins &&
+        app.plugins.plugins['obsidian-image-toolkit'];
+    if (!kit || typeof kit.clickImage !== 'function') return false;
+    kit.clickImage(e);
+    return true;
+}
+
 function styleMenu(m, icons) {
     if (m.dom && m.dom.addClass) m.dom.addClass('dendrite-menu');
     if (!icons && typeof m.setNoIcon === 'function') m.setNoIcon();
@@ -870,6 +885,8 @@ class DendriteView extends ItemView {
                 await this.plugin.togglePreview(this.file);
                 this.showPreviewOn();
             });
+        // On or off, faded while off.
+        this.previewBtn.addClass('is-toggle');
         this.showPreviewOn();
         // Which cards are shown, as a switch between its two views, the
         // one shown lit: a single lit button would not say whether its
@@ -1734,6 +1751,7 @@ class DendriteView extends ItemView {
             this.justDragged = false;
             return;
         }
+        if (openInImageToolkit(this.app, e)) return;
         // A selection dragged out of a card ends with a click on what
         // holds both ends, the column or the board. Taking the focus for
         // the board then would leave the selection showing and the keys
@@ -6012,6 +6030,7 @@ class DendritePreview extends ItemView {
             else changed(f);
         }));
         this.registerDomEvent(this.contentEl, 'click', (e) => {
+            if (openInImageToolkit(this.app, e)) return;
             const b = e.target.closest('.dendrite-pblock');
             if (b && !b.dataset.notes && this.file) {
                 this.plugin.focusCard(this.file, b.dataset.id, false);
@@ -6060,6 +6079,7 @@ class DendritePreview extends ItemView {
                 this.app.workspace.requestSaveLayout();
                 this.refresh();
             });
+        comments.addClass('is-toggle');
         comments.toggleClass('is-on', this.showComments);
         // Back and on through the comments, in reading order.
         this.navEl = bar.createDiv({ cls: 'dendrite-pcomments-nav' });

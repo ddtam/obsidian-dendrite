@@ -2420,6 +2420,7 @@ var require_review = __commonJS({
       }
     }
     var day = (iso) => iso ? iso.slice(0, 10) : "";
+    var SECTION_NUMBER = /^\s*\d+(?:\.\d+)*\.?\s+/;
     function readBody(xml) {
       const paras = [];
       const ranges = /* @__PURE__ */ new Map();
@@ -2463,6 +2464,22 @@ var require_review = __commonJS({
           }
         }
       };
+      const unnumber = (p, k) => {
+        const m = SECTION_NUMBER.exec(p.text);
+        if (!m) return;
+        const n = m[0].length;
+        const back = (o) => Math.max(0, o - n);
+        p.text = p.text.slice(n);
+        for (const c of p.changes) {
+          c.start = back(c.start);
+          c.end = back(c.end);
+        }
+        for (const r of ranges.values()) {
+          for (const at of [r.start, r.end]) {
+            if (at && at.p === k) at.o = back(at.o);
+          }
+        }
+      };
       for (const tk of tokens(xml)) {
         if (tk.text !== void 0) {
           if (inText) addText(decode(tk.text));
@@ -2471,10 +2488,15 @@ var require_review = __commonJS({
         const { name, close, empty, attrs } = tk;
         if (name === "w:p") {
           if (close) {
+            if (para && para.heading) unnumber(para, paras.length);
             if (para) paras.push(para);
             para = null;
           } else if (!empty) {
             para = { text: "", changes: [] };
+          }
+        } else if (name === "w:pStyle" && para) {
+          if (/^(heading\s*\d|title)$/i.test(attr(attrs, "w:val"))) {
+            para.heading = true;
           }
         } else if (name === "w:ins" || name === "w:moveTo") {
           if (!empty) {
@@ -2596,7 +2618,8 @@ var require_review = __commonJS({
             r.start.o
           ),
           after: ep.slice(end.o, end.o + CONTEXT),
-          at: [r.start.p, r.start.o]
+          at: [r.start.p, r.start.o],
+          ...paras[r.start.p].heading ? { heading: true } : {}
         });
       }
       paras.forEach((p, k) => {
@@ -2900,6 +2923,11 @@ var require_review = __commonJS({
       if (item.card) {
         const k = item.card;
         cards = cards.filter((c) => c.id === k || c.id.endsWith("-" + k));
+      }
+      if (item.heading && item.quote) {
+        const want = normalise(item.quote).text;
+        cards = cards.filter((c) => String(c.text).split("\n").some((l) => /^#{1,6}\s/.test(l) && normalise(l.replace(/^#+\s*/, "")).text.includes(want)));
+        if (!cards.length) return null;
       }
       const prepared = cards.map((c) => {
         const plain = plainMap(c.text);
@@ -3818,6 +3846,9 @@ var require_float = __commonJS({
     function embedFor(path) {
       return `![[${path}]]`;
     }
+    function asLink(embed) {
+      return String(embed || "").replace(/^!\[\[/, "[[");
+    }
     function linkedImage(text) {
       const s = String(text || "");
       const m = IMAGE.exec(s);
@@ -3849,14 +3880,18 @@ var require_float = __commonJS({
         if (opts.onAsText) opts.onAsText();
       });
       const changed = () => opts.onChange();
-      const field = (label, cls, value, onInput) => {
+      const field = (label, cls, value, onInput, onLeave = null) => {
+        const left = () => {
+          if (onLeave) onLeave();
+          opts.onBlur();
+        };
         const wrap = root.createDiv({ cls: "dendrite-float-field" + (cls ? ` ${cls}` : "") });
         wrap.createDiv({ cls: "dendrite-float-label", text: label });
         if (opts.makeEditor) {
           const ed = opts.makeEditor(value, { onChange: () => {
             onInput(ed.value);
             changed();
-          }, onBlur: () => opts.onBlur(), onEscape: () => opts.onEscape() });
+          }, onBlur: left, onEscape: () => opts.onEscape() });
           wrap.appendChild(ed.el);
           return {
             get value() {
@@ -3880,7 +3915,7 @@ var require_float = __commonJS({
           onInput(ta.value);
           changed();
         });
-        ta.addEventListener("blur", () => opts.onBlur());
+        ta.addEventListener("blur", left);
         ta.addEventListener("keydown", (e) => {
           if (e.key === "Escape") {
             e.preventDefault();
@@ -3945,10 +3980,14 @@ var require_float = __commonJS({
         image = field(
           "Image: type [[ to find one, or paste or drop one",
           "dendrite-float-image",
-          content,
+          asLink(content),
           (v) => {
             content = linkedImage(v) || v.trim();
             draw();
+          },
+          () => {
+            const v = image.value;
+            if (asLink(v) !== v) image.set(asLink(v));
           }
         );
         cap = field(
@@ -3968,7 +4007,7 @@ var require_float = __commonJS({
         if (!embed) embed = linkedImage(dt.getData && dt.getData("text/plain"));
         if (!embed) return false;
         content = embed;
-        if (image) image.set(embed);
+        if (image) image.set(asLink(embed));
         draw();
         changed();
         return true;
@@ -4008,7 +4047,7 @@ var require_float = __commonJS({
           ({ caption, content } = split(text, kind));
           cap.set(caption);
           if (table) table.set(content);
-          if (image) image.set(content);
+          if (image) image.set(asLink(content));
           draw();
         },
         focusAt() {
@@ -4035,6 +4074,7 @@ var require_float = __commonJS({
       compose,
       embedFor,
       linkedImage,
+      asLink,
       textWidthPt,
       floatEditor,
       STARTER_TABLE
@@ -4496,6 +4536,14 @@ function showCommentMenu(items, event, act) {
   }
   if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
   return m;
+}
+function openInImageToolkit(app, e) {
+  const img = e.target;
+  if (!img || img.tagName !== "IMG") return false;
+  const kit = app.plugins && app.plugins.plugins && app.plugins.plugins["obsidian-image-toolkit"];
+  if (!kit || typeof kit.clickImage !== "function") return false;
+  kit.clickImage(e);
+  return true;
 }
 function styleMenu(m, icons) {
   if (m.dom && m.dom.addClass) m.dom.addClass("dendrite-menu");
@@ -5024,6 +5072,7 @@ var DendriteView = class extends ItemView {
         this.showPreviewOn();
       }
     );
+    this.previewBtn.addClass("is-toggle");
     this.showPreviewOn();
     barSwitch(
       bar,
@@ -5900,6 +5949,7 @@ var DendriteView = class extends ItemView {
       this.justDragged = false;
       return;
     }
+    if (openInImageToolkit(this.app, e)) return;
     if (this.pressInText) {
       this.pressInText = false;
       return;
@@ -9938,6 +9988,7 @@ var DendritePreview = class extends ItemView {
       else changed(f);
     }));
     this.registerDomEvent(this.contentEl, "click", (e) => {
+      if (openInImageToolkit(this.app, e)) return;
       const b = e.target.closest(".dendrite-pblock");
       if (b && !b.dataset.notes && this.file) {
         this.plugin.focusCard(this.file, b.dataset.id, false);
@@ -9990,6 +10041,7 @@ var DendritePreview = class extends ItemView {
         this.refresh();
       }
     );
+    comments.addClass("is-toggle");
     comments.toggleClass("is-on", this.showComments);
     this.navEl = bar.createDiv({ cls: "dendrite-pcomments-nav" });
     const navBtn = (icon, label, d) => barButton(

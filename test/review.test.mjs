@@ -507,3 +507,49 @@ test('a Google comment on several passages of a card is one comment: ' +
     assert.match(notes[0].textContent, /2 passages/);
     assert.equal(r.countComments(r.reviewItems(md)), 2);
 });
+
+/** A returned file with one comment on a numbered heading, as Docs does. */
+function onHeading(inner) {
+    const body =
+        '<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr>' + inner +
+        '</w:p><w:p>' + run('Fir is the selected cluster.') + '</w:p>';
+    const comments = `<w:comments ${W}>` +
+        '<w:comment w:id="6" w:author="J" w:date="2026-10-23T09:12:00Z">' +
+        '<w:p>' + run('This section seems unnecessary.') + '</w:p>' +
+        '</w:comment></w:comments>';
+    return d.writeZip([
+        { name: 'word/document.xml',
+          data: Buffer.from(`<w:document ${W}><w:body>${body}` +
+                            '</w:body></w:document>') },
+        { name: 'word/comments.xml', data: Buffer.from(comments) }], zlib);
+}
+
+test('a comment on a numbered heading is placed on that heading\'s card, ' +
+     'the number being the export\'s, not the card\'s text', () => {
+    const whole = r.readReview(onHeading(
+        '<w:commentRangeStart w:id="6"/>' + run('4.2.1 Cluster Selection') +
+        '<w:commentRangeEnd w:id="6"/>' +
+        '<w:r><w:commentReference w:id="6"/></w:r>'), zlib)[0];
+    assert.equal(whole.quote, 'Cluster Selection');
+    assert.equal(whole.heading, true);
+    const contents = { id: 'G-table', text: '# Compute Requests\n\n' +
+        '| Subsection | Content |\n| --- | --- |\n' +
+        '| 4.2.1 | Cluster Selection |\n| 4.2.2 | Size of Request |' };
+    const sizes = { id: 'G-sizes', text: 'Data held.\n\n| Data | TB |\n' +
+        '| --- | --- |\n| WGS | 4.0 |\n| RNA | 2.3 |\n| DOGMA | 1.7 |\n' +
+        '| scDNA | 11.0 |' };
+    const heading = { id: 'G-head', text: '# Cluster Selection' };
+    const at = r.locate(whole, [contents, sizes, heading]);
+    assert.equal(at.id, 'G-head');
+    assert.equal(heading.text.slice(at.start, at.end), 'Cluster Selection');
+    // Without its card, not matched on the number's digits in a table.
+    assert.equal(r.locate(whole, [contents, sizes]), null);
+    // On part of the heading: the number is not the text before it.
+    const part = r.readReview(onHeading(run('4.2.1 ') +
+        '<w:commentRangeStart w:id="6"/>' + run('Cluster') +
+        '<w:commentRangeEnd w:id="6"/>' +
+        '<w:r><w:commentReference w:id="6"/></w:r>' + run(' Selection')),
+        zlib)[0];
+    assert.equal(part.before, '');
+    assert.equal(r.locate(part, [contents, sizes, heading]).id, 'G-head');
+});

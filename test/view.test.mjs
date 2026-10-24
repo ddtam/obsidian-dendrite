@@ -3770,7 +3770,14 @@ test('a figure\'s image can be typed as a link in its own field, where ' +
     const form = view.contentEl.querySelector('.dendrite-float-edit');
     const image = form.querySelector('.dendrite-float-image textarea');
     assert.ok(image, 'an Image field');
-    assert.equal(image.value, '![[old.png]]');
+    // Shown as a link, not an embed, so the editor's live preview does
+    // not draw the image a second time under the one shown above.
+    assert.equal(image.value, '[[old.png]]');
+    // Typed as an embed, with ![[: shown as a link once the field is left.
+    image.value = '![[typed.png]]';
+    image.dispatchEvent(new h.window.Event('input'));
+    image.dispatchEvent(new h.window.Event('blur'));
+    assert.equal(image.value, '[[typed.png]]');
     // As Obsidian's link search writes it, without the !: an embed all
     // the same.
     image.value = '[[umap_by_clone.png]]';
@@ -3778,7 +3785,7 @@ test('a figure\'s image can be typed as a link in its own field, where ' +
     // A dropped image fills the field in.
     await view.editing.editor.take({ files: [],
         getData: () => '[[other.png]]' });
-    assert.equal(image.value, '![[other.png]]');
+    assert.equal(image.value, '[[other.png]]');
     image.value = '[[umap_by_clone.png]]';
     image.dispatchEvent(new h.window.Event('input'));
     await view.endEdit();
@@ -3850,4 +3857,78 @@ test('scrolling over the text moves it at the wheel\'s pace, the comment ' +
     assert.ok(!wheel(bubble, 50), 'over the comments: the usual scroll');
     view.commentKnots = null;
     assert.ok(!wheel(block, 50), 'without comments: the usual scroll');
+});
+
+test('an image clicked on a card, in the figure editor or in the preview ' +
+     'opens in Image Toolkit, where it is installed', async () => {
+    const { app, view } = await open(FLOAT_INDEX, floatCards());
+    const seen = [];
+    app.plugins = { plugins: { 'obsidian-image-toolkit': {
+        clickImage: (e) => seen.push(e.target) } } };
+    const card = view.cardEls.get('G-aaaaa');
+    const img = card.querySelector('.dendrite-card-body')
+        .createEl('img');
+    img.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
+    assert.deepEqual(seen, [img]);
+    // Not an image: nothing for it.
+    card.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
+    assert.equal(seen.length, 1);
+    await view.startEdit('G-aaaaa');
+    const shown = view.contentEl.querySelector('.dendrite-float-shown');
+    const big = shown.createEl('img');
+    big.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
+    assert.deepEqual(seen, [img, big]);
+    await view.endEdit();
+    // Without it, a click on an image is a click on its card.
+    app.plugins = { plugins: {} };
+    img.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
+    assert.equal(seen.length, 2);
+});
+
+test('an image clicked in the preview opens in Image Toolkit, and does not ' +
+     'also select its card', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'Text.');
+    const seen = [];
+    app.plugins = { plugins: { 'obsidian-image-toolkit': {
+        clickImage: (e) => seen.push(e.target) } } };
+    const focused = [];
+    const plugin = { settings: { headingTop: 1 },
+                     focusCard: (f, id) => focused.push(id) };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX });
+    await tick(30);
+    const block = view.contentEl.querySelector('.dendrite-pblock');
+    const img = block.createEl('img');
+    img.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
+    assert.deepEqual(seen, [img]);
+    assert.deepEqual(focused, []);
+});
+
+test('the Preview and Comments buttons are toggles, lit while on and ' +
+     'faded while off', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'Text.');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX });
+    await tick(30);
+    const comments = [...view.contentEl.querySelectorAll(
+        '.dendrite-bar-btn')].find((b) => /Comments/.test(b.textContent));
+    assert.ok(comments.hasClass('is-toggle'));
+    assert.ok(!comments.hasClass('is-on'));
+    comments.onclick();
+    assert.ok(comments.hasClass('is-on'));
+    const board = await open(FLOAT_INDEX, floatCards());
+    assert.ok(board.view.previewBtn.hasClass('is-toggle'));
 });

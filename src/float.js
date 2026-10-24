@@ -56,6 +56,15 @@ function embedFor(path) {
     return `![[${path}]]`;
 }
 
+/**
+ * An image's embed as the Image field shows it: a wiki embed as its link,
+ * which the editor's live preview draws as the link, not as the image a
+ * second time.
+ */
+function asLink(embed) {
+    return String(embed || '').replace(/^!\[\[/, '[[');
+}
+
 /** An image link in pasted or dropped text, as an embed; null if none. */
 function linkedImage(text) {
     const s = String(text || '');
@@ -106,7 +115,11 @@ function floatEditor(opts) {
     // A field: the card editor, Obsidian's where it has one, whose live
     // preview edits a table as a grid, given by `opts.makeEditor`; else a
     // text box. Answers { el, value, set(text), focus(atStart) }.
-    const field = (label, cls, value, onInput) => {
+    const field = (label, cls, value, onInput, onLeave = null) => {
+        const left = () => {
+            if (onLeave) onLeave();
+            opts.onBlur();
+        };
         const wrap = root.createDiv({ cls: 'dendrite-float-field' +
             (cls ? ` ${cls}` : '') });
         wrap.createDiv({ cls: 'dendrite-float-label', text: label });
@@ -114,7 +127,7 @@ function floatEditor(opts) {
             const ed = opts.makeEditor(value, { onChange: () => {
                 onInput(ed.value);
                 changed();
-            }, onBlur: () => opts.onBlur(), onEscape: () => opts.onEscape() });
+            }, onBlur: left, onEscape: () => opts.onEscape() });
             wrap.appendChild(ed.el);
             return { get value() { return ed.value; },
                      set(text) { ed.replace(text, 0); },
@@ -128,7 +141,7 @@ function floatEditor(opts) {
             onInput(ta.value);
             changed();
         });
-        ta.addEventListener('blur', () => opts.onBlur());
+        ta.addEventListener('blur', left);
         ta.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 e.preventDefault();
@@ -172,11 +185,16 @@ function floatEditor(opts) {
         // Its image as a link, typed with the editor's link search ([[),
         // or filled in by an image pasted or dropped.
         image = field('Image: type [[ to find one, or paste or drop one',
-                      'dendrite-float-image', content, (v) => {
+                      'dendrite-float-image', asLink(content), (v) => {
                           // Saved as an embed, as the link search writes
                           // it without the !.
                           content = linkedImage(v) || v.trim();
                           draw();
+                      }, () => {
+                          // One typed with ![[ shown as its link once
+                          // the field is left.
+                          const v = image.value;
+                          if (asLink(v) !== v) image.set(asLink(v));
                       });
         cap = field('Caption, printed below the figure', null, caption,
                     (v) => { caption = v; });
@@ -191,7 +209,7 @@ function floatEditor(opts) {
         if (!embed) embed = linkedImage(dt.getData && dt.getData('text/plain'));
         if (!embed) return false;
         content = embed;
-        if (image) image.set(embed);
+        if (image) image.set(asLink(embed));
         draw();
         changed();
         return true;
@@ -229,7 +247,7 @@ function floatEditor(opts) {
             ({ caption, content } = split(text, kind));
             cap.set(caption);
             if (table) table.set(content);
-            if (image) image.set(content);
+            if (image) image.set(asLink(content));
             draw();
         },
         focusAt() { cap.focus(false); },
@@ -246,5 +264,6 @@ function floatEditor(opts) {
     };
 }
 
-module.exports = { split, compose, embedFor, linkedImage, textWidthPt,
+module.exports = { split, compose, embedFor, linkedImage, asLink,
+                   textWidthPt,
                    floatEditor, STARTER_TABLE };

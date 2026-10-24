@@ -47,11 +47,16 @@ function* tokens(xml) {
 
 const day = (iso) => (iso ? iso.slice(0, 10) : '');
 
+// A heading's section number, as an export writes it before its text.
+const SECTION_NUMBER = /^\s*\d+(?:\.\d+)*\.?\s+/;
+
 /**
  * Word's body as paragraphs of the text the reviewer was sent: deleted
  * text kept, inserted text left out, so it can be looked for in the
  * cards. Each paragraph records its tracked changes as offsets into that
- * text, and comments as positions { p, o }.
+ * text, and comments as positions { p, o }. A heading is marked, its
+ * section number left out, since the number is the export's and not in
+ * the card.
  */
 function readBody(xml) {
     const paras = [];
@@ -88,6 +93,24 @@ function readBody(xml) {
             }
         }
     };
+    // A heading's number taken off its text, what is placed in it moved
+    // back by as much.
+    const unnumber = (p, k) => {
+        const m = SECTION_NUMBER.exec(p.text);
+        if (!m) return;
+        const n = m[0].length;
+        const back = (o) => Math.max(0, o - n);
+        p.text = p.text.slice(n);
+        for (const c of p.changes) {
+            c.start = back(c.start);
+            c.end = back(c.end);
+        }
+        for (const r of ranges.values()) {
+            for (const at of [r.start, r.end]) {
+                if (at && at.p === k) at.o = back(at.o);
+            }
+        }
+    };
     for (const tk of tokens(xml)) {
         if (tk.text !== undefined) {
             if (inText) addText(decode(tk.text));
@@ -96,10 +119,15 @@ function readBody(xml) {
         const { name, close, empty, attrs } = tk;
         if (name === 'w:p') {
             if (close) {
+                if (para && para.heading) unnumber(para, paras.length);
                 if (para) paras.push(para);
                 para = null;
             } else if (!empty) {
                 para = { text: '', changes: [] };
+            }
+        } else if (name === 'w:pStyle' && para) {
+            if (/^(heading\s*\d|title)$/i.test(attr(attrs, 'w:val'))) {
+                para.heading = true;
             }
         } else if (name === 'w:ins' || name === 'w:moveTo') {
             if (!empty) {
@@ -223,7 +251,9 @@ function readReview(buf, zlib) {
                      before: sp.slice(Math.max(0, r.start.o - CONTEXT),
                                       r.start.o),
                      after: ep.slice(end.o, end.o + CONTEXT),
-                     at: [r.start.p, r.start.o] });
+                     at: [r.start.p, r.start.o],
+                     ...(paras[r.start.p].heading ? { heading: true } :
+                         {}) });
     }
     paras.forEach((p, k) => {
         for (const c of p.changes) {
@@ -570,12 +600,20 @@ const tail = (s, n) => s.slice(Math.max(0, s.length - n));
  * into the card's markdown, `how` 'exact' when the passage was found as
  * it was sent and 'close' when only most of its words were; or null.
  * `cards` is [{ id, text }]. A point comment (no passage) is placed
- * after the text before it.
+ * after the text before it. One on a heading is looked for only in the
+ * cards' headings, so it is not taken for the same words in a table.
  */
 function locate(item, cards) {
     if (item.card) {
         const k = item.card;
         cards = cards.filter((c) => c.id === k || c.id.endsWith('-' + k));
+    }
+    if (item.heading && item.quote) {
+        const want = normalise(item.quote).text;
+        cards = cards.filter((c) => String(c.text).split('\n').some((l) =>
+            /^#{1,6}\s/.test(l) &&
+            normalise(l.replace(/^#+\s*/, '')).text.includes(want)));
+        if (!cards.length) return null;
     }
     const prepared = cards.map((c) => {
         const plain = plainMap(c.text);
