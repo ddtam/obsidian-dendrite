@@ -2537,6 +2537,43 @@ var require_review = __commonJS({
         return had === text || had.endsWith(`: ${text}`) || reviewKeys(x).some((k) => keys.includes(k));
       });
     }
+    function suggestInto(md, id, s) {
+      const author = clean(s.author) || "Claude";
+      if (typeof s.replace !== "string") {
+        return { reason: 'no replace: the new text, or "" to delete' };
+      }
+      const quote = String(s.quote || "");
+      if (!quote.trim()) return { reason: "no quote" };
+      if (alreadyIn(md, {
+        kind: "change",
+        author,
+        quote,
+        insert: s.replace
+      })) {
+        return { reason: "already suggested" };
+      }
+      const at = locate({
+        kind: "suggest",
+        quote,
+        before: s.before,
+        after: s.after
+      }, [{ id, text: md }]);
+      if (!at || at.how !== "exact") {
+        const hay = normalise(plainMap(md).text).text;
+        const want = normalise(quote).text;
+        let n = 0;
+        for (let k = hay.indexOf(want); k >= 0; k = hay.indexOf(want, k + 1)) n++;
+        return { reason: n > 1 ? `found ${n} times, so more than once; send before or after to say which` : "not found exactly in the card" };
+      }
+      return { md: addItems(md, [{
+        kind: "suggest",
+        start: at.start,
+        end: at.end,
+        author,
+        date: s.date,
+        text: s.replace
+      }]) };
+    }
     function itemText(kind, passage, author, date, text) {
       const note = `%%[!${kind}] ${clean(author) || "Reviewer"}, ${date}: ${clean(text, kind === "suggest")}%%`;
       return passage ? `==${passage}==${note}` : note;
@@ -3144,6 +3181,7 @@ var require_review = __commonJS({
       threadIds,
       forReviewers,
       seenMark,
+      suggestInto,
       firstOfComment,
       countComments,
       itemText,
@@ -5439,7 +5477,8 @@ var require_reviewapi = __commonJS({
       const url = new URL(req.url, "http://127.0.0.1");
       const take = {
         "/dendrite/review": opts.submit,
-        "/dendrite/reply": opts.reply
+        "/dendrite/reply": opts.reply,
+        "/dendrite/suggest": opts.suggest
       }[url.pathname];
       if (take && req.method === "POST") {
         if (!/^application\/json\b/.test(req.headers["content-type"] || "")) {
@@ -11088,6 +11127,29 @@ var DendriteView = class extends ItemView {
     if (n >= 0) await this.reviewAction(id, n, "reply", reply);
     return n;
   }
+  /**
+   * A suggested change from a program on card `id`; why it was not
+   * added, or null. In the card's editor if it is being typed in.
+   */
+  async suggestIn(id, item) {
+    const ed = this.editing;
+    if (ed && ed.id === id && ed.editor.update) {
+      const out2 = review.suggestInto(ed.editor.value, id, item);
+      if (out2.reason) return out2.reason;
+      ed.editor.update(out2.md);
+      ed.dirty = true;
+      ed.changed = true;
+      await this.save(ed);
+      return null;
+    }
+    const f = this.cardFile(id);
+    if (!f) return `no card ${id}`;
+    const { body } = core.splitFrontmatter(await this.app.vault.read(f));
+    const out = review.suggestInto(body, id, item);
+    if (out.reason) return out.reason;
+    await this.reviewAction(id, 0, "text", out.md);
+    return null;
+  }
   async reviewAction(id, n, what, arg = null) {
     const f = this.cardFile(id);
     if (!f) return;
@@ -11114,6 +11176,10 @@ var DendriteView = class extends ItemView {
       }
     };
     const item = review.reviewItems(body)[n];
+    if (what === "text") {
+      await write(arg);
+      return;
+    }
     if (what === "reply") {
       await write(review.addReply(body, n, typeof arg === "object" ? arg : {
         author: this.plugin.settings.replyName || "Me",
@@ -15129,7 +15195,8 @@ module.exports = class DendritePlugin extends Plugin {
       submit: (d) => this.submitReview(d),
       status: (id) => this.reviewStatus(id),
       threads: (m, opts) => this.threadsFor(m, opts),
-      reply: (d) => this.replyTo(d)
+      reply: (d) => this.replyTo(d),
+      suggest: (d) => this.suggestTo(d)
     });
     try {
       try {
@@ -15160,6 +15227,7 @@ module.exports = class DendritePlugin extends Plugin {
       url: `${base}/review`,
       threads: `${base}/threads`,
       reply: `${base}/reply`,
+      suggest: `${base}/suggest`,
       key: s.reviewApiKey,
       vault: this.app.vault.getName(),
       pid: process.pid
@@ -15491,6 +15559,57 @@ module.exports = class DendritePlugin extends Plugin {
       new Notice(`Dendrite: ${reply.author} replied on ${done.map((x) => x.split("/")[0]).join(", ")}.`);
     }
     return { status: 201, json: { done, missing } };
+  }
+  /**
+   * Suggested changes from a program, `items` [{ card, quote, replace,
+   * before?, after?, author? }], each written at once where its quote
+   * is found exactly in its card, and refused anywhere less sure; a
+   * suggestion is applied or dismissed from the board, so it needs no
+   * other approval. Through the board when the manuscript is open.
+   */
+  async suggestTo(data) {
+    const bad = (status, error) => ({ status, json: { error } });
+    if (!data || typeof data !== "object" || !Array.isArray(data.items) || !data.items.length) {
+      return bad(400, "send { manuscript, items: [{ card, quote, replace }] }");
+    }
+    const file = this.indexWithPrefix(String(data.manuscript || "").trim());
+    if (!file) {
+      return bad(404, `no manuscript has the prefix ${data.manuscript}`);
+    }
+    const view = this.openViews().find((v) => v.file === file);
+    const done = [];
+    const refused = [];
+    for (const [k, x] of data.items.entries()) {
+      const n = k + 1;
+      const card = x && String(x.card || "");
+      const f = card && this.app.metadataCache.getFirstLinkpathDest(
+        card,
+        file.path
+      );
+      if (!(f instanceof TFile)) {
+        refused.push({ n, reason: `no card ${card}` });
+        continue;
+      }
+      const item = { ...x, author: String(x.author || "").trim() || "Claude", date: localDay() };
+      const reason = await (view ? view.suggestIn(card, item) : this.suggestInFile(f, item));
+      if (reason) refused.push({ n, reason });
+      else done.push(n);
+    }
+    if (done.length) {
+      new Notice(`Dendrite: ${done.length} suggested change${done.length === 1 ? "" : "s"} from Claude.`);
+    }
+    return { status: 201, json: { done, refused } };
+  }
+  /** A suggestion written into a card's file; why not, or null. */
+  async suggestInFile(f, item) {
+    let reason = null;
+    await this.app.vault.process(f, (data) => {
+      const { fm, body } = core.splitFrontmatter(data);
+      const out = review.suggestInto(body, f.basename, item);
+      reason = out.reason || null;
+      return out.md === void 0 ? data : fm + out.md;
+    });
+    return reason;
   }
   /** A reply written into a card's file; the comment's index, or -1. */
   async replyInFile(f, tid, reply) {
