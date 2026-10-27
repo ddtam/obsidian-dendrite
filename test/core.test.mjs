@@ -1047,3 +1047,11 @@ test('a printing card is to revise while it has open comments, whatever ' +
     assert.equal(r.tally.revise, 3);
 });
 
+
+test('export leaves out every comment to or from Claude, with its ' +
+     'replies and markers, and keeps the passage', () => {
+    const md = 'The %%{1%%cohort%%}1 [!review] Derek Tam, 2026-10-27: Too ' +
+        'vague?%%%%[!reply] Claude, 2026-10-27: Say how many.%% is ' +
+        '==large==%%[!review] Claude, 2026-10-27: Cite.%%.';
+    assert.equal(c.stripComments(md), 'The cohort is large.');
+});

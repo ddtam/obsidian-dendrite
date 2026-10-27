@@ -198,6 +198,13 @@ function obsidianEditor(app, parent, opts) {
             ed.editor.setValue(text);
             this.focusAt(at);
         },
+        // The text changed to `text` where it differs, in one step of
+        // the editor's history, the caret and selection moved with it.
+        update(text) {
+            const [a, b, put] = differ(this.value, text);
+            ed.editor.replaceRange(put, ed.editor.offsetToPos(a),
+                                   ed.editor.offsetToPos(b));
+        },
         focusAt(at, to = at) {
             const editor = ed.editor;
             editor.focus();
@@ -230,6 +237,19 @@ function obsidianEditor(app, parent, opts) {
     };
 }
 
+/**
+ * Where `now` and `then` differ: [from, to, text], `now` from `from` to
+ * `to` replaced by `text` giving `then`.
+ */
+function differ(now, then) {
+    let a = 0;
+    while (a < now.length && a < then.length && now[a] === then[a]) a++;
+    let b = 0;
+    while (b < now.length - a && b < then.length - a &&
+           now[now.length - 1 - b] === then[then.length - 1 - b]) b++;
+    return [a, now.length - b, then.slice(a, then.length - b)];
+}
+
 /** The plain text box, used when Obsidian's editor is unavailable. */
 function textEditor(opts) {
     const ta = createEl('textarea', { cls: 'dendrite-editor' });
@@ -259,6 +279,11 @@ function textEditor(opts) {
             ta.value = text;
             fit();
             this.focusAt(at);
+        },
+        update(text) {
+            const [a, b, put] = differ(ta.value, text);
+            ta.setRangeText(put, a, b, 'preserve');
+            fit();
         },
         focusAt(at, to = at) {
             ta.focus();

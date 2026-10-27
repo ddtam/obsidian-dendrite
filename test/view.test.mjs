@@ -5775,6 +5775,16 @@ test('a reply written to a card shows in the preview\'s bubble, though ' +
         '.dendrite-pbubble .dendrite-review-reply');
     assert.ok(shown, 'the reply is in the bubble');
     assert.match(shown.textContent, /In Methods\./);
+    // One with no text: a mark in the bubble's name line instead.
+    await app.vault.modify(app.vault.getAbstractFileByPath(
+        cardPath('G-aaaaa')), card.replace('many.%%',
+        'many.%%%%[!reply] Claude, 2026-10-27: %%'));
+    await tick(500);
+    assert.equal(view.contentEl.querySelectorAll(
+        '.dendrite-pbubble .dendrite-review-reply').length, 0);
+    assert.equal(view.contentEl.querySelector('.dendrite-pbubble ' +
+        '.dendrite-review-meta .dendrite-review-seen').textContent,
+        '✓ Claude');
 });
 
 test('threads: each open comment of a manuscript with its card, passage ' +
@@ -5803,9 +5813,162 @@ test('threads: each open comment of a manuscript with its card, passage ' +
         ['G-bbbbb', 'suggestion', 'old', 'Claude', 'new', null, 0]]);
     assert.deepEqual(all.json.threads[0].replies, [
         { author: 'Derek Tam', date: '2026-10-24', text: 'In Methods.' }]);
-    const mine = await p.threadsFor('G', 'Claude');
+    const mine = await p.threadsFor('G', { author: 'Claude' });
     assert.equal(mine.json.threads.length, 2, 'one reviewer\'s');
     assert.equal((await p.threadsFor('X')).status, 404);
+});
+
+test('threads carry an id a reply names; a reply goes under its comment, ' +
+     'and those of Derek\'s own still waiting for Claude can be asked for',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'The ==cohort==%%[!review] Derek Tam, 2026-10-27: Is this ' +
+        'too long?%% is large.';
+    const B = 'B ==text==%%[!review] Aly, 2026-10-23: Why?%% and ' +
+        '==more==%%[!review] Me, 2026-10-27: Cite?%%%%[!reply] Claude, ' +
+        '2026-10-27: Done.%%.';
+    const { app, view, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': A, 'G-bbbbb': B });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [], replyName: 'Derek Tam' };
+    p.openViews = () => [view];
+    view.plugin.settings.replyName = 'Derek Tam';
+    const got = (await p.threadsFor('G')).json;
+    const all = got.threads;
+    assert.equal(new Set(all.map((t) => t.id)).size, 3, 'one id each');
+    // Each card's text, without its comments, to read them in context.
+    assert.deepEqual(got.cards, { 'G-aaaaa': 'The cohort is large.',
+                                  'G-bbbbb': 'B text and more.' });
+    // Derek's own, by any name he signs with, not yet answered by Claude.
+    const asked = (await p.threadsFor('G', { author: 'me',
+        awaiting: 'Claude' })).json.threads;
+    assert.deepEqual(asked.map((t) => t.text), ['Is this too long?']);
+    // The reply, by that id, under its comment, as Claude by default.
+    const out = await p.replyTo({ manuscript: 'G', thread: asked[0].id,
+                                  text: 'Cut the second clause.' });
+    assert.equal(out.status, 201);
+    assert.match(text(cardPath('G-aaaaa')), new RegExp('too long\\?%%' +
+        '%%\\[!reply\\] Claude, [\\d-]+: Cut the second clause\\.%% ' +
+        'is large\\.'));
+    assert.equal((await p.threadsFor('G', { author: 'me',
+        awaiting: 'Claude' })).json.threads.length, 0, 'answered');
+    // The same id still names it after the reply.
+    const again = (await p.threadsFor('G')).json.threads[0];
+    assert.equal(again.id, asked[0].id);
+    assert.equal((await p.replyTo({ manuscript: 'G', thread: 'G-aaaaa/0',
+                                    text: 'x' })).status, 404);
+    assert.equal((await p.replyTo({ manuscript: 'G', thread: again.id,
+                                    text: ' ' })).status, 400);
+    assert.equal((await p.replyTo({ manuscript: 'X', thread: again.id,
+                                    text: 'x' })).status, 404);
+});
+
+test('Claude passes comments by as seen, a reply with no text, and ' +
+     'a reply is kept short; threads can be asked for one branch',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'The ==cohort==%%[!review] Aly, 2026-10-23: Typo.%% is large.';
+    const B = 'B ==text==%%[!review] Aly, 2026-10-23: Why?%% here.';
+    const C = 'C ==more==%%[!review] Aly, 2026-10-23: And?%% here.';
+    const { app, view, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|a]]\n    - [[G-bbbbb|b]]\n- [[G-ccccc|c]]\n',
+        { 'G-aaaaa': A, 'G-bbbbb': B, 'G-ccccc': C });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.openViews = () => [view];
+    // One branch: the card and those under it.
+    const branch = (await p.threadsFor('G', { card: 'G-aaaaa' })).json;
+    assert.deepEqual(branch.threads.map((t) => t.card),
+                     ['G-aaaaa', 'G-bbbbb']);
+    assert.equal((await p.threadsFor('G', { card: 'G-zzzzz' })).status,
+                 404);
+    // Both seen at once: a reply with no text, so the last word is
+    // Claude's and they are no longer awaiting it.
+    const ids = branch.threads.map((t) => t.id);
+    const out = await p.replyTo({ manuscript: 'G', threads: ids,
+                                  seen: true });
+    assert.equal(out.status, 201);
+    assert.match(text(cardPath('G-aaaaa')),
+                 /Typo\.%%%%\[!reply\] Claude, [\d-]+: %% is large\./);
+    assert.deepEqual((await p.threadsFor('G', { awaiting: 'Claude' }))
+        .json.threads.map((t) => t.card), ['G-ccccc']);
+    assert.equal((await p.replyTo({ manuscript: 'G', thread: ids[0],
+        seen: true, text: 'x' })).status, 400, 'seen or a reply');
+    const long = 'word '.repeat(120);
+    const no = await p.replyTo({ manuscript: 'G', thread: ids[0],
+                                 text: long });
+    assert.equal(no.status, 400);
+    assert.match(no.json.error, /500/);
+    assert.doesNotMatch(text(cardPath('G-aaaaa')), /word word/);
+});
+
+test('a reply sent while its card is being edited goes into the editor, ' +
+     'which stays open with the caret where it was', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'The ==cohort==%%[!review] Me, 2026-10-27: Too long?%% is ' +
+        'large.';
+    const { app, view, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|a]]\n', { 'G-aaaaa': A });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.openViews = () => [view];
+    await view.startEdit('G-aaaaa');
+    type(view, A + ' More');
+    view.editing.editor.focusAt(3);
+    const [t] = (await p.threadsFor('G')).json.threads;
+    assert.equal((await p.replyTo({ manuscript: 'G', thread: t.id,
+                                    text: 'Yes.' })).status, 201);
+    assert.ok(view.editing, 'still editing');
+    assert.match(view.editing.editor.value, new RegExp('Too long\\?%%' +
+        '%%\\[!reply\\] Claude, [\\d-]+: Yes\\.%% is large\\. More$'));
+    assert.deepEqual(view.editing.editor.selection(), [3, 3]);
+    await view.endEdit();
+    assert.match(text(cardPath('G-aaaaa')), /Yes\.%% is large\. More$/);
+});
+
+test('a comment of the writer\'s own on a passage selected in the ' +
+     'editor goes in around it, signed with their name, editor still open',
+     async () => {
+    const { view, text } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', { 'G-aaaaa': 'The cohort is large.' });
+    view.plugin.settings.replyName = 'Derek Tam';
+    await view.startEdit('G-aaaaa');
+    view.editing.editor.focusAt(4, 10);
+    assert.equal(view.commentOnSelection('Too vague?'), true);
+    assert.ok(view.editing, 'still editing');
+    assert.match(view.editing.editor.value, new RegExp('^The %%\\{1%%' +
+        'cohort%%\\}1 \\[!review\\] Derek Tam, [\\d-]+: Too vague\\?%% ' +
+        'is large\\.$'));
+    await view.endEdit();
+    assert.match(text(cardPath('G-aaaaa')), /cohort%%\}1 \[!review\]/);
+    // Nothing selected: nothing to comment on.
+    await view.startEdit('G-aaaaa');
+    view.editing.editor.focusAt(2);
+    assert.equal(view.commentOnSelection('x'), false);
+});
+
+test('the diff is unified until side by side is picked, and the pick is ' +
+     'kept in the settings for every later diff', async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', { 'G-aaaaa': 'The ==old==%%[!suggest] Aly, ' +
+        '2026-10-23: new%% text.' });
+    let saved = 0;
+    view.plugin.saveSettings = async () => { saved++; };
+    const shown = () => h.obsidian.lastModal.contentEl.querySelector(
+        '.dendrite-version-modes .is-active').dataset.mode;
+    await view.reviewAction('G-aaaaa', 0, 'apply');
+    assert.equal(shown(), 'unified', 'unified first');
+    h.obsidian.lastModal.contentEl.querySelector(
+        '.dendrite-version-modes [data-mode="split"]').click();
+    assert.equal(view.plugin.settings.diffMode, 'split');
+    assert.equal(saved, 1);
+    h.obsidian.lastModal.close();
+    await view.reviewAction('G-aaaaa', 0, 'apply');
+    assert.equal(shown(), 'split', 'remembered');
 });
 
 test('a review round is recorded beside the index, and a card whose ' +

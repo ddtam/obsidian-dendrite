@@ -114,6 +114,11 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
                             c.passage ? `Suggests: ${c.text.trim()}` :
                                 `Suggests adding: ${c.text.trim()}`;
                 for (const r of c.replies || []) {
+                    // One with no text: a mark that its writer read it.
+                    if (!r.text.trim()) {
+                        meta.append(' ', review.seenMark(doc, r, nameOf));
+                        continue;
+                    }
                     const rc = colourOf(r.author || 'Me');
                     const rel = div('dendrite-review-reply' +
                         (rc ? ` is-c-${rc}` : ''), main);

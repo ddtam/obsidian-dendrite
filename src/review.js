@@ -915,6 +915,59 @@ function addReply(md, n, reply) {
     return md.slice(0, it.end) + note + md.slice(it.end);
 }
 
+/**
+ * A comment's identity in its card, for a program to name it by: its
+ * kind, reviewer, date, passage and text, and not its replies, so it
+ * stays the same as it is answered.
+ */
+function threadId(it) {
+    return docx.crc32(Buffer.from([it.kind, it.author, it.date,
+        flat(it.passage || ''), flat(it.text || '')].join('\u0000'),
+    'utf8')).toString(16);
+}
+
+/**
+ * Each of a card's comments' ids, in order: threadId, and where two are
+ * the same in every part, the second and on numbered after it.
+ */
+function threadIds(items) {
+    const seen = new Map();
+    return items.map((it) => {
+        const id = threadId(it);
+        const k = (seen.get(id) || 0) + 1;
+        seen.set(id, k);
+        return k === 1 ? id : `${id}.${k}`;
+    });
+}
+
+/**
+ * A reply with no text, drawn as a mark in its comment's name line: its
+ * writer, Claude, read the comment and had nothing to add.
+ */
+function seenMark(doc, r, nameOf = (x) => x) {
+    const el = doc.createElement('span');
+    el.className = 'dendrite-review-seen';
+    const who = doc.createElement('span');
+    shownAs(who, r.author || 'Me', nameOf);
+    el.append('✓ ', who.textContent);
+    el.title = `${who.textContent} read this on ${shortDate(r.date)} ` +
+        'and had nothing to add';
+    return el;
+}
+
+/**
+ * A card's comments as they may go back to their reviewers: each
+ * reviewer's comment with the writer's replies to it, which are meant
+ * for that reviewer. Comments of the writer's own, any name in `self`,
+ * are questions for Claude, and Claude's comments and replies are for
+ * the writer, so none of those goes.
+ */
+function forReviewers(items, self) {
+    const mine = (who) => self.has(who) || who === 'Claude';
+    return items.filter((it) => !mine(it.author)).map((it) => ({ ...it,
+        replies: (it.replies || []).filter((r) => r.author !== 'Claude') }));
+}
+
 /** A card's markdown with the `k`th reply to its `n`th comment taken out. */
 function removeReply(md, n, k) {
     const it = reviewItems(md)[n];
@@ -1773,8 +1826,22 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                 it.passage ? `Suggests: ${it.text.trim()}` :
                 `Suggests adding: ${it.text.trim()}`;
             main.append(meta, text);
-            // Its replies, under it, each with its own right-click menu.
+            // Its replies, under it, each with its own right-click menu;
+            // one with no text a mark in the name line that its writer
+            // read the comment and had nothing to add.
             (it.replies || []).forEach((r, k) => {
+                if (!r.text.trim()) {
+                    const mark = seenMark(doc, r, nameOf);
+                    if (onMenu) {
+                        mark.addEventListener('contextmenu', (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onMenu(i, e, k);
+                        });
+                    }
+                    meta.append(' ', mark);
+                    return;
+                }
                 const el = doc.createElement('div');
                 // In its writer's colour, under the name they are shown as.
                 const rc = colourOf && colourOf(r.author || 'Me');
@@ -1870,7 +1937,8 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    commentActions, commentMenu, googleData, googleOf,
                    REVIEWER_COLOURS, colourCss, reviewerColours, colourList,
                    assignColours, reviewerEntries, entryList,
-                   addReply, removeReply, replyBox,
+                   addReply, removeReply, replyBox, threadId,
+                   threadIds, forReviewers, seenMark,
                    firstOfComment, countComments,
                    itemText,
                    addItems, removeItem,

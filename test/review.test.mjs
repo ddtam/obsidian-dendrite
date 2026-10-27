@@ -872,8 +872,8 @@ test('the review endpoint answers GET /dendrite/threads with the ' +
         port: 0, token: 'k3y',
         async submit() { return { status: 500, json: {} }; },
         async status() { return { status: 404, json: {} }; },
-        async threads(prefix, author) {
-            asked.push([prefix, author]);
+        async threads(prefix, opts) {
+            asked.push([prefix, opts]);
             return { status: 200, json: { manuscript: prefix, threads: [] } };
         } });
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -884,15 +884,95 @@ test('the review endpoint answers GET /dendrite/threads with the ' +
     try {
         const auth = { authorization: 'Bearer k3y' };
         assert.deepEqual(await call('/dendrite/threads?manuscript=G' +
-            '&author=Claude', auth),
+            '&author=Claude&card=G-aaaaa', auth),
             [200, { manuscript: 'G', threads: [] }]);
-        assert.deepEqual(asked, [['G', 'Claude']]);
+        assert.deepEqual(asked, [['G', { author: 'Claude', awaiting: null,
+                                         card: 'G-aaaaa' }]]);
         assert.equal((await call('/dendrite/threads?manuscript=G'))[0], 401);
         assert.equal((await call('/dendrite/threads', auth))[0], 400,
                      'which manuscript');
     } finally {
         server.close();
     }
+});
+
+test('the review endpoint takes POST /dendrite/reply as JSON, with its ' +
+     'key only', async () => {
+    const api = require('../src/reviewapi.js');
+    const got = [];
+    const server = await api.start({
+        port: 0, token: 'k3y',
+        async submit() { return { status: 500, json: {} }; },
+        async status() { return { status: 404, json: {} }; },
+        async reply(data) {
+            got.push(data);
+            return { status: 201, json: { card: 'G-aaaaa' } };
+        } });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const post = async (body, headers) => {
+        const res = await fetch(base + '/dendrite/reply', { method: 'POST',
+            headers, body });
+        return [res.status, await res.json()];
+    };
+    const json = { authorization: 'Bearer k3y',
+                   'content-type': 'application/json' };
+    try {
+        const sent = { manuscript: 'G', thread: 'G-aaaaa/1f', text: 'Yes.' };
+        assert.deepEqual(await post(JSON.stringify(sent), json),
+                         [201, { card: 'G-aaaaa' }]);
+        assert.deepEqual(got, [sent]);
+        assert.equal((await post('{}', { 'content-type':
+            'application/json' }))[0], 401);
+        assert.equal((await post('{', json))[0], 400);
+    } finally {
+        server.close();
+    }
+});
+
+test('what goes back to reviewers: their comments with the writer\'s ' +
+     'replies to them, and nothing written by or to Claude', () => {
+    const md = 'A ==b==%%[!review] Aly, 2026-10-23: Why?%%%%[!reply] ' +
+        'Claude, 2026-10-27: Cite Sollier.%%%%[!reply] Derek Tam, ' +
+        '2026-10-27: Done, see Methods.%% c ==d==%%[!review] Derek Tam, ' +
+        '2026-10-27: Too long?%% e ==f==%%[!review] Claude, 2026-10-27: ' +
+        'Say how many.%%.';
+    const out = r.forReviewers(r.reviewItems(md),
+                               new Set(['Derek Tam', 'Me']));
+    assert.deepEqual(out.map((it) => [it.author, it.text,
+        it.replies.map((x) => x.author)]),
+        [['Aly', 'Why?', ['Derek Tam']]]);
+});
+
+test('a reply with no text is drawn as a mark that its writer saw the ' +
+     'comment, not as a reply', () => {
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div id="root"></div>').window.document;
+    const md = 'A ==b==%%[!review] Aly, 2026-10-23: Typo.%%%%[!reply] ' +
+        'Claude, 2026-10-27: %%.';
+    const root = doc.getElementById('root');
+    root.innerHTML = '<p>' + r.renderMarkdown(md) + '</p>';
+    const menus = [];
+    r.decorate(root, r.reviewItems(md), () => {},
+               (n, e, k) => menus.push([n, k]));
+    assert.equal(root.querySelectorAll('.dendrite-review-reply').length, 0);
+    const seen = root.querySelector(
+        '.dendrite-review-meta .dendrite-review-seen');
+    assert.equal(seen.textContent, '✓ Claude');
+    // Taken back from its own menu, as a reply is.
+    seen.dispatchEvent(new doc.defaultView.MouseEvent('contextmenu',
+                                                      { bubbles: true }));
+    assert.deepEqual(menus, [[0, 0]]);
+});
+
+test('a thread id stays the same as replies are added and differs ' +
+     'between comments', () => {
+    const md = 'A ==b==%%[!review] Me, 2026-10-27: Why?%% c ==d==' +
+        '%%[!review] Me, 2026-10-27: Why?%%.';
+    const [x, y] = r.reviewItems(md);
+    assert.notEqual(r.threadId(x), r.threadId(y), 'same words');
+    const z = r.reviewItems(r.addReply(md, 0, { author: 'Claude',
+        date: '2026-10-27', text: 'Yes.' }))[0];
+    assert.equal(r.threadId(z), r.threadId(x));
 });
 
 test('an edit that leaves a comment marking no text is found, with which ' +

@@ -107,6 +107,8 @@ const DEFAULTS = {
     reviewApiKey: '',
     // The name a reply to a review comment is signed with.
     replyName: '',
+    // How a diff is shown: unified until side by side is picked.
+    diffMode: 'unified',
     // How you are shown where your replies are, and in what is sent out.
     presentName: '',
     recordTimings: false,
@@ -442,6 +444,10 @@ function ownKeys(app, el) {
 }
 
 /** Today's date where the writer is, as 2026-10-24. */
+// The longest reply a program may send: a reply says what the writer
+// needs before acting on the comment, and no more.
+const MAX_REPLY = 500;
+
 function localDay(d = new Date()) {
     const two = (x) => String(x).padStart(2, '0');
     return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
@@ -5970,6 +5976,66 @@ class DendriteView extends ItemView {
         }
     }
 
+    /**
+     * A comment of the writer's own, `said`, on the passage selected in
+     * the card being typed in, signed with their reply name; false when
+     * nothing is selected. A change to the text, in the editor's history.
+     */
+    commentOnSelection(said, range = null) {
+        const ed = this.editing;
+        if (!ed || !ed.editor.update || !String(said || '').trim()) {
+            return false;
+        }
+        const [a, b] = range || ed.editor.selection();
+        if (a === b) return false;
+        const body = ed.editor.value;
+        ed.editor.update(review.addItems(body, [{ kind: 'review',
+            start: a, end: b, date: localDay(), text: said,
+            author: this.plugin.settings.replyName || 'Me' }]));
+        ed.dirty = true;
+        ed.changed = true;
+        this.save(ed);
+        return true;
+    }
+
+    /** Asks for a comment on the selected passage, then adds it. */
+    askComment() {
+        const ed = this.editing;
+        const range = ed && ed.editor.update ? ed.editor.selection() : null;
+        if (!range || range[0] === range[1]) {
+            new Notice('Dendrite: select the passage to comment on.');
+            return;
+        }
+        new CommentModal(this.app, (said) =>
+            this.commentOnSelection(said, range)).open();
+    }
+
+    /**
+     * A reply from a program to the comment `tid` on card `id`; its
+     * index, or -1 when there is no such comment. In the card's editor if
+     * it is being typed in, which stays open, as a change to the text.
+     */
+    async replyFrom(id, tid, reply) {
+        const ed = this.editing;
+        if (ed && ed.id === id && ed.editor.update) {
+            const body = ed.editor.value;
+            const n = review.threadIds(review.reviewItems(body))
+                .indexOf(tid);
+            if (n < 0) return n;
+            ed.editor.update(review.addReply(body, n, reply));
+            ed.dirty = true;
+            ed.changed = true;
+            await this.save(ed);
+            return n;
+        }
+        const f = this.cardFile(id);
+        if (!f) return -1;
+        const { body } = core.splitFrontmatter(await this.app.vault.read(f));
+        const n = review.threadIds(review.reviewItems(body)).indexOf(tid);
+        if (n >= 0) await this.reviewAction(id, n, 'reply', reply);
+        return n;
+    }
+
     async reviewAction(id, n, what, arg = null) {
         const f = this.cardFile(id);
         if (!f) return;
@@ -5992,10 +6058,11 @@ class DendriteView extends ItemView {
         const item = review.reviewItems(body)[n];
         // A reply, written under its comment, or taken back: a change to
         // the card, undone as one.
+        // A program's reply comes signed and dated.
         if (what === 'reply') {
-            await write(review.addReply(body, n, {
-                author: this.plugin.settings.replyName || 'Me',
-                date: localDay(), text: arg }));
+            await write(review.addReply(body, n, typeof arg === 'object' ?
+                arg : { author: this.plugin.settings.replyName || 'Me',
+                        date: localDay(), text: arg }));
             return;
         }
         if (what === 'unreply') {
@@ -7930,8 +7997,15 @@ class DendritePreview extends ItemView {
                     !it.text.trim() ? 'Suggests deleting this.' :
                     it.passage ? `Suggests: ${it.text.trim()}` :
                     `Suggests adding: ${it.text.trim()}` });
-            // Its replies, under it; one taken back from the board.
+            // Its replies, under it; one taken back from the board. One
+            // with no text is a mark that its writer read the comment.
             for (const r of it.replies || []) {
+                if (!r.text.trim()) {
+                    meta.appendText(' ');
+                    meta.appendChild(review.seenMark(meta.ownerDocument, r,
+                        (who) => this.names.get(who)));
+                    continue;
+                }
                 const rc = this.colours &&
                     this.colours.get(r.author || 'Me');
                 const rel = el.createDiv({ cls: 'dendrite-review-reply' +
@@ -8796,9 +8870,10 @@ class VersionModal extends Modal {
 
     /**
      * The lines that differ, with one line of context around each run,
-     * unified or side by side; the choice holds while Obsidian runs.
+     * unified or side by side; the choice is kept in the settings.
      */
     showDiff(now, before) {
+        const settings = this.view.plugin.settings;
         const rows = core.lineDiff(now, before);
         const bar = this.contentEl.createDiv(
             { cls: 'dendrite-version-modes' });
@@ -8806,10 +8881,10 @@ class VersionModal extends Modal {
         const modes = [['unified', 'Unified', 'rows-2'],
                        ['split', 'Side by side', 'columns-2']];
         const draw = () => {
-            const split = VersionModal.mode === 'split';
+            const mode = settings.diffMode || 'unified';
+            const split = mode === 'split';
             for (const b of bar.children) {
-                b.toggleClass('is-active', b.dataset.mode ===
-                              VersionModal.mode);
+                b.toggleClass('is-active', b.dataset.mode === mode);
             }
             if (this.modalEl) this.modalEl.toggleClass('dendrite-wide', split);
             box.empty();
@@ -8828,7 +8903,12 @@ class VersionModal extends Modal {
             setIcon(b, icon);
             b.dataset.mode = mode;
             b.onclick = () => {
-                VersionModal.mode = mode;
+                if ((settings.diffMode || 'unified') !== mode) {
+                    settings.diffMode = mode;
+                    if (this.view.plugin.saveSettings) {
+                        this.view.plugin.saveSettings();
+                    }
+                }
                 draw();
             };
         }
@@ -8989,8 +9069,6 @@ class VersionModal extends Modal {
 
     onClose() { this.contentEl.empty(); }
 }
-// Unified until a viewer picks side by side.
-VersionModal.mode = 'unified';
 
 /**
  * A reviewer's suggested change to a card, shown as the comparison of
@@ -9562,6 +9640,41 @@ class GroupModal extends Modal {
                 await view.groupPicked(kind);
             };
         }
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+
+/** A comment's text, asked for; `send(text)` once given. */
+class CommentModal extends Modal {
+    constructor(app, send) {
+        super(app);
+        this.send = send;
+    }
+
+    onOpen() {
+        this.titleEl.setText('Comment on the selection');
+        const box = this.contentEl.createEl('textarea',
+            { cls: 'dendrite-review-reply-box' });
+        box.rows = 3;
+        box.placeholder = 'Comment';
+        const row = this.contentEl.createDiv(
+            { cls: 'dendrite-version-choices' });
+        const go = row.createEl('button', { text: 'Comment',
+                                            cls: 'mod-cta' });
+        go.onclick = () => {
+            const t = box.value.trim();
+            if (!t) return;
+            this.close();
+            this.send(t);
+        };
+        box.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                go.onclick();
+            }
+        });
+        box.focus();
     }
 
     onClose() { this.contentEl.empty(); }
@@ -10306,6 +10419,8 @@ module.exports = class DendritePlugin extends Plugin {
         viewCommand('move-to-child-card',
             'Move selection, or the rest of the card, to a new child card',
             true, (v) => v.moveSelection('child'));
+        viewCommand('comment-on-selection', 'Comment on the selected ' +
+            'passage', true, (v) => v.askComment());
         viewCommand('next-flagged', 'Go to the next card to revise or ' +
             'finish splitting', false, (v) => v.nextFlagged(1));
         viewCommand('previous-flagged', 'Go to the previous card to ' +
@@ -10348,6 +10463,12 @@ module.exports = class DendritePlugin extends Plugin {
                                                'child card')
                     .setIcon('corner-down-right')
                     .onClick(() => v.moveSelection('child')));
+                if (sel) {
+                    menu.addItem((i) => i.setTitle('Comment on the ' +
+                                                   'selection')
+                        .setIcon('message-square')
+                        .onClick(() => v.askComment()));
+                }
             }));
         this.registerEvent(this.app.workspace.on('file-menu', (menu, f) => {
             if (!isIndex(this.app, f)) return;
@@ -10384,7 +10505,8 @@ module.exports = class DendritePlugin extends Plugin {
             port, token: s.reviewApiKey,
             submit: (d) => this.submitReview(d),
             status: (id) => this.reviewStatus(id),
-            threads: (m, who) => this.threadsFor(m, who) });
+            threads: (m, opts) => this.threadsFor(m, opts),
+            reply: (d) => this.replyTo(d) });
         try {
             try {
                 this.reviewServer = await start(want);
@@ -10419,6 +10541,7 @@ module.exports = class DendritePlugin extends Plugin {
             `${this.reviewServer.address().port}/dendrite`;
         fs.writeFileSync(file, JSON.stringify({
             url: `${base}/review`, threads: `${base}/threads`,
+            reply: `${base}/reply`,
             key: s.reviewApiKey, vault: this.app.vault.getName(),
             pid: process.pid }, null, 2) + '\n', { mode: 0o600 });
     }
@@ -10631,38 +10754,129 @@ module.exports = class DendritePlugin extends Plugin {
 
     /**
      * A manuscript's open review comments and suggested changes, each
-     * with its card, passage, reviewer, text, Google link and replies, in
-     * reading order; only `author`'s, if given. Read only, for a reviewer
-     * to read what was answered.
+     * with its id, card, passage, reviewer, text, Google link and
+     * replies, in reading order, and the text of their cards without
+     * comments; only `author`'s, if given, where "me" is
+     * any name the writer signs with; with `awaiting`, only those whose
+     * last word, the comment or its last reply, is not that name's; and
+     * with `card`, only that card's and those of the cards under it.
+     * Read only, for a reviewer to read what was answered.
      */
-    async threadsFor(prefix, author = null) {
+    async threadsFor(prefix, { author = null, awaiting = null,
+                               card = null } = {}) {
         const file = this.indexWithPrefix(prefix);
         if (!file) {
             return { status: 404, json: {
                 error: `no manuscript has the prefix ${prefix}` } };
         }
         const app = this.app;
+        const who = author === 'me' ? this.selfNames() : new Set([author]);
         const text = await app.vault.cachedRead(file);
         const root = core.parseIndex(core.splitFrontmatter(text).body).root;
+        const all = core.allNodes(root);
+        const top = card && all.find((n) => n.id === card);
+        if (card && !top) {
+            return { status: 404, json: { error: `no card ${card}` } };
+        }
         const threads = [];
-        for (const n of core.allNodes(root)) {
+        // The text of each card with a thread, for reading it in context.
+        const cards = {};
+        for (const n of top ? [top, ...core.allNodes(top)] : all) {
             const f = app.metadataCache.getFirstLinkpathDest(n.id, file.path);
             if (!(f instanceof TFile)) continue;
             const body = core.splitFrontmatter(
                 await app.vault.cachedRead(f)).body;
-            for (const it of review.reviewItems(body)) {
-                if (author && it.author !== author) continue;
+            const items = review.reviewItems(body);
+            const ids = review.threadIds(items);
+            for (const [k, it] of items.entries()) {
+                if (author && !who.has(it.author)) continue;
+                const replies = it.replies || [];
+                const last = replies.length ?
+                    replies[replies.length - 1].author : it.author;
+                if (awaiting && last === awaiting) continue;
                 const { text: said, url } = review.noteLink(it.text);
-                threads.push({ card: n.id,
+                cards[n.id] = core.stripComments(body).trim();
+                threads.push({ id: `${n.id}/${ids[k]}`, card: n.id,
                     kind: it.kind === 'suggest' ? 'suggestion' : 'comment',
                     passage: it.passage, author: it.author, date: it.date,
                     text: it.kind === 'suggest' ? it.text : said.trim(),
                     link: it.kind === 'suggest' ? null : url || null,
-                    replies: it.replies || [] });
+                    replies });
             }
         }
         return { status: 200, json: { manuscript: prefixOf(app, file),
-                                      threads } };
+                                      threads, cards } };
+    }
+
+    /** The names the writer signs with: the reply name, and Me. */
+    selfNames() {
+        return new Set([this.settings.replyName || 'Me', 'Me']);
+    }
+
+    /**
+     * A reply from a program, written at once under the comment `thread`
+     * names, as threadsFor gives it: `card/id`. Through the board when
+     * one has the manuscript open, so it is drawn, undone, and goes into
+     * the card's editor if the card is being typed in.
+     */
+    async replyTo(data) {
+        const bad = (status, error) => ({ status, json: { error } });
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            return bad(400, 'send { manuscript, thread, text }');
+        }
+        const file = this.indexWithPrefix(String(data.manuscript || '')
+            .trim());
+        if (!file) {
+            return bad(404, `no manuscript has the prefix ` +
+                       `${data.manuscript}`);
+        }
+        const said = String(data.text || '').trim();
+        if (data.seen && said) {
+            return bad(400, 'either seen, with no text, or a reply');
+        }
+        if (!data.seen && !said) return bad(400, 'no text');
+        if (said.length > MAX_REPLY) {
+            return bad(400, `${said.length} characters; a reply is up to ` +
+                       `${MAX_REPLY}. Say only what the writer needs ` +
+                       'before acting on the comment.');
+        }
+        const ids = Array.isArray(data.threads) ? data.threads.map(String) :
+            [String(data.thread || '')];
+        const reply = { author: String(data.author || '').trim() ||
+                            'Claude',
+                        date: localDay(), text: data.seen ? '' : said };
+        const view = this.openViews().find((v) => v.file === file);
+        const done = [];
+        const missing = [];
+        for (const id of ids) {
+            const [card, tid] = id.split('/');
+            const f = card && this.app.metadataCache.getFirstLinkpathDest(
+                card, file.path);
+            const n = !(f instanceof TFile) ? -1 :
+                await (view ? view.replyFrom(card, tid, reply) :
+                    this.replyInFile(f, tid, reply));
+            (n < 0 ? missing : done).push(id);
+        }
+        if (!done.length) {
+            return bad(404, `no open comment ${missing.join(', ')}; it may ` +
+                       'have been resolved or changed');
+        }
+        if (!data.seen) {
+            new Notice(`Dendrite: ${reply.author} replied on ` +
+                       `${done.map((x) => x.split('/')[0]).join(', ')}.`);
+        }
+        return { status: 201, json: { done, missing } };
+    }
+
+    /** A reply written into a card's file; the comment's index, or -1. */
+    async replyInFile(f, tid, reply) {
+        let n = -1;
+        await this.app.vault.process(f, (data) => {
+            const { fm, body } = core.splitFrontmatter(data);
+            n = review.threadIds(review.reviewItems(body)).indexOf(tid);
+            return n < 0 ? data : fm + review.addReply(body, n, reply);
+        });
+        return n;
     }
 
     async reviewStatus(id) {

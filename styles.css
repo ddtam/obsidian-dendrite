@@ -1474,6 +1474,12 @@ body {
 .dendrite-review-text {
     color: var(--text-normal);
 }
+/* Read by Claude, with nothing to add: quiet, in the name line. */
+.dendrite-review-seen {
+    color: var(--text-faint);
+    font-size: var(--font-ui-smaller);
+    white-space: nowrap;
+}
 .dendrite-review-quote {
     color: var(--text-muted);
     font-style: italic;

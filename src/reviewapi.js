@@ -2,13 +2,25 @@
 // A local HTTP endpoint where programs on this computer, such as an
 // agent, submit review comments for a manuscript, as Better BibTeX
 // answers Zotero requests on its own port. Nothing is written here: the
-// plugin queues a review, and it is added only from the board.
+// plugin queues a review, and it is added only from the board. A reply
+// is written at once: it names its comment, so there is nothing to place.
 //
 //   POST /dendrite/review        { manuscript, title?, items: [...] }
 //   GET  /dendrite/review/<id>   the review's state
 //   GET  /dendrite/threads?manuscript=<prefix>[&author=<name>]
-//        the manuscript's open comments, each with its replies, so a
-//        reviewer can read what was answered; read only
+//        [&awaiting=<name>][&card=<id>]
+//        the manuscript's open comments, each with its id and replies, and
+//        the text of their cards, so a reviewer can read them in context
+//        and what was answered; `author=me` is the
+//        writer's own, and `awaiting` leaves out those whose last word is
+//        that name's, and `card` keeps to that card and those under it;
+//        read only
+//   POST /dendrite/reply         { manuscript, thread, text, author? }
+//        a reply written under the comment whose id is `thread`, at
+//        once, as `author`, Claude if not given; up to 500 characters.
+//        With `seen: true` and no text, a reply with no text, saying the
+//        comment was read and there is nothing to add; `threads`, a list
+//        of ids, in place of `thread` for several at once
 //
 // Every request carries `Authorization: Bearer <key>`. A request with an
 // Origin header comes from a web page and is refused, and no CORS header
@@ -48,7 +60,9 @@ async function handle(opts, req, res) {
                                        'the discovery file' });
     }
     const url = new URL(req.url, 'http://127.0.0.1');
-    if (url.pathname === '/dendrite/review' && req.method === 'POST') {
+    const take = { '/dendrite/review': opts.submit,
+                   '/dendrite/reply': opts.reply }[url.pathname];
+    if (take && req.method === 'POST') {
         if (!/^application\/json\b/.test(req.headers['content-type'] ||
                                          '')) {
             return send(res, 415, { error: 'send application/json' });
@@ -63,7 +77,7 @@ async function handle(opts, req, res) {
         } catch (err) {
             return send(res, 400, { error: `not JSON: ${err.message}` });
         }
-        const out = await opts.submit(data);
+        const out = await take(data);
         return send(res, out.status, out.json);
     }
     if (url.pathname === '/dendrite/threads' && req.method === 'GET' &&
@@ -73,8 +87,9 @@ async function handle(opts, req, res) {
             return send(res, 400, { error: 'say which manuscript, by its ' +
                                            'prefix, as ?manuscript=' });
         }
-        const out = await opts.threads(prefix,
-            url.searchParams.get('author') || null);
+        const q = (k) => url.searchParams.get(k) || null;
+        const out = await opts.threads(prefix, { author: q('author'),
+            awaiting: q('awaiting'), card: q('card') });
         return send(res, out.status, out.json);
     }
     const m = /^\/dendrite\/review\/([\w-]+)$/.exec(url.pathname);
@@ -88,8 +103,8 @@ async function handle(opts, req, res) {
 /**
  * Listen on 127.0.0.1:`port` (0 for any free port); resolves with the
  * server once listening, rejects when the port cannot be had. `opts`:
- * { port, token, submit(data), status(id), threads(prefix, author) },
- * each answering { status, json }.
+ * { port, token, submit(data), status(id), threads(prefix, { author,
+ * awaiting, card }), reply(data) }, each answering { status, json }.
  */
 function start(opts, http = require('http')) {
     return new Promise((resolve, reject) => {
