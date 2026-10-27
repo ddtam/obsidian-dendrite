@@ -884,3 +884,49 @@ test('the review endpoint answers GET /dendrite/threads with the ' +
         server.close();
     }
 });
+
+test('an edit that leaves a comment marking no text is found, with which ' +
+     'comment it was', () => {
+    const md = 'We %%{1%%sequenced 51 pairs%%}1 [!review] Aly, 2026-10-23: ' +
+        'How many?%% and ==mapped==%%[!review] Josh, 2026-10-24: Which?%%.';
+    assert.deepEqual(r.passagesLost(md, md.replace('sequenced 51 pairs',
+                                                   'sequenced 52 pairs')),
+                     [], 'its passage changed, not gone');
+    const gone = md.replace('sequenced 51 pairs', '');
+    assert.deepEqual(r.passagesLost(md, gone).map((x) => [x.n, x.author,
+        x.text]), [[1, 'Aly', 'How many?']]);
+    // An old comment whose highlight marks were deleted.
+    const unmarked = md.replace('==mapped==', 'mapped');
+    assert.deepEqual(r.passagesLost(md, unmarked).map((x) => x.author),
+                     ['Josh']);
+    // One already marking nothing is not found again.
+    assert.deepEqual(r.passagesLost(gone, gone + ' More.'), []);
+});
+
+test('an insertion after a space goes after the space, as the reviewer ' +
+     'put it, not against the word before', () => {
+    // Aly Karsan's .docx: "each type of " then "genomic " inserted, then
+    // "regulatory change has." It was placed against "of".
+    const text = 'We propose a model that uses the central dogma as a ' +
+        'framework for defining, in advance, the interconnected effects ' +
+        'each type of regulatory change has. Assay outputs follow.';
+    const cards = [{ id: 'DRAC-RAC-2026-37ely', text }];
+    const item = { kind: 'suggest', quote: '', text: 'genomic ',
+        before: 'defining, in advance, the interconnected effects each ' +
+            'type of ',
+        after: 'regulatory change has. Assay outputs follow.' };
+    const at = r.locate(item, cards);
+    assert.equal(text.slice(at.start, at.start + 10), 'regulatory');
+    // Found only by most of its words, the same.
+    const close = r.locate(Object.assign({}, item, {
+        before: 'defining in advance the connected effects each type of ' }),
+        cards);
+    assert.equal(text.slice(close.start, close.start + 10), 'regulatory');
+    // Text before that ends against the insertion keeps it there.
+    const tight = r.locate(Object.assign({}, item, {
+        before: 'the interconnected effects each type of', text: 's' }),
+        [{ id: 'x', text: 'the interconnected effects each type of change' }]);
+    assert.equal(tight.start, 'the interconnected effects each type of'
+        .length);
+});
+

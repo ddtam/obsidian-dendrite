@@ -16,9 +16,11 @@ const review = require('./review.js');
 
 /**
  * The editor extension; `colourOf(author)` a reviewer's colour name or
- * null, `nameOf(author)` the person a name is linked to.
+ * null, `nameOf(author)` the person a name is linked to, `onLost(list)`
+ * told of comments an edit left marking no text (review.passagesLost).
  */
-function reviewExtension(colourOf = () => null, nameOf = (x) => x) {
+function reviewExtension(colourOf = () => null, nameOf = (x) => x,
+                         onLost = () => {}) {
     const { Decoration, EditorView, WidgetType } =
         require('@codemirror/view');
     const { StateField, EditorState } = require('@codemirror/state');
@@ -201,7 +203,16 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x) {
         return protect.length ? protect.flat() : true;
     });
 
-    return [field, step, keep];
+    // An edit typed that leaves a comment marking no text is said, since
+    // the passage is the writer's text and so is not held like the note.
+    const watch = EditorView.updateListener.of((u) => {
+        if (!u.docChanged || !u.transactions.some(user)) return;
+        const lost = review.passagesLost(u.startState.doc.toString(),
+                                         u.state.doc.toString());
+        if (lost.length) onLost(lost);
+    });
+
+    return [field, step, keep, watch];
 }
 
 module.exports = { reviewExtension };

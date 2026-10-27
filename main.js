@@ -2162,8 +2162,8 @@ var require_review = __commonJS({
     function locate(item, cards) {
       if (item.card) {
         const short = (x) => String(x).slice(String(x).lastIndexOf("-") + 1);
-        const k = short(item.card);
-        cards = cards.filter((c) => short(c.id) === k);
+        const k2 = short(item.card);
+        cards = cards.filter((c) => short(c.id) === k2);
       }
       if (item.heading && item.quote) {
         const want = normalise(item.quote).text;
@@ -2177,22 +2177,27 @@ var require_review = __commonJS({
           id: c.id,
           plain,
           norm,
-          src: (k) => plain.map[norm.map[k]]
+          src: (k2) => plain.map[norm.map[k2]]
         };
       });
       const quote = normalise(item.quote || "").text;
       const before = normalise(item.before || "").text;
       const after = normalise(item.after || "").text;
+      const gap = !quote && /\s$/.test(item.before || "");
+      const past = (c, k2) => {
+        while (gap && c.norm.text[k2] === " ") k2++;
+        return k2;
+      };
       const found = [];
       const head = !quote && !before ? after.slice(0, 30) : "";
       const probe = quote || head || tail(before, 30);
       const least = probe.length >= 3 ? 0 : 8;
       if (probe.length >= 3 || quote && (before || after)) {
         for (const c of prepared) {
-          let k = c.norm.text.indexOf(probe);
-          while (k >= 0) {
-            const s = quote || head ? k : k + probe.length;
-            const e = quote ? k + probe.length : s;
+          let k2 = c.norm.text.indexOf(probe);
+          while (k2 >= 0) {
+            const s = quote || head ? k2 : k2 + probe.length;
+            const e = quote ? k2 + probe.length : s;
             let score = 0;
             const pre2 = c.norm.text.slice(0, s);
             const post = c.norm.text.slice(e);
@@ -2204,7 +2209,7 @@ var require_review = __commonJS({
             if (score + sa >= least) {
               found.push({ c, s, e, score: score + sa });
             }
-            k = c.norm.text.indexOf(probe, k + 1);
+            k2 = c.norm.text.indexOf(probe, k2 + 1);
           }
         }
       }
@@ -2212,6 +2217,10 @@ var require_review = __commonJS({
         found.sort((x, y) => y.score - x.score);
         const best2 = found[0];
         if (found.length === 1 || best2.score > found[1].score) {
+          if (!quote && !head) {
+            const k2 = past(best2.c, best2.s);
+            return place(best2.c, k2, k2, "exact");
+          }
           return place(best2.c, best2.s, best2.e, "exact");
         }
       }
@@ -2244,7 +2253,8 @@ var require_review = __commonJS({
         return place(best.c, w2.at, w2.at, "close");
       }
       const w = best.cw[pre[pre.length - 1]];
-      return place(best.c, w.at + w.w.length, w.at + w.w.length, "close");
+      const k = past(best.c, w.at + w.w.length);
+      return place(best.c, k, k, "close");
     }
     function place(c, s, e, how) {
       const start = s < c.norm.map.length ? c.src(s) : c.plain.map[c.plain.map.length - 1] + 1;
@@ -2547,6 +2557,22 @@ var require_review = __commonJS({
       }));
       const protect = [...hide, ...chips.map((c) => [c.from, c.to])].sort((a, b) => a[0] - b[0]);
       return { hide, chips, marks, protect };
+    }
+    function passagesLost(before, after) {
+      const key = (x) => `${x.kind}\0${x.author}\0${x.date}\0` + x.text;
+      const had = /* @__PURE__ */ new Map();
+      for (const x of reviewItems(before)) {
+        if (!x.passage.trim()) continue;
+        had.set(key(x), (had.get(key(x)) || 0) + 1);
+      }
+      const lost = [];
+      reviewItems(after).forEach((x, i) => {
+        const k = key(x);
+        if (x.passage.trim() || !had.get(k)) return;
+        had.set(k, had.get(k) - 1);
+        lost.push({ n: i + 1, author: x.author, text: x.text });
+      });
+      return lost;
     }
     function stripReview(md) {
       return without(md, 0, md.length, scan(md).syntax);
@@ -2903,6 +2929,7 @@ var require_review = __commonJS({
       shownAs,
       wrapPassages,
       editorRanges,
+      passagesLost,
       oldComments,
       convertOld,
       plainMap,
@@ -2945,7 +2972,8 @@ var require_cmreview = __commonJS({
   "src/cmreview.js"(exports2, module2) {
     "use strict";
     var review2 = require_review();
-    function reviewExtension(colourOf = () => null, nameOf = (x) => x) {
+    function reviewExtension(colourOf = () => null, nameOf = (x) => x, onLost = () => {
+    }) {
       const { Decoration, EditorView, WidgetType } = require("@codemirror/view");
       const { StateField, EditorState } = require("@codemirror/state");
       class Chip extends WidgetType {
@@ -3093,7 +3121,15 @@ var require_cmreview = __commonJS({
         const { protect } = tr.startState.field(field);
         return protect.length ? protect.flat() : true;
       });
-      return [field, step, keep];
+      const watch = EditorView.updateListener.of((u) => {
+        if (!u.docChanged || !u.transactions.some(user)) return;
+        const lost = review2.passagesLost(
+          u.startState.doc.toString(),
+          u.state.doc.toString()
+        );
+        if (lost.length) onLost(lost);
+      });
+      return [field, step, keep, watch];
     }
     module2.exports = { reviewExtension };
   }
@@ -3259,7 +3295,8 @@ var require_editor = __commonJS({
               ...base,
               reviewExtension(
                 opts.colourOf,
-                opts.nameOf
+                opts.nameOf,
+                opts.onLost
               ),
               footnoteExtension()
             ];
@@ -8227,12 +8264,20 @@ var DendriteView = class extends ItemView {
   /** A card's editor: Obsidian's, unless the settings say not. */
   newEditor(handlers) {
     const colours = this.colourOf();
+    const nameOf = this.nameOf();
     return cardEditor(
       this.app,
       this,
       Object.assign({
         colourOf: (who) => colours(who || "Reviewer"),
-        nameOf: this.nameOf()
+        nameOf,
+        onLost: (lost) => {
+          const clip = (t) => t.length > 40 ? `${t.slice(0, 39).trim()}\u2026` : t;
+          const said = lost.map((x) => `${x.n} (${nameOf(
+            x.author || "Reviewer"
+          )}: "${clip(x.text.trim())}")`);
+          new Notice(`Dendrite: comment${lost.length === 1 ? "" : "s"} ${said.join(", ")} no longer mark${lost.length === 1 ? "s" : ""} any text. Undo puts the text back.`, 1e4);
+        }
       }, handlers),
       this.plugin.settings.obsidianEditor !== false
     );

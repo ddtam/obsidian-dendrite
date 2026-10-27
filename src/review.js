@@ -642,6 +642,14 @@ function locate(item, cards) {
     const quote = normalise(item.quote || '').text;
     const before = normalise(item.before || '').text;
     const after = normalise(item.after || '').text;
+    // A point after text ending in a space goes after the space, where
+    // the reviewer put it; the normalised text before it has lost that
+    // space, and the point fell against the word before.
+    const gap = !quote && /\s$/.test(item.before || '');
+    const past = (c, k) => {
+        while (gap && c.norm.text[k] === ' ') k++;
+        return k;
+    };
     // Exact: the passage as sent, the context deciding between copies.
     const found = [];
     // A point with no text before it, as a paragraph added above another,
@@ -678,6 +686,10 @@ function locate(item, cards) {
         found.sort((x, y) => y.score - x.score);
         const best = found[0];
         if (found.length === 1 || best.score > found[1].score) {
+            if (!quote && !head) {
+                const k = past(best.c, best.s);
+                return place(best.c, k, k, 'exact');
+            }
             return place(best.c, best.s, best.e, 'exact');
         }
     }
@@ -716,7 +728,8 @@ function locate(item, cards) {
         return place(best.c, w.at, w.at, 'close');
     }
     const w = best.cw[pre[pre.length - 1]];
-    return place(best.c, w.at + w.w.length, w.at + w.w.length, 'close');
+    const k = past(best.c, w.at + w.w.length);
+    return place(best.c, k, k, 'close');
 }
 
 function place(c, s, e, how) {
@@ -1152,6 +1165,29 @@ function editorRanges(md) {
     const protect = [...hide, ...chips.map((c) => [c.from, c.to])]
         .sort((a, b) => a[0] - b[0]);
     return { hide, chips, marks, protect };
+}
+
+/**
+ * The comments an edit left marking no text, that marked some before:
+ * [{ n, author, text }], `n` its number in the card after. A comment is
+ * matched across the edit by its note, which typing cannot change.
+ */
+function passagesLost(before, after) {
+    const key = (x) => `${x.kind}\u0000${x.author}\u0000${x.date}\u0000` +
+        x.text;
+    const had = new Map();
+    for (const x of reviewItems(before)) {
+        if (!x.passage.trim()) continue;
+        had.set(key(x), (had.get(key(x)) || 0) + 1);
+    }
+    const lost = [];
+    reviewItems(after).forEach((x, i) => {
+        const k = key(x);
+        if (x.passage.trim() || !had.get(k)) return;
+        had.set(k, had.get(k) - 1);
+        lost.push({ n: i + 1, author: x.author, text: x.text });
+    });
+    return lost;
 }
 
 /** Markdown for export: review comments out, their passages kept. */
@@ -1628,6 +1664,7 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    reviewerNames, shownAs, wrapPassages, editorRanges,
+                   passagesLost,
                    oldComments, convertOld,
                    plainMap,
                    normalise, locate, reviewItems, alreadyIn,

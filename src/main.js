@@ -3259,9 +3259,19 @@ class DendriteView extends ItemView {
     /** A card's editor: Obsidian's, unless the settings say not. */
     newEditor(handlers) {
         const colours = this.colourOf();
+        const nameOf = this.nameOf();
         return cardEditor(this.app, this, Object.assign({
             colourOf: (who) => colours(who || 'Reviewer'),
-            nameOf: this.nameOf() }, handlers),
+            nameOf,
+            onLost: (lost) => {
+                const clip = (t) => (t.length > 40 ?
+                    `${t.slice(0, 39).trim()}…` : t);
+                const said = lost.map((x) => `${x.n} (${nameOf(
+                    x.author || 'Reviewer')}: "${clip(x.text.trim())}")`);
+                new Notice(`Dendrite: comment${lost.length === 1 ? '' :
+                    's'} ${said.join(', ')} no longer mark${lost.length ===
+                    1 ? 's' : ''} any text. Undo puts the text back.`, 10000);
+            } }, handlers),
                           this.plugin.settings.obsidianEditor !== false);
     }
 

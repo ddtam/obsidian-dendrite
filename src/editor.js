@@ -135,7 +135,7 @@ function obsidianEditor(app, parent, opts) {
             const base = super.buildLocalExtensions();
             try {
                 return [...base, reviewExtension(opts.colourOf,
-                                                 opts.nameOf),
+                                                 opts.nameOf, opts.onLost),
                         footnoteExtension()];
             } catch (err) {
                 console.warn('Dendrite: review comments and footnotes ' +
