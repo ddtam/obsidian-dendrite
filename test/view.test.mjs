@@ -462,6 +462,62 @@ test('the board rebuilt keeps drawn cards drawn; a slot is filled to be ' +
     }
 });
 
+test('find leaves slots empty, and a slot filled while finding shows ' +
+     'its matches below', async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id !== 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+            '    - [[G-bbbbb|B]]\n',
+            { 'G-aaaaa': 'Aims.', 'G-bbbbb': 'TET2 here.' });
+        view.active = 'G-bbbbb';
+        view.plugin.typedAt = Date.now() + 5000;
+        const a = view.cardEls.get('G-aaaaa');
+        if (!a.hasClass('is-slot')) view.emptyFar(['G-aaaaa']);
+        assert.ok(a.hasClass('is-slot'));
+        view.openFind();
+        view.find.input.value = 'tet2';
+        view.find.input.dispatchEvent(new h.window.Event('input'));
+        await tick(150);
+        assert.equal(a.childElementCount, 0, 'the slot stays empty');
+        await view.renderCard('G-aaaaa');
+        assert.equal(a.querySelector(':scope > .dendrite-find-below')
+            ?.textContent, '1 below');
+        view.plugin.typedAt = 0;
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
+test('a slot never drawn is estimated from the cards drawn so far, ' +
+     'measured as they resize', async () => {
+    const cards = {};
+    const lines = [];
+    // Ten drawn cards of 1 to 10 lines' worth of text, each measured at
+    // 50 px plus 30 px a line; one more never drawn, of 20 lines.
+    for (let k = 1; k <= 11; k++) {
+        const id = `G-${String(k).padStart(5, 'a')}`;
+        cards[id] = 'x'.repeat(Math.round(44 * (k === 11 ? 20 : k)) - 1);
+        lines.push(`- [[${id}|c${k}]]`);
+    }
+    const ids = Object.keys(cards);
+    globalThis.inView = (el) => el.dataset && el.dataset.id !== ids[10];
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n' + lines.join('\n') + '\n',
+            cards);
+        await view.loadBodies();
+        view.resizer.cb(ids.slice(0, 10).map((id, k) => ({
+            target: view.cardEls.get(id),
+            borderBoxSize: [{ blockSize: 50 + 30 * (k + 1) }] })));
+        assert.equal(view.slotHeight(ids[10]), 50 + 30 * 20);
+        assert.equal(view.slotHeight(ids[3]), 50 + 30 * 4,
+                     'a drawn card keeps its own height');
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';

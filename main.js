@@ -5368,10 +5368,11 @@ function setStyles(el, styles) {
 }
 var DRAW_REACH = 2;
 var DRAW_BATCH = 8;
-var SLOT_FRAME = 84;
+var SLOT_FRAME = 118;
 var SLOT_PADDING = 28;
 var SLOT_CHAR = 8;
 var SLOT_LINE = 24;
+var HEIGHT_SAMPLES = 8;
 var EMPTY_REACH = 5;
 function idleDrawer(winOf, next, busy) {
   let handle = null;
@@ -5626,7 +5627,7 @@ var DendriteView = class extends ItemView {
       (entries) => this.onVisible(entries),
       { root: null, rootMargin: "600px 200px" }
     );
-    this.resizer = new ResizeObserver(() => this.onResize());
+    this.resizer = new ResizeObserver((entries) => this.onResize(entries));
     this.registerEvent(this.app.vault.on(
       "modify",
       (f) => this.onModify(f)
@@ -6219,10 +6220,50 @@ var DendriteView = class extends ItemView {
   slotHeight(id) {
     const known = this.heights && this.heights.get(id);
     if (known) return known;
+    const lines = this.slotLines(id);
+    const fit = this.heightFit();
+    if (fit) return Math.max(SLOT_LINE, Math.round(fit.a + fit.b * lines));
+    return SLOT_FRAME + lines * SLOT_LINE;
+  }
+  /** How many lines a card's text would take, roughly: its length. */
+  slotLines(id) {
     const b = this.bodies && this.bodies.get(id);
     const chars = b ? b.body.length : 0;
     const perLine = Math.max(20, (this.plugin.settings.cardWidth - SLOT_PADDING) / SLOT_CHAR);
-    return SLOT_FRAME + Math.max(1, Math.ceil(chars / perLine)) * SLOT_LINE;
+    return Math.max(1, Math.ceil(chars / perLine));
+  }
+  /** A drawn card's height, kept for its slot and learnt from. */
+  learnHeight(id, h) {
+    if (!id || !h) return;
+    this.heights = this.heights || /* @__PURE__ */ new Map();
+    this.heights.set(id, h);
+    if (!this.bodies || !this.bodies.has(id)) return;
+    this.samples = this.samples || /* @__PURE__ */ new Map();
+    this.samples.set(id, [this.slotLines(id), h]);
+    this.fit = null;
+  }
+  /**
+   * Height against lines, fitted by least squares over the cards drawn,
+   * as { a, b }: so a slot never drawn is estimated from how this
+   * manuscript's cards come out in this font and width. Null until
+   * HEIGHT_SAMPLES cards are measured.
+   */
+  heightFit() {
+    if (this.fit !== void 0 && this.fit !== null) return this.fit;
+    const pts = [...(this.samples || /* @__PURE__ */ new Map()).values()];
+    if (pts.length < HEIGHT_SAMPLES) return null;
+    const n = pts.length;
+    const mx = pts.reduce((t, p) => t + p[0], 0) / n;
+    const my = pts.reduce((t, p) => t + p[1], 0) / n;
+    let sxx = 0;
+    let sxy = 0;
+    for (const [x, y] of pts) {
+      sxx += (x - mx) * (x - mx);
+      sxy += (x - mx) * (y - my);
+    }
+    const b = sxx > 0 && sxy > 0 ? sxy / sxx : SLOT_LINE;
+    this.fit = { a: my - b * mx, b };
+    return this.fit;
   }
   /**
    * A slot filled with the card's frame: its role icon and grip, its
@@ -6303,12 +6344,16 @@ var DendriteView = class extends ItemView {
     this.numberCard(id, card);
     this.roleCard(id, card);
     this.statusCard(id, card);
+    this.stackOpenCard(id, card);
     this.fillQuota(card, id);
     card.toggleClass("is-active", id === this.active);
     card.toggleClass("is-lineage", !!(this.lineage && this.lineage.has(id)));
     card.toggleClass("is-picked", !!(this.picked && this.picked.has(id)));
     if (id === this.active) this.renderToolbar();
-    if (this.find) this.schedulePaintFind();
+    if (this.find) {
+      this.findCard(id, card);
+      this.schedulePaintFind();
+    }
   }
   /** Find's marks painted again once, after the cards being filled. */
   schedulePaintFind() {
@@ -6543,7 +6588,13 @@ var DendriteView = class extends ItemView {
     this.renderToolbar();
     this.scheduleFlow();
   }
-  onResize() {
+  onResize(entries = []) {
+    for (const e of entries) {
+      const card = e.target;
+      const size = e.borderBoxSize && e.borderBoxSize[0];
+      if (!size || !card.classList.contains("dendrite-card") || card.classList.contains("is-slot") || card.classList.contains("is-pending") || card.classList.contains("is-editing")) continue;
+      this.learnHeight(card.dataset.id, size.blockSize);
+    }
     if (this.resizeFrame) return;
     this.resizeFrame = this.pageWin().requestAnimationFrame(() => {
       this.resizeFrame = null;
@@ -8776,20 +8827,28 @@ var DendriteView = class extends ItemView {
       counts.set(id, open);
     }
     this.stackOpen = counts;
-    for (const [id, all] of counts) {
+    for (const id of counts.keys()) {
       const card = this.cardEls.get(id);
-      if (!card) continue;
-      const open = this.fannedId === id ? 0 : all;
-      card.toggleClass("has-stack-open", open > 0);
-      const s = card.querySelector(`[data-stack="${id}"]`);
-      if (!s) continue;
-      const n = this.stackOf(id).length + 1;
-      s.setText(`${n} versions` + (open ? ` \xB7 ${open} open` : ""));
-      s.toggleClass("is-revise", open > 0);
-      const colour = open && this.plugin.statusColour && this.plugin.statusColour("revise");
-      if (colour) s.style.setProperty("--dendrite-chip", colour);
-      else s.style.removeProperty("--dendrite-chip");
+      if (card) this.stackOpenCard(id, card);
     }
+  }
+  /**
+   * A stacked card's open comments, from the last markOpenStacks: its
+   * edges flagged and the count on its versions chip.
+   */
+  stackOpenCard(id, card) {
+    const all = this.stackOpen && this.stackOpen.get(id);
+    if (all === void 0) return;
+    const open = this.fannedId === id ? 0 : all;
+    card.toggleClass("has-stack-open", open > 0);
+    const s = card.querySelector(`[data-stack="${id}"]`);
+    if (!s) return;
+    const n = this.stackOf(id).length + 1;
+    s.setText(`${n} versions` + (open ? ` \xB7 ${open} open` : ""));
+    s.toggleClass("is-revise", open > 0);
+    const colour = open && this.plugin.statusColour && this.plugin.statusColour("revise");
+    if (colour) s.style.setProperty("--dendrite-chip", colour);
+    else s.style.removeProperty("--dendrite-chip");
   }
   /** An old version taken out of a stack, its note to the trash. */
   async deleteVersion(id) {
@@ -11258,19 +11317,28 @@ var DendriteView = class extends ItemView {
         below.set(p.id, (below.get(p.id) || 0) + k);
       }
     }
-    for (const [id, card] of this.cardEls) {
-      card.toggleClass("is-match", on && per.has(id));
-      const old = card.querySelector(":scope > .dendrite-find-below");
-      if (old) old.remove();
-      if (on && below.get(id)) {
-        const chip = card.createDiv({
-          cls: "dendrite-find-below",
-          text: `${below.get(id)} below`
-        });
-        chip.setAttr("aria-label", "Matches in this card's branch");
-      }
-    }
+    this.findShown = { on, per, below };
+    for (const [id, card] of this.cardEls) this.findCard(id, card);
     this.paintFind();
+  }
+  /**
+   * A card marked as a match or not, and, drawn, how many matches its
+   * branch holds below it; a slot gets the count once filled.
+   */
+  findCard(id, card) {
+    const s = this.findShown;
+    const on = !!(s && s.on && this.find);
+    card.toggleClass("is-match", on && s.per.has(id));
+    if (card.hasClass("is-slot")) return;
+    const old = card.querySelector(":scope > .dendrite-find-below");
+    if (old) old.remove();
+    if (on && s.below.get(id)) {
+      const chip = card.createDiv({
+        cls: "dendrite-find-below",
+        text: `${s.below.get(id)} below`
+      });
+      chip.setAttr("aria-label", "Matches in this card's branch");
+    }
   }
   /** Step to the next match, or back with -1, wrapping round. */
   async findStep(dir) {
