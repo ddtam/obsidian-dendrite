@@ -1121,7 +1121,9 @@ function removeItem(md, n, apply = false) {
 /**
  * What the card editor draws in place of a card's comment syntax, as
  * offsets: `hide` each start marker, `chips` each note with its replies
- * ({ from, to, n, author, kind, text }, numbered as on the board),
+ * ({ from, to, n, author, date, kind, text, passage, replies, first },
+ * numbered as on the board; `passage` whether it marks one, `first`
+ * false for a Google comment's later passages, shown under the first),
  * `marks` each passage held between markers ({ from, to, author, kind }),
  * and `protect`, every range typing must not change.
  */
@@ -1131,7 +1133,8 @@ function editorRanges(md) {
         .map((x) => [x.open.start, x.open.end]).sort((a, b) => a[0] - b[0]);
     const numbers = new Map();
     let n = 0;
-    const chips = items.map((x) => {
+    const firsts = firstOfComment(items);
+    const chips = items.map((x, i) => {
         const g = googleOf(x);
         let num = g && numbers.get(g);
         if (!num) {
@@ -1139,7 +1142,9 @@ function editorRanges(md) {
             if (g) numbers.set(g, num);
         }
         return { from: x.noteStart, to: x.end, n: num, author: x.author,
-                 kind: x.kind, text: x.text };
+                 date: x.date, kind: x.kind, text: x.text,
+                 passage: !!x.passage, replies: x.replies,
+                 first: firsts[i] === i };
     });
     const marks = items.filter((x) => x.open).map((x) => ({
         from: x.open.end, to: x.noteStart, author: x.author,

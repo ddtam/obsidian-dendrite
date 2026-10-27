@@ -2,7 +2,9 @@
 // Review comments in the card editor. A comment's syntax is drawn in
 // place rather than shown as text: a start marker hidden, a note and its
 // replies a small number in the reviewer's colour, a passage held between
-// markers tinted, so the card reads as text while it is typed in. The
+// markers tinted, so the card reads as text while it is typed in. What
+// each says stays in view, as on the board: a suggestion's new text after
+// its passage, struck through, and every comment under its paragraph. The
 // cursor steps over a hidden piece as one, and typing or deleting leaves
 // the pieces whole; they are changed only through the board's Resolve,
 // Apply and replies. Which pieces are where is review.editorRanges.
@@ -37,7 +39,8 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x) {
         toDOM(view) {
             const c = this.c;
             // The editor's own document, which may be a popout window's.
-            const el = view.dom.ownerDocument.createElement('sup');
+            const doc = view.dom.ownerDocument;
+            const el = doc.createElement('sup');
             const tint = colourOf(c.author);
             el.className = 'dendrite-review-n dendrite-cm-chip' +
                 (c.kind === 'suggest' ? ' is-suggest' : '') +
@@ -47,7 +50,18 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x) {
                 (c.text.trim() ? `suggests: ${c.text.trim()}` :
                     'suggests deleting this') : c.text;
             el.title = `${nameOf(c.author) || 'Reviewer'}: ${said}`;
-            return el;
+            if (c.kind !== 'suggest' || !c.text.trim()) return el;
+            // A suggestion's new text, after its passage, before its number.
+            const wrap = doc.createElement('span');
+            wrap.className = 'dendrite-cm-suggestion';
+            const lead = /^\s*/.exec(c.text)[0];
+            if (lead) wrap.append(lead);
+            const added = doc.createElement('span');
+            added.className = 'dendrite-review-new' +
+                (tint ? ` is-c-${tint}` : '');
+            added.textContent = c.text.slice(lead.length);
+            wrap.append(added, el);
+            return wrap;
         }
 
         ignoreEvent() {
@@ -55,10 +69,81 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x) {
         }
     }
 
+    // The comments of a paragraph, under it, as the board shows them, to
+    // read while writing; they are changed from the board.
+    class Notes extends WidgetType {
+        constructor(list) {
+            super();
+            this.list = list;
+            this.key = JSON.stringify(list);
+        }
+
+        eq(other) {
+            return this.key === other.key;
+        }
+
+        toDOM(view) {
+            const doc = view.dom.ownerDocument;
+            const div = (cls, parent) => {
+                const el = doc.createElement('div');
+                el.className = cls;
+                if (parent) parent.append(el);
+                return el;
+            };
+            const box = div('dendrite-review-notes dendrite-cm-notes');
+            for (const c of this.list) {
+                const tint = colourOf(c.author);
+                const note = div('dendrite-review-note' +
+                    (c.kind === 'suggest' ? ' is-suggest' : '') +
+                    (tint ? ` is-c-${tint}` : ''), box);
+                const n = doc.createElement('span');
+                n.className = 'dendrite-review-n';
+                n.textContent = String(c.n);
+                note.append(n);
+                const main = div('dendrite-review-main', note);
+                const meta = div('dendrite-review-meta', main);
+                const who = doc.createElement('b');
+                review.shownAs(who, c.author || 'Reviewer', nameOf);
+                meta.append(who, ` · ${review.shortDate(c.date)}`);
+                const { text: said } = review.noteLink(c.text);
+                div('dendrite-review-text', main).textContent =
+                    c.kind !== 'suggest' ? said :
+                        !c.text.trim() ? 'Suggests deleting this.' :
+                            c.passage ? `Suggests: ${c.text.trim()}` :
+                                `Suggests adding: ${c.text.trim()}`;
+                for (const r of c.replies || []) {
+                    const rel = div('dendrite-review-reply', main);
+                    const by = div('dendrite-review-meta', rel);
+                    const b = doc.createElement('b');
+                    b.textContent = r.author || 'Me';
+                    by.append(b, ` · ${review.shortDate(r.date)}`);
+                    div('dendrite-review-text', rel).textContent = r.text;
+                }
+            }
+            return box;
+        }
+
+        ignoreEvent() {
+            return true;
+        }
+    }
+
     const build = (state) => {
         const r = review.editorRanges(state.doc.toString());
         const atomic = [];
         const all = [];
+        // Each paragraph's comments, under its last line.
+        const under = new Map();
+        for (const c of r.chips) {
+            if (!c.first) continue;
+            const end = state.doc.lineAt(c.to).to;
+            if (!under.has(end)) under.set(end, []);
+            under.get(end).push(c);
+        }
+        for (const [end, list] of under) {
+            all.push(Decoration.widget({ widget: new Notes(list),
+                                         block: true, side: 1 }).range(end));
+        }
         for (const [from, to] of r.hide) {
             atomic.push(Decoration.replace({}).range(from, to));
         }

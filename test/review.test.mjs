@@ -427,6 +427,12 @@ test('in the card editor a comment\'s syntax is hidden: its start marker ' +
             '2026-10-23: 200%% have']]);
     assert.deepEqual(e.protect.map(show), [...e.hide, ...e.chips.map(
         (c) => [c.from, c.to])].sort((a, b) => a[0] - b[0]).map(show));
+    // What the editor shows of each, under its paragraph and in its text.
+    assert.deepEqual(e.chips.map((c) => [c.date, c.text, c.passage,
+        c.replies.map((x) => x.text), c.first]), [
+        ['2026-10-23', '200', true, [], true],
+        ['2026-10-23', 'Hm.', true, ['Yes.'], true],
+        ['2026-10-24', 'Ok.', true, [], true]]);
 });
 
 test('a suggested insertion keeps its spaces, and applying it puts it ' +

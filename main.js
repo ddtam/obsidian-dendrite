@@ -2492,7 +2492,8 @@ var require_review = __commonJS({
       const hide = items.filter((x) => x.open).map((x) => [x.open.start, x.open.end]).sort((a, b) => a[0] - b[0]);
       const numbers = /* @__PURE__ */ new Map();
       let n = 0;
-      const chips = items.map((x) => {
+      const firsts = firstOfComment(items);
+      const chips = items.map((x, i) => {
         const g = googleOf(x);
         let num = g && numbers.get(g);
         if (!num) {
@@ -2504,8 +2505,12 @@ var require_review = __commonJS({
           to: x.end,
           n: num,
           author: x.author,
+          date: x.date,
           kind: x.kind,
-          text: x.text
+          text: x.text,
+          passage: !!x.passage,
+          replies: x.replies,
+          first: firsts[i] === i
         };
       });
       const marks = items.filter((x) => x.open).map((x) => ({
@@ -2929,22 +2934,93 @@ var require_cmreview = __commonJS({
         }
         toDOM(view) {
           const c = this.c;
-          const el = view.dom.ownerDocument.createElement("sup");
+          const doc = view.dom.ownerDocument;
+          const el = doc.createElement("sup");
           const tint = colourOf(c.author);
           el.className = "dendrite-review-n dendrite-cm-chip" + (c.kind === "suggest" ? " is-suggest" : "") + (tint ? ` is-c-${tint}` : "");
           el.textContent = String(c.n);
           const said = c.kind === "suggest" ? c.text.trim() ? `suggests: ${c.text.trim()}` : "suggests deleting this" : c.text;
           el.title = `${nameOf(c.author) || "Reviewer"}: ${said}`;
-          return el;
+          if (c.kind !== "suggest" || !c.text.trim()) return el;
+          const wrap = doc.createElement("span");
+          wrap.className = "dendrite-cm-suggestion";
+          const lead = /^\s*/.exec(c.text)[0];
+          if (lead) wrap.append(lead);
+          const added = doc.createElement("span");
+          added.className = "dendrite-review-new" + (tint ? ` is-c-${tint}` : "");
+          added.textContent = c.text.slice(lead.length);
+          wrap.append(added, el);
+          return wrap;
         }
         ignoreEvent() {
           return false;
+        }
+      }
+      class Notes extends WidgetType {
+        constructor(list) {
+          super();
+          this.list = list;
+          this.key = JSON.stringify(list);
+        }
+        eq(other) {
+          return this.key === other.key;
+        }
+        toDOM(view) {
+          const doc = view.dom.ownerDocument;
+          const div = (cls, parent) => {
+            const el = doc.createElement("div");
+            el.className = cls;
+            if (parent) parent.append(el);
+            return el;
+          };
+          const box = div("dendrite-review-notes dendrite-cm-notes");
+          for (const c of this.list) {
+            const tint = colourOf(c.author);
+            const note = div("dendrite-review-note" + (c.kind === "suggest" ? " is-suggest" : "") + (tint ? ` is-c-${tint}` : ""), box);
+            const n = doc.createElement("span");
+            n.className = "dendrite-review-n";
+            n.textContent = String(c.n);
+            note.append(n);
+            const main = div("dendrite-review-main", note);
+            const meta = div("dendrite-review-meta", main);
+            const who = doc.createElement("b");
+            review2.shownAs(who, c.author || "Reviewer", nameOf);
+            meta.append(who, ` \xB7 ${review2.shortDate(c.date)}`);
+            const { text: said } = review2.noteLink(c.text);
+            div("dendrite-review-text", main).textContent = c.kind !== "suggest" ? said : !c.text.trim() ? "Suggests deleting this." : c.passage ? `Suggests: ${c.text.trim()}` : `Suggests adding: ${c.text.trim()}`;
+            for (const r of c.replies || []) {
+              const rel = div("dendrite-review-reply", main);
+              const by = div("dendrite-review-meta", rel);
+              const b = doc.createElement("b");
+              b.textContent = r.author || "Me";
+              by.append(b, ` \xB7 ${review2.shortDate(r.date)}`);
+              div("dendrite-review-text", rel).textContent = r.text;
+            }
+          }
+          return box;
+        }
+        ignoreEvent() {
+          return true;
         }
       }
       const build = (state) => {
         const r = review2.editorRanges(state.doc.toString());
         const atomic = [];
         const all = [];
+        const under = /* @__PURE__ */ new Map();
+        for (const c of r.chips) {
+          if (!c.first) continue;
+          const end = state.doc.lineAt(c.to).to;
+          if (!under.has(end)) under.set(end, []);
+          under.get(end).push(c);
+        }
+        for (const [end, list] of under) {
+          all.push(Decoration.widget({
+            widget: new Notes(list),
+            block: true,
+            side: 1
+          }).range(end));
+        }
         for (const [from, to] of r.hide) {
           atomic.push(Decoration.replace({}).range(from, to));
         }

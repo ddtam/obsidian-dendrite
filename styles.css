@@ -1387,9 +1387,11 @@ body {
     color: var(--dendrite-suggest);
 }
 /* In the card editor: a comment's number where its note is, which shows
-   the comment on hover, and its passage tinted, a suggestion's dotted
-   under as well; tints add up where comments overlap. */
-.dendrite-cm .dendrite-cm-chip {
+   the comment on hover, its passage tinted, a suggestion's struck through
+   with its new text after it, as on the board; tints add up where
+   comments overlap. Each paragraph's comments are under it. */
+.dendrite-cm .dendrite-cm-chip,
+.dendrite-cm .dendrite-cm-suggestion {
     cursor: default;
 }
 .dendrite-cm .dendrite-cm-passage {
@@ -1399,7 +1401,19 @@ body {
 .dendrite-cm .dendrite-cm-passage.is-suggest {
     background: color-mix(in srgb, var(--dendrite-suggest) 12%,
                           transparent);
-    text-decoration: underline dotted var(--dendrite-suggest);
+    text-decoration: line-through;
+    text-decoration-color: var(--dendrite-suggest);
+}
+.dendrite-cm .dendrite-review-new {
+    color: var(--dendrite-suggest);
+    text-decoration: underline;
+    text-decoration-color: var(--dendrite-suggest);
+    text-underline-offset: 2px;
+    margin-left: 3px;
+}
+.dendrite-cm .dendrite-cm-notes {
+    margin: 2px 0 8px;
+    white-space: normal;
 }
 .dendrite-review-notes {
     display: flex;
