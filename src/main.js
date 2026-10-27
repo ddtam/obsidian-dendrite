@@ -1340,21 +1340,10 @@ class DendriteView extends ItemView {
      * HEIGHT_SAMPLES cards are measured.
      */
     heightFit() {
-        if (this.fit !== undefined && this.fit !== null) return this.fit;
-        const pts = [...(this.samples || new Map()).values()];
-        if (pts.length < HEIGHT_SAMPLES) return null;
-        const n = pts.length;
-        const mx = pts.reduce((t, p) => t + p[0], 0) / n;
-        const my = pts.reduce((t, p) => t + p[1], 0) / n;
-        let sxx = 0;
-        let sxy = 0;
-        for (const [x, y] of pts) {
-            sxx += (x - mx) * (x - mx);
-            sxy += (x - mx) * (y - my);
+        if (!this.fit) {
+            this.fit = core.fitHeights([...(this.samples || new Map())
+                .values()], HEIGHT_SAMPLES, SLOT_LINE);
         }
-        // All one length: the line height assumed, the frame measured.
-        const b = sxx > 0 && sxy > 0 ? sxy / sxx : SLOT_LINE;
-        this.fit = { a: my - b * mx, b };
         return this.fit;
     }
 
@@ -1508,6 +1497,9 @@ class DendriteView extends ItemView {
         if (!this.board) return null;
         this.undrawable = this.undrawable || new WeakSet();
         const box = this.board.getBoundingClientRect();
+        // Not shown, as in a tab behind another, every card measures
+        // nothing and all would seem near; it is drawn once shown.
+        if (!box.width || !box.height) return null;
         const cx = box.left + box.width / 2;
         const cy = box.top + box.height / 2;
         const reachX = box.width / 2 + box.width;
@@ -7280,30 +7272,89 @@ class DendritePreview extends ItemView {
     /**
      * The waiting parts nearest the middle of the view, up to
      * DRAW_BATCH, drawn together; or null. Only parts within DRAW_REACH
-     * screens of the view are drawn, so a
-     * long document keeps only the part around the reader drawn.
+     * screens of the view are drawn, so a long document keeps only the
+     * part around the reader drawn; with none of those waiting, drawn
+     * parts beyond EMPTY_REACH screens are emptied, keeping their
+     * heights. The drawn parts' heights, read on the way, are learnt
+     * from for those never drawn (partHeight).
      */
     nextToDraw() {
         if (!this.doc) return null;
         const v = this.doc.getBoundingClientRect();
+        // Not shown, every part measures nothing and all would seem near.
+        if (!v.width || !v.height) return null;
         const mid = v.top + v.height / 2;
         const reach = v.height / 2 + DRAW_REACH * v.height;
+        const away = v.height / 2 + EMPTY_REACH * v.height;
+        this.samples = this.samples || new Map();
         const near = [];
+        const far = [];
         for (const [id, b] of this.blocks) {
-            if (!b.el.hasClass('is-pending') || b.el.hasClass('is-empty') ||
-                !this.doc.contains(b.el)) continue;
+            if (b.el.hasClass('is-empty') || !this.doc.contains(b.el)) {
+                continue;
+            }
             const r = b.el.getBoundingClientRect();
             const d = Math.abs(r.top + r.height / 2 - mid);
+            if (!b.el.hasClass('is-pending')) {
+                if (r.height && b.lines) {
+                    this.samples.set(id, [b.lines, r.height]);
+                    this.fit = null;
+                }
+                if (d > away && id !== this.active) far.push([id, r.height]);
+                continue;
+            }
             if (d <= reach) near.push([d, id]);
         }
-        if (!near.length) return null;
+        if (!near.length) {
+            for (const [id, h] of far) this.emptyPart(id, h);
+            return null;
+        }
         near.sort((a, b) => a[0] - b[0]);
         return Promise.all(near.slice(0, DRAW_BATCH).map(([, id]) =>
             this.renderBlock(id).catch((err) => this.failed(err))));
     }
 
+    /** How many lines a part's text would take, roughly: its length. */
+    partLines(s) {
+        const chars = (s.text || '').length + (s.gathered ? 200 : 0);
+        const perLine = Math.max(20, (this.textWidth || 600) / SLOT_CHAR);
+        return Math.max(1, Math.ceil(chars / perLine));
+    }
+
+    /**
+     * How tall a part waiting to be drawn is: as tall as when last drawn
+     * with the same text, or, from the parts drawn so far, as its length
+     * suggests (core.fitHeights).
+     */
+    partHeight(b) {
+        if (b.measured && b.measured.key === b.key) return b.measured.h;
+        if (!this.fit) {
+            this.fit = core.fitHeights([...(this.samples || new Map())
+                .values()], HEIGHT_SAMPLES, SLOT_LINE);
+        }
+        const lines = b.lines || 1;
+        return Math.max(SLOT_LINE, Math.round(this.fit ?
+            this.fit.a + this.fit.b * lines : lines * SLOT_LINE + 16));
+    }
+
+    /** A drawn part emptied to wait again, at the height it was drawn. */
+    emptyPart(id, h) {
+        const b = this.blocks.get(id);
+        if (!b || b.el.hasClass('is-pending')) return;
+        if (h) b.measured = { key: b.key, h };
+        if (b.comp) b.comp.unload();
+        b.comp = null;
+        b.el.empty();
+        b.el.addClass('is-pending');
+        setStyles(b.el, { height: `${this.partHeight(b)}px` });
+        if (this.observer) this.observer.observe(b.el);
+    }
+
     async refreshNow() {
         if (!this.file || !this.doc) return;
+        // The text's width, for estimating how tall a part not yet drawn
+        // will be (partLines).
+        this.textWidth = this.doc.clientWidth;
         const text = await this.app.vault.cachedRead(this.file);
         const root = core.parseIndex(core.splitFrontmatter(text).body).root;
         const fm = this.app.metadataCache.getFileCache(this.file)
@@ -7801,6 +7852,10 @@ class DendritePreview extends ItemView {
                 }
             }
         }
+        // Each block placed after the one before it only when it is not
+        // already there: moving them all on every refresh laid the whole
+        // document out again, about once a save.
+        let prev = null;
         // Shown with comments, a block is drawn again when they or their
         // replies change, though what it prints does not.
         const said = (id) => !this.showComments ? '' : JSON.stringify(
@@ -7834,6 +7889,13 @@ class DendritePreview extends ItemView {
                 b.el.addClass('is-pending');
                 if (this.observer && !empty) this.observer.observe(b.el);
             }
+            b.lines = this.partLines(s);
+            // Waiting to be drawn, a part is as tall as it was when last
+            // drawn with this text, or as it is estimated to be.
+            if (b.el.hasClass('is-pending')) {
+                setStyles(b.el, { height: empty ? '' :
+                    `${this.partHeight(b)}px` });
+            }
             b.el.toggleClass('is-active', s.id === this.active);
             const flag = this.flags && this.flags.has(s.id);
             b.el.toggleClass('is-flagged', !!flag);
@@ -7841,7 +7903,9 @@ class DendritePreview extends ItemView {
                 b.el.style.setProperty('--dendrite-chip',
                                        this.flags.get(s.id));
             }
-            this.doc.appendChild(b.el);
+            const at = prev ? prev.nextSibling : this.doc.firstChild;
+            if (at !== b.el) this.doc.insertBefore(b.el, at);
+            prev = b.el;
         }
     }
 
@@ -7865,9 +7929,11 @@ class DendritePreview extends ItemView {
         b.comp = new Component();
         b.comp.load();
         b.el.empty();
-        // Drawn afresh: no room kept for bubbles it may no longer have.
+        // Drawn afresh: no room kept for bubbles it may no longer have,
+        // and no height kept from while it waited.
         b.el.removeClass('has-bubbles');
         b.el.style.minHeight = '';
+        b.el.style.height = '';
         const f = this.cardFile(id);
         const path = f ? f.path : this.file.path;
         // The same tidied text export writes, so the preview shows the

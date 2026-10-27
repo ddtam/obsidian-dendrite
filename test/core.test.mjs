@@ -988,3 +988,18 @@ test('review rounds: a fingerprint of what each card prints, and which ' +
     assert.deepEqual([...c.changedSince(sent, Object.assign({}, now,
         { R: '#new' }))], ['Q', 'R'], 'a card new since');
 });
+
+test('heights are fitted against lines from the text drawn, for the text ' +
+     'not yet drawn', () => {
+    const pts = [[1, 80], [2, 110], [3, 140], [4, 170]];
+    assert.equal(c.fitHeights(pts.slice(0, 3), 4, 24), null,
+                 'too few to go on');
+    const f = c.fitHeights(pts, 4, 24);
+    assert.equal(f.a, 50);
+    assert.equal(f.b, 30);
+    // All of one length: the slope assumed, through their mean.
+    assert.deepEqual(c.fitHeights([[2, 100], [2, 110], [2, 90],
+                                      [2, 100]], 4, 24),
+                     { a: 52, b: 24 });
+});
+

@@ -60,6 +60,12 @@ const cardPath = (id) => `W/Grant/cards/${id}.md`;
 // A card not yet drawn: a slot, far from the view, or a frame whose text
 // waits to be drawn.
 const waiting = (el) => el.hasClass('is-slot') || el.hasClass('is-pending');
+// A board or preview shown, 1000 by 500 px: jsdom lays nothing out, and
+// one measuring nothing is taken as not shown.
+const shown = (el) => {
+    el.getBoundingClientRect = () => ({ top: 0, bottom: 500, left: 0,
+        right: 1000, width: 1000, height: 500 });
+};
 const type = (view, value) => {
     const ta = view.editing.ta;
     ta.value = value;
@@ -246,6 +252,7 @@ test('cards never scrolled into view are drawn while the board is ' +
             '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
             '    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n',
             { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
+        shown(view.board);
         const pending = () => [...view.cardEls]
             .filter(([, el]) => waiting(el)).map(([id]) => id);
         assert.deepEqual(pending().sort(), ['G-bbbbb', 'G-ccccc'],
@@ -296,6 +303,103 @@ test('idle drawing keeps to the cards near what the board shows, and ' +
         assert.deepEqual(pending(), []);
     } finally {
         globalThis.inView = null;
+    }
+});
+
+test('the preview refreshed with nothing changed moves none of its ' +
+     'parts, which would lay the whole document out again', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|p]]\n- [[G-ccccc|q]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), '# Aims');
+    await app.vault.create(cardPath('G-bbbbb'), 'The prose.');
+    await app.vault.create(cardPath('G-ccccc'), 'More prose.');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX });
+    await tick(50);
+    const changes = [];
+    const watch = new h.window.MutationObserver((m) => changes.push(...m));
+    watch.observe(view.doc, { childList: true });
+    await view.refresh();
+    await tick();
+    watch.disconnect();
+    assert.equal(changes.length, 0);
+    const order = () => [...view.doc.querySelectorAll('.dendrite-pblock')]
+        .map((el) => el.dataset.id);
+    assert.deepEqual(order(), ['G-aaaaa', 'G-bbbbb', 'G-ccccc']);
+    // A card moved to the front is moved in the preview too.
+    const f = app.vault.getAbstractFileByPath(INDEX);
+    await app.vault.modify(f, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-ccccc|q]]\n- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|p]]\n');
+    await view.refresh();
+    assert.deepEqual(order(), ['G-ccccc', 'G-aaaaa', 'G-bbbbb']);
+    await view.onClose();
+});
+
+test('the preview empties drawn parts far from its view at their ' +
+     'height, keeps the active one, and sizes parts never drawn',
+     async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|p]]\n- [[G-ccccc|q]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), '# Aims');
+    await app.vault.create(cardPath('G-bbbbb'), 'The prose. '.repeat(40));
+    await app.vault.create(cardPath('G-ccccc'), 'More prose.');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    h.window.document.body.appendChild(view.contentEl);
+    // The view 500 px high: A and C in it at first, B far below. Only
+    // what is near the view is seen scrolling into it.
+    const tops = { 'G-aaaaa': 0, 'G-bbbbb': 9000, 'G-ccccc': 200 };
+    const seen = view.observer;
+    view.observer = { observe(el) {
+        if (Math.abs(tops[el.dataset.id]) < 1300) seen.observe(el);
+    }, unobserve() {}, disconnect() {} };
+    const proto = h.window.HTMLElement.prototype;
+    const real = proto.getBoundingClientRect;
+    proto.getBoundingClientRect = function () {
+        if (this.classList.contains('dendrite-preview-doc')) {
+            return { top: 0, bottom: 500, height: 500, left: 0, right: 600,
+                     width: 600 };
+        }
+        const top = tops[this.dataset && this.dataset.id] ?? 0;
+        return { top, bottom: top + 120, height: 120, left: 0, right: 600,
+                 width: 600 };
+    };
+    try {
+        await view.setState({ file: INDEX });
+        const b = view.blocks.get('G-bbbbb').el;
+        assert.ok(b.hasClass('is-pending'));
+        assert.match(b.style.height, /^\d+px$/, 'never drawn, sized');
+        await tick(50);
+        // Scrolled on: A and C are now far above the view.
+        tops['G-aaaaa'] = -20000;
+        tops['G-ccccc'] = -9500;
+        view.highlight('G-aaaaa');
+        await tick(1200);
+        const c = view.blocks.get('G-ccccc').el;
+        assert.ok(c.hasClass('is-pending'), 'far, emptied');
+        assert.equal(c.style.height, '120px');
+        assert.equal(c.childElementCount, 0);
+        assert.ok(!view.blocks.get('G-aaaaa').el.hasClass('is-pending'),
+                  'the active part stays drawn');
+        // Brought near, it is drawn again at its own height.
+        tops['G-ccccc'] = 100;
+        view.doc.dispatchEvent(new h.window.Event('scroll'));
+        await tick(800);
+        assert.ok(!c.hasClass('is-pending'));
+        assert.equal(c.style.height, '');
+    } finally {
+        proto.getBoundingClientRect = real;
+        await view.onClose();
+        view.contentEl.remove();
     }
 });
 
@@ -351,6 +455,7 @@ test('cards drawn while idle are drawn together, and do not each ' +
             '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
             '    - [[G-bbbbb|B]]\n    - [[G-ccccc|C]]\n',
             { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
+        shown(view.board);
         view.active = 'G-aaaaa';
         view.applyActive(false);
         let centred = 0;
@@ -381,6 +486,7 @@ test('a card far from the view is a slot of one element at its height, ' +
             '---\n- [[G-aaaaa|Aims]]\n- [[G-bbbbb|Methods]]\n',
             { 'G-aaaaa': '# Aims',
               'G-bbbbb': '---\ndendrite_status: revise\n---\n# Methods' });
+        shown(view.board);
         const b = view.cardEls.get('G-bbbbb');
         assert.ok(b.hasClass('is-slot'), 'out of view, a slot');
         assert.equal(b.childElementCount, 0, 'with nothing in it');
@@ -518,6 +624,41 @@ test('a slot never drawn is estimated from the cards drawn so far, ' +
     }
 });
 
+test('a board or preview not shown, as in a tab behind another, draws ' +
+     'nothing while idle', async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+            { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+        // Not shown, everything measures nothing, all at one point.
+        view.board.getBoundingClientRect = () => ({ top: 0, bottom: 0,
+            left: 0, right: 0, width: 0, height: 0 });
+        assert.equal(view.nextToDraw(), null);
+        assert.ok(waiting(view.cardEls.get('G-bbbbb')));
+    } finally {
+        globalThis.inView = null;
+    }
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|A]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'Text.');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const pv = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await pv.onOpen();
+    pv.observer = { observe() {}, unobserve() {}, disconnect() {} };
+    h.window.document.body.appendChild(pv.contentEl);
+    await pv.setState({ file: INDEX });
+    pv.doc.getBoundingClientRect = () => ({ top: 0, bottom: 0, left: 0,
+        right: 0, width: 0, height: 0 });
+    assert.equal(pv.nextToDraw(), null);
+    assert.ok(pv.blocks.get('G-aaaaa').el.hasClass('is-pending'));
+    await pv.onClose();
+    pv.contentEl.remove();
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
@@ -525,6 +666,7 @@ test('idle drawing waits while the board is moving and just after a key',
         const { view } = await open(
             '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
             { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+        shown(view.board);
         const pending = () => waiting(view.cardEls.get('G-bbbbb'));
         view.anim = 1;
         await tick(700);
@@ -1523,6 +1665,7 @@ test('a preview whose parts are never seen scrolling into view draws ' +
     h.window.document.body.appendChild(view.contentEl);
     h.notices.length = 0;
     await view.setState({ file: INDEX });
+    shown(view.doc);
     const drawn = () => [...view.contentEl.querySelectorAll(
         '.dendrite-pblock:not(.is-pending):not(.is-empty)')]
         .map((b) => b.textContent.trim());

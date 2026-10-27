@@ -772,6 +772,20 @@ var require_core = __commonJS({
       }
       return current;
     }
+    function fitHeights(points, least, slope) {
+      if (points.length < least) return null;
+      const n = points.length;
+      const mx = points.reduce((t, p) => t + p[0], 0) / n;
+      const my = points.reduce((t, p) => t + p[1], 0) / n;
+      let sxx = 0;
+      let sxy = 0;
+      for (const [x, y] of points) {
+        sxx += (x - mx) * (x - mx);
+        sxy += (x - mx) * (y - my);
+      }
+      const b = sxx > 0 && sxy > 0 ? sxy / sxx : slope;
+      return { a: my - b * mx, b };
+    }
     function alignColumns(cols, active, pos, heights, own = null, tree = TREE) {
       const targets = cols.map(() => null);
       if (!active) return targets;
@@ -1213,6 +1227,7 @@ var require_core = __commonJS({
       measure,
       sectionNumbers,
       alignColumns,
+      fitHeights,
       tallTop,
       caretOffset,
       parseAmount,
@@ -6249,20 +6264,9 @@ var DendriteView = class extends ItemView {
    * HEIGHT_SAMPLES cards are measured.
    */
   heightFit() {
-    if (this.fit !== void 0 && this.fit !== null) return this.fit;
-    const pts = [...(this.samples || /* @__PURE__ */ new Map()).values()];
-    if (pts.length < HEIGHT_SAMPLES) return null;
-    const n = pts.length;
-    const mx = pts.reduce((t, p) => t + p[0], 0) / n;
-    const my = pts.reduce((t, p) => t + p[1], 0) / n;
-    let sxx = 0;
-    let sxy = 0;
-    for (const [x, y] of pts) {
-      sxx += (x - mx) * (x - mx);
-      sxy += (x - mx) * (y - my);
+    if (!this.fit) {
+      this.fit = core.fitHeights([...(this.samples || /* @__PURE__ */ new Map()).values()], HEIGHT_SAMPLES, SLOT_LINE);
     }
-    const b = sxx > 0 && sxy > 0 ? sxy / sxx : SLOT_LINE;
-    this.fit = { a: my - b * mx, b };
     return this.fit;
   }
   /**
@@ -6404,6 +6408,7 @@ var DendriteView = class extends ItemView {
     if (!this.board) return null;
     this.undrawable = this.undrawable || /* @__PURE__ */ new WeakSet();
     const box = this.board.getBoundingClientRect();
+    if (!box.width || !box.height) return null;
     const cx = box.left + box.width / 2;
     const cy = box.top + box.height / 2;
     const reachX = box.width / 2 + box.width;
@@ -11912,27 +11917,79 @@ var DendritePreview = class extends ItemView {
   /**
    * The waiting parts nearest the middle of the view, up to
    * DRAW_BATCH, drawn together; or null. Only parts within DRAW_REACH
-   * screens of the view are drawn, so a
-   * long document keeps only the part around the reader drawn.
+   * screens of the view are drawn, so a long document keeps only the
+   * part around the reader drawn; with none of those waiting, drawn
+   * parts beyond EMPTY_REACH screens are emptied, keeping their
+   * heights. The drawn parts' heights, read on the way, are learnt
+   * from for those never drawn (partHeight).
    */
   nextToDraw() {
     if (!this.doc) return null;
     const v = this.doc.getBoundingClientRect();
+    if (!v.width || !v.height) return null;
     const mid = v.top + v.height / 2;
     const reach = v.height / 2 + DRAW_REACH * v.height;
+    const away = v.height / 2 + EMPTY_REACH * v.height;
+    this.samples = this.samples || /* @__PURE__ */ new Map();
     const near = [];
+    const far = [];
     for (const [id, b] of this.blocks) {
-      if (!b.el.hasClass("is-pending") || b.el.hasClass("is-empty") || !this.doc.contains(b.el)) continue;
+      if (b.el.hasClass("is-empty") || !this.doc.contains(b.el)) {
+        continue;
+      }
       const r = b.el.getBoundingClientRect();
       const d = Math.abs(r.top + r.height / 2 - mid);
+      if (!b.el.hasClass("is-pending")) {
+        if (r.height && b.lines) {
+          this.samples.set(id, [b.lines, r.height]);
+          this.fit = null;
+        }
+        if (d > away && id !== this.active) far.push([id, r.height]);
+        continue;
+      }
       if (d <= reach) near.push([d, id]);
     }
-    if (!near.length) return null;
+    if (!near.length) {
+      for (const [id, h] of far) this.emptyPart(id, h);
+      return null;
+    }
     near.sort((a, b) => a[0] - b[0]);
     return Promise.all(near.slice(0, DRAW_BATCH).map(([, id]) => this.renderBlock(id).catch((err) => this.failed(err))));
   }
+  /** How many lines a part's text would take, roughly: its length. */
+  partLines(s) {
+    const chars = (s.text || "").length + (s.gathered ? 200 : 0);
+    const perLine = Math.max(20, (this.textWidth || 600) / SLOT_CHAR);
+    return Math.max(1, Math.ceil(chars / perLine));
+  }
+  /**
+   * How tall a part waiting to be drawn is: as tall as when last drawn
+   * with the same text, or, from the parts drawn so far, as its length
+   * suggests (core.fitHeights).
+   */
+  partHeight(b) {
+    if (b.measured && b.measured.key === b.key) return b.measured.h;
+    if (!this.fit) {
+      this.fit = core.fitHeights([...(this.samples || /* @__PURE__ */ new Map()).values()], HEIGHT_SAMPLES, SLOT_LINE);
+    }
+    const lines = b.lines || 1;
+    return Math.max(SLOT_LINE, Math.round(this.fit ? this.fit.a + this.fit.b * lines : lines * SLOT_LINE + 16));
+  }
+  /** A drawn part emptied to wait again, at the height it was drawn. */
+  emptyPart(id, h) {
+    const b = this.blocks.get(id);
+    if (!b || b.el.hasClass("is-pending")) return;
+    if (h) b.measured = { key: b.key, h };
+    if (b.comp) b.comp.unload();
+    b.comp = null;
+    b.el.empty();
+    b.el.addClass("is-pending");
+    setStyles(b.el, { height: `${this.partHeight(b)}px` });
+    if (this.observer) this.observer.observe(b.el);
+  }
   async refreshNow() {
     if (!this.file || !this.doc) return;
+    this.textWidth = this.doc.clientWidth;
     const text = await this.app.vault.cachedRead(this.file);
     const root = core.parseIndex(core.splitFrontmatter(text).body).root;
     const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter || {};
@@ -12398,6 +12455,7 @@ var DendritePreview = class extends ItemView {
         }
       }
     }
+    let prev = null;
     const said = (id) => !this.showComments ? "" : JSON.stringify(
       review.reviewItems((this.bodies.get(id) || {}).body || "").map((x) => [x.text, x.replies])
     );
@@ -12422,6 +12480,10 @@ var DendritePreview = class extends ItemView {
         b.el.addClass("is-pending");
         if (this.observer && !empty) this.observer.observe(b.el);
       }
+      b.lines = this.partLines(s);
+      if (b.el.hasClass("is-pending")) {
+        setStyles(b.el, { height: empty ? "" : `${this.partHeight(b)}px` });
+      }
       b.el.toggleClass("is-active", s.id === this.active);
       const flag = this.flags && this.flags.has(s.id);
       b.el.toggleClass("is-flagged", !!flag);
@@ -12431,7 +12493,9 @@ var DendritePreview = class extends ItemView {
           this.flags.get(s.id)
         );
       }
-      this.doc.appendChild(b.el);
+      const at = prev ? prev.nextSibling : this.doc.firstChild;
+      if (at !== b.el) this.doc.insertBefore(b.el, at);
+      prev = b.el;
     }
   }
   onVisible(entries) {
@@ -12454,6 +12518,7 @@ var DendritePreview = class extends ItemView {
     b.el.empty();
     b.el.removeClass("has-bubbles");
     b.el.style.minHeight = "";
+    b.el.style.height = "";
     const f = this.cardFile(id);
     const path = f ? f.path : this.file.path;
     if (s.gathered) {

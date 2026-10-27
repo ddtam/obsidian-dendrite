@@ -1083,6 +1083,27 @@ function caretOffset(caret, height, current, margin, typewriter) {
  * columns to its right follow it. Returns the scrollTop for each column,
  * or null to leave a column alone.
  */
+/**
+ * Height against lines by least squares, over [lines, height] points
+ * measured from text drawn, as { a, b }: the height of text not yet drawn
+ * estimated as a + b * lines. Null with fewer than `least` points; all of
+ * one length, or no rise with length, `slope` is taken through their mean.
+ */
+function fitHeights(points, least, slope) {
+    if (points.length < least) return null;
+    const n = points.length;
+    const mx = points.reduce((t, p) => t + p[0], 0) / n;
+    const my = points.reduce((t, p) => t + p[1], 0) / n;
+    let sxx = 0;
+    let sxy = 0;
+    for (const [x, y] of points) {
+        sxx += (x - mx) * (x - mx);
+        sxy += (x - mx) * (y - my);
+    }
+    const b = sxx > 0 && sxy > 0 ? sxy / sxx : slope;
+    return { a: my - b * mx, b };
+}
+
 function alignColumns(cols, active, pos, heights, own = null,
                       tree = TREE) {
     const targets = cols.map(() => null);
@@ -1698,7 +1719,8 @@ module.exports = {
     roundFingerprints, changedSince,
     parseLimit, formatLimit, countText, wordsPerPage, measure,
     sectionNumbers,
-    alignColumns, tallTop, caretOffset, parseAmount, convert, quotas, fmtNum,
+    alignColumns, fitHeights, tallTop, caretOffset, parseAmount, convert,
+    quotas, fmtNum,
     splitText, mergeText,
     mergeIntoAbove, mergeIntoParent, moveNode,
     flowPath, threadPath, exportSegments, roleFor, cardRole, ROLES, KINDS,
