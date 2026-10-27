@@ -6036,6 +6036,30 @@ class DendriteView extends ItemView {
         return n;
     }
 
+    /**
+     * A suggested change from a program on card `id`; why it was not
+     * added, or null. In the card's editor if it is being typed in.
+     */
+    async suggestIn(id, item) {
+        const ed = this.editing;
+        if (ed && ed.id === id && ed.editor.update) {
+            const out = review.suggestInto(ed.editor.value, id, item);
+            if (out.reason) return out.reason;
+            ed.editor.update(out.md);
+            ed.dirty = true;
+            ed.changed = true;
+            await this.save(ed);
+            return null;
+        }
+        const f = this.cardFile(id);
+        if (!f) return `no card ${id}`;
+        const { body } = core.splitFrontmatter(await this.app.vault.read(f));
+        const out = review.suggestInto(body, id, item);
+        if (out.reason) return out.reason;
+        await this.reviewAction(id, 0, 'text', out.md);
+        return null;
+    }
+
     async reviewAction(id, n, what, arg = null) {
         const f = this.cardFile(id);
         if (!f) return;
@@ -6058,6 +6082,11 @@ class DendriteView extends ItemView {
         const item = review.reviewItems(body)[n];
         // A reply, written under its comment, or taken back: a change to
         // the card, undone as one.
+        // A card's new text, as with a program's suggested change.
+        if (what === 'text') {
+            await write(arg);
+            return;
+        }
         // A program's reply comes signed and dated.
         if (what === 'reply') {
             await write(review.addReply(body, n, typeof arg === 'object' ?
@@ -10506,7 +10535,8 @@ module.exports = class DendritePlugin extends Plugin {
             submit: (d) => this.submitReview(d),
             status: (id) => this.reviewStatus(id),
             threads: (m, opts) => this.threadsFor(m, opts),
-            reply: (d) => this.replyTo(d) });
+            reply: (d) => this.replyTo(d),
+            suggest: (d) => this.suggestTo(d) });
         try {
             try {
                 this.reviewServer = await start(want);
@@ -10541,7 +10571,7 @@ module.exports = class DendritePlugin extends Plugin {
             `${this.reviewServer.address().port}/dendrite`;
         fs.writeFileSync(file, JSON.stringify({
             url: `${base}/review`, threads: `${base}/threads`,
-            reply: `${base}/reply`,
+            reply: `${base}/reply`, suggest: `${base}/suggest`,
             key: s.reviewApiKey, vault: this.app.vault.getName(),
             pid: process.pid }, null, 2) + '\n', { mode: 0o600 });
     }
@@ -10866,6 +10896,64 @@ module.exports = class DendritePlugin extends Plugin {
                        `${done.map((x) => x.split('/')[0]).join(', ')}.`);
         }
         return { status: 201, json: { done, missing } };
+    }
+
+    /**
+     * Suggested changes from a program, `items` [{ card, quote, replace,
+     * before?, after?, author? }], each written at once where its quote
+     * is found exactly in its card, and refused anywhere less sure; a
+     * suggestion is applied or dismissed from the board, so it needs no
+     * other approval. Through the board when the manuscript is open.
+     */
+    async suggestTo(data) {
+        const bad = (status, error) => ({ status, json: { error } });
+        if (!data || typeof data !== 'object' || !Array.isArray(data.items) ||
+            !data.items.length) {
+            return bad(400, 'send { manuscript, items: [{ card, quote, ' +
+                       'replace }] }');
+        }
+        const file = this.indexWithPrefix(String(data.manuscript || '')
+            .trim());
+        if (!file) {
+            return bad(404, `no manuscript has the prefix ` +
+                       `${data.manuscript}`);
+        }
+        const view = this.openViews().find((v) => v.file === file);
+        const done = [];
+        const refused = [];
+        for (const [k, x] of data.items.entries()) {
+            const n = k + 1;
+            const card = x && String(x.card || '');
+            const f = card && this.app.metadataCache.getFirstLinkpathDest(
+                card, file.path);
+            if (!(f instanceof TFile)) {
+                refused.push({ n, reason: `no card ${card}` });
+                continue;
+            }
+            const item = { ...x, author: String(x.author || '').trim() ||
+                               'Claude', date: localDay() };
+            const reason = await (view ? view.suggestIn(card, item) :
+                this.suggestInFile(f, item));
+            if (reason) refused.push({ n, reason });
+            else done.push(n);
+        }
+        if (done.length) {
+            new Notice(`Dendrite: ${done.length} suggested change` +
+                       `${done.length === 1 ? '' : 's'} from Claude.`);
+        }
+        return { status: 201, json: { done, refused } };
+    }
+
+    /** A suggestion written into a card's file; why not, or null. */
+    async suggestInFile(f, item) {
+        let reason = null;
+        await this.app.vault.process(f, (data) => {
+            const { fm, body } = core.splitFrontmatter(data);
+            const out = review.suggestInto(body, f.basename, item);
+            reason = out.reason || null;
+            return out.md === undefined ? data : fm + out.md;
+        });
+        return reason;
     }
 
     /** A reply written into a card's file; the comment's index, or -1. */

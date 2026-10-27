@@ -1132,6 +1132,40 @@ function alreadyIn(md, item) {
 }
 
 /**
+ * A card's markdown with a suggested change from a program in it, `s`
+ * { quote, replace, before?, after?, author?, date }: { md }, or
+ * { reason } it was not added. Only where the quote is found exactly,
+ * and once, or once given the text around it, since nobody checks where
+ * it goes before it is in the card.
+ */
+function suggestInto(md, id, s) {
+    const author = clean(s.author) || 'Claude';
+    if (typeof s.replace !== 'string') {
+        return { reason: 'no replace: the new text, or "" to delete' };
+    }
+    const quote = String(s.quote || '');
+    if (!quote.trim()) return { reason: 'no quote' };
+    if (alreadyIn(md, { kind: 'change', author, quote,
+                        insert: s.replace })) {
+        return { reason: 'already suggested' };
+    }
+    const at = locate({ kind: 'suggest', quote, before: s.before,
+                        after: s.after }, [{ id, text: md }]);
+    if (!at || at.how !== 'exact') {
+        const hay = normalise(plainMap(md).text).text;
+        const want = normalise(quote).text;
+        let n = 0;
+        for (let k = hay.indexOf(want); k >= 0;
+             k = hay.indexOf(want, k + 1)) n++;
+        return { reason: n > 1 ? `found ${n} times, so more than once; ` +
+            'send before or after to say which' :
+            'not found exactly in the card' };
+    }
+    return { md: addItems(md, [{ kind: 'suggest', start: at.start,
+        end: at.end, author, date: s.date, text: s.replace }]) };
+}
+
+/**
  * A comment or suggestion as card markdown, on `passage` if one is
  * given. A suggestion's text is the new text for the passage.
  */
@@ -1939,6 +1973,7 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    assignColours, reviewerEntries, entryList,
                    addReply, removeReply, replyBox, threadId,
                    threadIds, forReviewers, seenMark,
+                   suggestInto,
                    firstOfComment, countComments,
                    itemText,
                    addItems, removeItem,

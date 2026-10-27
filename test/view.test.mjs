@@ -5905,6 +5905,49 @@ test('Claude passes comments by as seen, a reply with no text, and ' +
     assert.doesNotMatch(text(cardPath('G-aaaaa')), /word word/);
 });
 
+test('a suggested change from a program goes in at once where its quote ' +
+     'is found exactly in its card, and is refused anywhere less sure',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const { app, view, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': 'The cohrot is **large** and the the data are new.',
+          'G-bbbbb': 'We saw it in the data and in the data.' });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.openViews = () => [view];
+    const out = await p.suggestTo({ manuscript: 'G', items: [
+        { card: 'G-aaaaa', quote: 'cohrot', replace: 'cohort' },
+        { card: 'G-aaaaa', quote: 'the the', replace: 'the' },
+        { card: 'G-bbbbb', quote: 'the data', replace: 'these data' },
+        { card: 'G-bbbbb', quote: 'the data', after: ' and in',
+          replace: 'our data' },
+        { card: 'G-aaaaa', quote: 'not there', replace: 'x' },
+        { card: 'G-zzzzz', quote: 'cohrot', replace: 'cohort' },
+        { card: 'G-aaaaa', quote: 'large' }] });
+    assert.equal(out.status, 201);
+    assert.deepEqual(out.json.done, [1, 2, 4]);
+    assert.deepEqual(out.json.refused.map((x) => x.n), [3, 5, 6, 7]);
+    assert.match(out.json.refused[0].reason, /more than once/);
+    assert.match(text(cardPath('G-aaaaa')), new RegExp('^The %%\\{1%%' +
+        'cohrot%%\\}1 \\[!suggest\\] Claude, [\\d-]+: cohort%%'));
+    assert.match(text(cardPath('G-aaaaa')),
+                 /\[!suggest\] Claude, [\d-]+: the%%/);
+    assert.match(text(cardPath('G-bbbbb')), new RegExp('saw it in %%' +
+        '\\{1%%the data%%\\}1 \\[!suggest\\] Claude, [\\d-]+: our ' +
+        'data%% and'));
+    // Sent again: already there, not added twice.
+    const again = await p.suggestTo({ manuscript: 'G', items: [
+        { card: 'G-aaaaa', quote: 'cohrot', replace: 'cohort' }] });
+    assert.deepEqual(again.json.done, []);
+    assert.match(again.json.refused[0].reason, /already/);
+    // Applied from the board, as any suggestion is.
+    const items = r.reviewItems(text(cardPath('G-aaaaa')));
+    assert.equal(items[0].kind, 'suggest');
+    assert.equal(items[0].text, 'cohort');
+});
+
 test('a reply sent while its card is being edited goes into the editor, ' +
      'which stays open with the caret where it was', async () => {
     const DendritePlugin = require('../src/main.js');

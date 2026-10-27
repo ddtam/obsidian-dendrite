@@ -4,6 +4,8 @@
 // answers Zotero requests on its own port. Nothing is written here: the
 // plugin queues a review, and it is added only from the board. A reply
 // is written at once: it names its comment, so there is nothing to place.
+// So is a suggested change found exactly: it is applied or dismissed
+// from the board, which is its approval.
 //
 //   POST /dendrite/review        { manuscript, title?, items: [...] }
 //   GET  /dendrite/review/<id>   the review's state
@@ -21,6 +23,11 @@
 //        With `seen: true` and no text, a reply with no text, saying the
 //        comment was read and there is nothing to add; `threads`, a list
 //        of ids, in place of `thread` for several at once
+//   POST /dendrite/suggest       { manuscript, items: [{ card, quote,
+//        replace, before?, after?, author? }] }
+//        suggested changes, each written at once where its quote is
+//        found exactly in its card, once or once given the text around
+//        it, and refused anywhere less sure; `replace` "" to delete
 //
 // Every request carries `Authorization: Bearer <key>`. A request with an
 // Origin header comes from a web page and is refused, and no CORS header
@@ -61,7 +68,8 @@ async function handle(opts, req, res) {
     }
     const url = new URL(req.url, 'http://127.0.0.1');
     const take = { '/dendrite/review': opts.submit,
-                   '/dendrite/reply': opts.reply }[url.pathname];
+                   '/dendrite/reply': opts.reply,
+                   '/dendrite/suggest': opts.suggest }[url.pathname];
     if (take && req.method === 'POST') {
         if (!/^application\/json\b/.test(req.headers['content-type'] ||
                                          '')) {
@@ -104,7 +112,8 @@ async function handle(opts, req, res) {
  * Listen on 127.0.0.1:`port` (0 for any free port); resolves with the
  * server once listening, rejects when the port cannot be had. `opts`:
  * { port, token, submit(data), status(id), threads(prefix, { author,
- * awaiting, card }), reply(data) }, each answering { status, json }.
+ * awaiting, card }), reply(data), suggest(data) }, each answering
+ * { status, json }.
  */
 function start(opts, http = require('http')) {
     return new Promise((resolve, reject) => {

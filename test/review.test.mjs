@@ -907,6 +907,10 @@ test('the review endpoint takes POST /dendrite/reply as JSON, with its ' +
         async reply(data) {
             got.push(data);
             return { status: 201, json: { card: 'G-aaaaa' } };
+        },
+        async suggest(data) {
+            got.push(data);
+            return { status: 201, json: { done: [1], refused: [] } };
         } });
     const base = `http://127.0.0.1:${server.address().port}`;
     const post = async (body, headers) => {
@@ -924,6 +928,10 @@ test('the review endpoint takes POST /dendrite/reply as JSON, with its ' +
         assert.equal((await post('{}', { 'content-type':
             'application/json' }))[0], 401);
         assert.equal((await post('{', json))[0], 400);
+        const res = await fetch(base + '/dendrite/suggest', {
+            method: 'POST', headers: json, body: '{"items":[]}' });
+        assert.deepEqual(await res.json(), { done: [1], refused: [] });
+        assert.deepEqual(got[got.length - 1], { items: [] });
     } finally {
         server.close();
     }

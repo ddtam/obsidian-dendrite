@@ -1422,14 +1422,22 @@ body {
     padding: 0 1px;
     cursor: text;
 }
+/* The space between a paragraph and its comments the same as on the
+   board, where the paragraph's margin and the comments' -4px collapse
+   into one. As padding: the editor measures a block widget by its box,
+   and a margin outside it would put the lines below out of step with
+   the caret. */
 .dendrite-cm .dendrite-cm-notes {
-    margin: 2px 0 8px;
+    margin: 0;
+    padding: calc(var(--p-spacing, 1rem) - 4px) 0 8px;
     white-space: normal;
 }
 .dendrite-review-notes {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    /* -4px, under the paragraph's margin: the card editor's comments
+       open the same space, from --p-spacing. */
     margin: -4px 0 12px;
 }
 .dendrite-review-note,
