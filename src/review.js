@@ -1809,6 +1809,11 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                     onMenu(i, e);
                 });
             }
+            // At the right of the name line, so the text under it runs
+            // the full width of the card.
+            const bar = doc.createElement('span');
+            bar.className = 'dendrite-review-acts';
+            main.prepend(bar);
             for (const [what, label, tip] of buttons) {
                 const btn = doc.createElement('button');
                 btn.className = 'dendrite-review-btn';
@@ -1820,7 +1825,7 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                         act(i, 'reply', t), typing);
                     else act(i, what);
                 });
-                note.append(btn);
+                bar.append(btn);
             }
             box.append(note);
             noteOf.set(i, note);

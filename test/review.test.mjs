@@ -342,6 +342,13 @@ test('on the board a comment\'s passage is marked and numbered, with a ' +
     assert.equal(notes[1].className, 'dendrite-review-note is-suggest');
     assert.equal(notes[1].querySelector('.dendrite-review-text').textContent,
                  'Suggests: new');
+    // Its buttons sit at the right of the name line, so the text below
+    // runs the full width of the card rather than beside a column.
+    const bar = notes[0].querySelector('.dendrite-review-main')
+        .firstElementChild;
+    assert.equal(bar.className, 'dendrite-review-acts');
+    assert.equal(bar.nextElementSibling.className, 'dendrite-review-meta');
+    assert.equal(notes[0].querySelectorAll(':scope > button').length, 0);
     for (const b of root.querySelectorAll('button')) b.click();
     assert.deepEqual(acts, [[0, 'resolve'], [1, 'apply'], [1, 'dismiss'],
                             [2, 'resolve']]);

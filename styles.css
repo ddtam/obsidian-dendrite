@@ -1459,6 +1459,10 @@ body {
     flex: 1;
     min-width: 0;
 }
+.dendrite-review-acts {
+    float: right;
+    margin-left: 8px;
+}
 .dendrite-review-meta {
     color: var(--text-faint);
     font-size: var(--font-ui-smaller);
@@ -1921,8 +1925,18 @@ button.dendrite-review-btn:hover {
 .dendrite-card.is-active .has-hover .dendrite-review-note:not(.is-hover) {
     opacity: 0.4;
 }
+/* The comment itself stands out too, so it shows when it is the only
+   comment on the card. */
+.dendrite-card.is-active .dendrite-review-note.is-hover {
+    background: color-mix(in srgb, var(--dendrite-review) 14%,
+                          transparent);
+}
+.dendrite-card.is-active .dendrite-review-note.is-suggest.is-hover {
+    background: color-mix(in srgb, var(--dendrite-suggest) 14%,
+                          transparent);
+}
 .dendrite-review-note {
-    transition: opacity 120ms ease;
+    transition: opacity 120ms ease, background 120ms ease;
 }
 
 /* Cards picked together: outlined, and full strength while picked. */
