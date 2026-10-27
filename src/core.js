@@ -1295,8 +1295,9 @@ function lowerStatus(a, b) {
  * Every card's status, as shown. `statusOf(id)` is the set status or
  * null; `roleOf(id)` the set role or null. Returns
  *   { cards: Map id -> { prints, own, derived, below }, tally }
- * where `own` is a printing card's status (draft when unset) or a
- * structural card's unsplit, `derived` a structural card's least-finished
+ * where `own` is a printing card's status (draft when unset, revise when
+ * unset or draft with open comments) or a structural card's unsplit or,
+ * with open comments, revise, `derived` a structural card's least-finished
  * printing descendant, and `below` how many flagged cards its branch
  * holds. Left-out branches count for nothing. `tally` counts printing
  * cards by status, plus unsplit and commented structural cards.
@@ -1311,7 +1312,12 @@ function statusReport(root, statusOf, roleOf, commentsOf = () => 0) {
         const prints = role === 'prose';
         const set = statusOf(node.id);
         let own = null;
-        if (prints) own = ['done', 'revise'].includes(set) ? set : 'draft';
+        // A printing card with open comments is to revise, unless it was
+        // set done, as a structural card with comments is.
+        if (prints) {
+            own = ['done', 'revise'].includes(set) ? set :
+                commentsOf(node.id) > 0 ? 'revise' : 'draft';
+        }
         else if (set === 'unsplit') own = 'unsplit';
         else if (commentsOf(node.id) > 0) own = 'revise';
         if (own) tally[own] += 1;

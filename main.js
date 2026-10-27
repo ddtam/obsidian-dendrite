@@ -922,8 +922,9 @@ var require_core = __commonJS({
         const prints = role === "prose";
         const set = statusOf(node.id);
         let own = null;
-        if (prints) own = ["done", "revise"].includes(set) ? set : "draft";
-        else if (set === "unsplit") own = "unsplit";
+        if (prints) {
+          own = ["done", "revise"].includes(set) ? set : commentsOf(node.id) > 0 ? "revise" : "draft";
+        } else if (set === "unsplit") own = "unsplit";
         else if (commentsOf(node.id) > 0) own = "revise";
         if (own) tally[own] += 1;
         let worst = prints ? own : null;
@@ -5549,7 +5550,12 @@ var DEFAULTS = {
   googlePickerKey: ""
 };
 var LINTER_ID = "obsidian-linter";
-var CARD_UNSAFE_RULES = ["file-name-heading", "capitalize-headings"];
+var CARD_UNSAFE_RULES = [
+  "file-name-heading",
+  "capitalize-headings",
+  "no-bare-urls",
+  "remove-multiple-spaces"
+];
 var CARD_NAME = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-[a-z0-9]{5}$/;
 var UNDO_DEPTH = 50;
 var CARD_MARGIN = 24;
@@ -10730,8 +10736,19 @@ var DendriteView = class extends ItemView {
       this.reviewerMap = review.reviewerColours(
         fm.dendrite_reviewer_colours
       );
+      const me = this.plugin.settings.replyName || "Me";
+      if (me !== "Me" && this.reviewerMap.has(me)) {
+        this.reviewerMap.set("Me", this.reviewerMap.get(me));
+      }
     }
     return this.reviewerMap;
+  }
+  /**
+   * The names your replies are signed with: the name set, and Me, the
+   * name a reply is signed with when none is, as earlier ones were.
+   */
+  selfNames() {
+    return /* @__PURE__ */ new Set([this.plugin.settings.replyName || "Me", "Me"]);
   }
   colourOf() {
     const map = this.reviewers();
@@ -10743,9 +10760,9 @@ var DendriteView = class extends ItemView {
     const names = review.reviewerNames(
       fm && fm.dendrite_reviewer_colours
     );
-    const me = this.plugin.settings.replyName || "Me";
+    const mine = this.selfNames();
     const shown = this.plugin.settings.presentName;
-    return (who) => shown && who === me ? shown : names.get(who) || who;
+    return (who) => shown && mine.has(who) ? shown : names.get(who) || who;
   }
   /**
    * The reviewers of a card's comments, noted as it is drawn; one not
@@ -11104,11 +11121,20 @@ var DendriteView = class extends ItemView {
   updateStatuses() {
     if (!this.board) return;
     const open = this.openComments || /* @__PURE__ */ new Map();
+    const comments = (id) => {
+      if (open.has(id)) return open.get(id);
+      const b = this.bodies && this.bodies.get(id);
+      if (!b) return 0;
+      if (b.comments === void 0) {
+        b.comments = review.countComments(review.reviewItems(b.body));
+      }
+      return b.comments;
+    };
     const report = core.statusReport(
       this.root,
       (id) => this.statusOf(id),
       (id) => this.printRoleOf(id),
-      (id) => open.get(id) || 0
+      comments
     );
     this.statusInfo = report.cards;
     for (const [id, card] of this.liveCards()) this.statusCard(id, card);
@@ -11523,6 +11549,7 @@ var DendriteView = class extends ItemView {
   }
   async loadBodies() {
     this.bodies = this.bodies || /* @__PURE__ */ new Map();
+    let read = false;
     for (const n of core.allNodes(this.root)) {
       const f = this.cardFile(n.id);
       if (!f) continue;
@@ -11533,7 +11560,9 @@ var DendriteView = class extends ItemView {
         mtime: f.stat.mtime,
         body: core.splitFrontmatter(text).body
       });
+      read = true;
     }
+    if (read) this.scheduleStatuses();
     const out = /* @__PURE__ */ new Map();
     for (const [id, b] of this.bodies) out.set(id, b.body);
     return out;
@@ -12428,7 +12457,10 @@ var DendritePreview = class extends ItemView {
     this.colours = review.reviewerColours(fm.dendrite_reviewer_colours);
     this.names = review.reviewerNames(fm.dendrite_reviewer_colours);
     const s = this.plugin.settings || {};
-    if (s.presentName) this.names.set(s.replyName || "Me", s.presentName);
+    if (s.presentName) {
+      this.names.set(s.replyName || "Me", s.presentName);
+      this.names.set("Me", s.presentName);
+    }
     const colourOf = (who) => this.colours.get(who) || null;
     const top = Number(fm.dendrite_heading_top);
     const headingTop = top >= 1 && top <= 6 ? top : this.plugin.settings.headingTop;
@@ -13853,11 +13885,21 @@ var ReviewersModal = class extends Modal {
     super(view.app);
     this.view = view;
   }
-  /** The reviewers as kept, then any only in the cards, in order. */
+  /**
+   * The reviewers as kept, then any only in the cards, in order; as
+   * this dialog last saved them while the index is still as it was
+   * read before, which would otherwise show a colour just picked as it
+   * was.
+   */
   entries() {
     const view = this.view;
     const fm = this.app.metadataCache.getFileCache(view.file)?.frontmatter || {};
-    const kept = review.reviewerEntries(fm.dendrite_reviewer_colours);
+    let kept = review.reviewerEntries(fm.dendrite_reviewer_colours);
+    if (this.latest && JSON.stringify(kept) === this.latest.before) {
+      kept = this.latest.saved.map((e) => Object.assign({}, e));
+    } else {
+      this.latest = null;
+    }
     const map = view.reviewers();
     const order = [];
     for (const n of core.allNodes(view.root)) {
@@ -13884,6 +13926,15 @@ var ReviewersModal = class extends Modal {
     this.list = this.contentEl.createDiv({ cls: "dendrite-reviewers" });
     this.draw();
   }
+  /** The entries saved, and the dialog drawn from them. */
+  async save(now) {
+    const fm = this.app.metadataCache.getFileCache(this.view.file)?.frontmatter || {};
+    this.latest = { saved: now, before: JSON.stringify(
+      review.reviewerEntries(fm.dendrite_reviewer_colours)
+    ) };
+    await this.view.saveEntries(now);
+    this.draw();
+  }
   draw() {
     this.list.empty();
     const entries = this.entries();
@@ -13892,8 +13943,7 @@ var ReviewersModal = class extends Modal {
       for (const x of now) {
         if (which.some((y) => y.name === x.name)) fn(x, now);
       }
-      await this.view.saveEntries(now);
-      this.draw();
+      await this.save(now);
     };
     const people = [];
     for (const e of entries) {
@@ -13908,7 +13958,7 @@ var ReviewersModal = class extends Modal {
     const me = this.drawYou(entries);
     for (const names of people) {
       const e = names[0];
-      if (names.length === 1 && e.name === me) continue;
+      if (names.length === 1 && me.has(e.name)) continue;
       const person = e.note ? e.note.split("/").pop() : e.name;
       const { block, mid } = this.row(
         "dendrite-reviewer",
@@ -14018,18 +14068,19 @@ var ReviewersModal = class extends Modal {
     const view = this.view;
     const s = view.plugin.settings;
     const me = s.replyName || "Me";
-    const mine = entries.find((e) => e.name === me);
+    const mine = view.selfNames();
+    const own = entries.find((e) => e.name === me) || entries.find((e) => mine.has(e.name));
     const { mid } = this.row(
       "dendrite-reviewer-self",
       "You",
-      mine ? mine.colour : "blue",
+      own ? own.colour : "blue",
       async (c) => {
         const now = this.entries();
-        const e = now.find((x) => x.name === me);
-        if (e) e.colour = c;
-        else now.push({ name: me, note: null, colour: c });
-        await view.saveEntries(now);
-        this.draw();
+        for (const e of now) if (mine.has(e.name)) e.colour = c;
+        if (!now.some((e) => e.name === me)) {
+          now.push({ name: me, note: null, colour: c });
+        }
+        await this.save(now);
       }
     );
     const field = (cls, label, value, placeholder, set) => {
@@ -14043,6 +14094,7 @@ var ReviewersModal = class extends Modal {
       input.addEventListener("change", async () => {
         set(input.value.trim());
         if (view.plugin.saveSettings) await view.plugin.saveSettings();
+        view.reviewerMap = null;
         view.recolour();
         this.draw();
       });
@@ -14065,7 +14117,7 @@ var ReviewersModal = class extends Modal {
         s.presentName = v;
       }
     );
-    return me;
+    return mine;
   }
   /** A note as a link reaches it: by its name, or its path if shared. */
   linktext(f) {

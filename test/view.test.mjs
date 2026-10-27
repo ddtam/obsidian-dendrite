@@ -845,6 +845,25 @@ test('a card above a column\'s view changing height moves the column ' +
     assert.equal(view.colOffset(0), 1200, 'B is below the view');
 });
 
+test('a card never drawn that has open comments is counted to revise, ' +
+     'from its text', async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+            { 'G-aaaaa': 'Plain.',
+              'G-bbbbb': 'Far ==away==%%[!review] Aly, 2026-10-23: Why?%%.' });
+        view.plugin.typedAt = Date.now() + 5000;
+        await view.loadBodies();
+        await tick(30);
+        assert.ok(view.cardEls.get('G-bbbbb').hasClass('is-slot'));
+        assert.match(view.statusEl.textContent, /^1 revise/);
+        view.plugin.typedAt = 0;
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
@@ -1441,6 +1460,8 @@ test('a changed card is linted with the card-breaking rules off',
         settings: { ruleConfigs: {
             'file-name-heading': { enabled: true },
             'capitalize-headings': { enabled: true },
+            'no-bare-urls': { enabled: true },
+            'remove-multiple-spaces': { enabled: true },
             'emphasis-style': { enabled: true } }, foldersToIgnore: [] },
         async runLinterFile(f) {
             seen.push({ path: f.path, rules: this.settings.ruleConfigs });
@@ -1462,6 +1483,11 @@ test('a changed card is linted with the card-breaking rules off',
     assert.equal(seen.length, 1);
     assert.equal(seen[0].rules['file-name-heading'].enabled, false);
     assert.equal(seen[0].rules['capitalize-headings'].enabled, false);
+    // Off as well: wrapping a comment's Google Docs link in <> took the
+    // comment's closing %% into it, and collapsing spaces took the space
+    // a suggested insertion starts with.
+    assert.equal(seen[0].rules['no-bare-urls'].enabled, false);
+    assert.equal(seen[0].rules['remove-multiple-spaces'].enabled, false);
     assert.equal(seen[0].rules['emphasis-style'].enabled, true);
     assert.equal(linter.settings.ruleConfigs['file-name-heading'].enabled,
                  true, 'Linter\'s own settings are restored');
@@ -5314,6 +5340,46 @@ test('an addition found only by most of its words still goes in as a ' +
     assert.deepEqual(items.map((x) => x.kind), ['suggest', 'review'],
                      'the addition to apply, the replacement a comment');
     assert.equal(items[0].text, 'AML is a deadly cancer. ');
+});
+
+test('a colour picked in Reviewers… shows at once, though the index ' +
+     'has not been read again yet; replies signed Me are you', async () => {
+    const cards = { 'G-aaaaa': 'First ==one==%%[!review] Joshua Bridgers, ' +
+        '2026-10-23: Why?%%%%[!reply] Me, 2026-10-24: Because.%%.' };
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', cards);
+    view.plugin.saveSettings = async () => {};
+    // Signed differently now than the replies already written.
+    view.plugin.settings.replyName = 'Derek Tam';
+    view.plugin.settings.presentName = 'me';
+    await tick(30);
+    await menuItem(view.reviewMenu(), 'Reviewers…').click();
+    const modal = h.obsidian.lastModal;
+    assert.deepEqual([...modal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')].map((x) => x.dataset.name),
+        ['Joshua Bridgers'], 'Me is you, not a reviewer of its own');
+    // The index's properties as last read, until Obsidian reads it again.
+    const index = app.vault.getAbstractFileByPath(INDEX);
+    const mc = app.metadataCache;
+    const real = mc.getFileCache.bind(mc);
+    const stale = JSON.parse(JSON.stringify(real(index)));
+    mc.getFileCache = (f) => (f === index ? stale : real(f));
+    const you = () => modal.contentEl.querySelector('.dendrite-reviewer-self');
+    await pickColour(you(), 'Orange');
+    await tick(30);
+    assert.equal(you().querySelector('button.dendrite-reviewer-colour')
+        .dataset.colour, 'orange', 'shown at once');
+    mc.getFileCache = real;
+    const fm = real(index).frontmatter.dendrite_reviewer_colours;
+    assert.ok(fm.includes('Derek Tam: orange'));
+    assert.ok(fm.includes('Me: orange'), 'Me with you');
+    view.recolour();
+    await tick(30);
+    const reply = view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-reply');
+    assert.ok(reply.classList.contains('is-c-orange'));
+    assert.equal(reply.querySelector('.dendrite-review-meta b').textContent,
+                 'me', 'shown as you are');
 });
 
 test('names linked to the same note are one person: one colour for all ' +

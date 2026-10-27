@@ -126,8 +126,12 @@ const LINTER_ID = 'obsidian-linter';
 // Linter rules switched off when Dendrite lints a card. "File name
 // heading" inserts the card's ID as its heading, which then becomes its
 // label and an exported section heading; "Capitalize headings" rewrites
-// the case of headings as they are written.
-const CARD_UNSAFE_RULES = ['file-name-heading', 'capitalize-headings'];
+// the case of headings as they are written. Linter does not know review
+// comments: "No bare URLs" wrapped a comment's Google Docs link in <>
+// and took the comment's closing %% inside, and "Remove multiple spaces"
+// takes the space a suggested insertion starts with, after its colon.
+const CARD_UNSAFE_RULES = ['file-name-heading', 'capitalize-headings',
+                           'no-bare-urls', 'remove-multiple-spaces'];
 // A card note is `<prefix>-<5 characters>.md` inside a `cards` folder.
 const CARD_NAME = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-[a-z0-9]{5}$/;
 const UNDO_DEPTH = 50;
@@ -5804,8 +5808,21 @@ class DendriteView extends ItemView {
                 .getFileCache(this.file)?.frontmatter) || {};
             this.reviewerMap = review.reviewerColours(
                 fm.dendrite_reviewer_colours);
+            // Replies signed Me are yours, in your colour.
+            const me = this.plugin.settings.replyName || 'Me';
+            if (me !== 'Me' && this.reviewerMap.has(me)) {
+                this.reviewerMap.set('Me', this.reviewerMap.get(me));
+            }
         }
         return this.reviewerMap;
+    }
+
+    /**
+     * The names your replies are signed with: the name set, and Me, the
+     * name a reply is signed with when none is, as earlier ones were.
+     */
+    selfNames() {
+        return new Set([this.plugin.settings.replyName || 'Me', 'Me']);
     }
 
     colourOf() {
@@ -5819,9 +5836,9 @@ class DendriteView extends ItemView {
             this.app.metadataCache.getFileCache(this.file)?.frontmatter;
         const names = review.reviewerNames(
             fm && fm.dendrite_reviewer_colours);
-        const me = this.plugin.settings.replyName || 'Me';
+        const mine = this.selfNames();
         const shown = this.plugin.settings.presentName;
-        return (who) => (shown && who === me ? shown :
+        return (who) => (shown && mine.has(who) ? shown :
             names.get(who) || who);
     }
 
@@ -6201,9 +6218,20 @@ class DendriteView extends ItemView {
     updateStatuses() {
         if (!this.board) return;
         const open = this.openComments || new Map();
+        // As counted when a card was drawn, or from its text, which every
+        // card has read though few are drawn on a long board.
+        const comments = (id) => {
+            if (open.has(id)) return open.get(id);
+            const b = this.bodies && this.bodies.get(id);
+            if (!b) return 0;
+            if (b.comments === undefined) {
+                b.comments = review.countComments(review.reviewItems(b.body));
+            }
+            return b.comments;
+        };
         const report = core.statusReport(this.root,
             (id) => this.statusOf(id), (id) => this.printRoleOf(id),
-            (id) => open.get(id) || 0);
+            comments);
         this.statusInfo = report.cards;
         for (const [id, card] of this.liveCards()) this.statusCard(id, card);
         this.stackOpenReady = this.markOpenStacks();
@@ -6632,6 +6660,7 @@ class DendriteView extends ItemView {
 
     async loadBodies() {
         this.bodies = this.bodies || new Map();
+        let read = false;
         for (const n of core.allNodes(this.root)) {
             const f = this.cardFile(n.id);
             if (!f) continue;
@@ -6640,7 +6669,10 @@ class DendriteView extends ItemView {
             const text = await this.app.vault.cachedRead(f);
             this.bodies.set(n.id, { mtime: f.stat.mtime,
                                     body: core.splitFrontmatter(text).body });
+            read = true;
         }
+        // Flags counted from the texts read.
+        if (read) this.scheduleStatuses();
         const out = new Map();
         for (const [id, b] of this.bodies) out.set(id, b.body);
         return out;
@@ -7552,7 +7584,10 @@ class DendritePreview extends ItemView {
         this.names = review.reviewerNames(fm.dendrite_reviewer_colours);
         // You, as you are shown, where your replies are.
         const s = this.plugin.settings || {};
-        if (s.presentName) this.names.set(s.replyName || 'Me', s.presentName);
+        if (s.presentName) {
+            this.names.set(s.replyName || 'Me', s.presentName);
+            this.names.set('Me', s.presentName);
+        }
         const colourOf = (who) => this.colours.get(who) || null;
         const top = Number(fm.dendrite_heading_top);
         const headingTop = top >= 1 && top <= 6 ? top :
@@ -9205,12 +9240,25 @@ class ReviewersModal extends Modal {
         this.view = view;
     }
 
-    /** The reviewers as kept, then any only in the cards, in order. */
+    /**
+     * The reviewers as kept, then any only in the cards, in order; as
+     * this dialog last saved them while the index is still as it was
+     * read before, which would otherwise show a colour just picked as it
+     * was.
+     */
     entries() {
         const view = this.view;
         const fm = this.app.metadataCache.getFileCache(view.file)
             ?.frontmatter || {};
-        const kept = review.reviewerEntries(fm.dendrite_reviewer_colours);
+        let kept = review.reviewerEntries(fm.dendrite_reviewer_colours);
+        // The index not yet read again since this dialog saved it: what
+        // was saved. Read again, or changed elsewhere, as by a colour set
+        // from a comment: what it holds.
+        if (this.latest && JSON.stringify(kept) === this.latest.before) {
+            kept = this.latest.saved.map((e) => Object.assign({}, e));
+        } else {
+            this.latest = null;
+        }
         const map = view.reviewers();
         const order = [];
         for (const n of core.allNodes(view.root)) {
@@ -9243,6 +9291,16 @@ class ReviewersModal extends Modal {
         this.draw();
     }
 
+    /** The entries saved, and the dialog drawn from them. */
+    async save(now) {
+        const fm = this.app.metadataCache.getFileCache(this.view.file)
+            ?.frontmatter || {};
+        this.latest = { saved: now, before: JSON.stringify(
+            review.reviewerEntries(fm.dendrite_reviewer_colours)) };
+        await this.view.saveEntries(now);
+        this.draw();
+    }
+
     draw() {
         this.list.empty();
         const entries = this.entries();
@@ -9253,8 +9311,7 @@ class ReviewersModal extends Modal {
             for (const x of now) {
                 if (which.some((y) => y.name === x.name)) fn(x, now);
             }
-            await this.view.saveEntries(now);
-            this.draw();
+            await this.save(now);
         };
         // One block per person: the names linked to one note together,
         // a name linked to none on its own.
@@ -9270,7 +9327,7 @@ class ReviewersModal extends Modal {
         for (const names of people) {
             const e = names[0];
             // You are drawn above, apart from the reviewers.
-            if (names.length === 1 && e.name === me) continue;
+            if (names.length === 1 && me.has(e.name)) continue;
             const person = e.note ? e.note.split('/').pop() : e.name;
             // Who, then their note, then their colour, as You's row is.
             const { block, mid } = this.row('dendrite-reviewer', person,
@@ -9378,15 +9435,18 @@ class ReviewersModal extends Modal {
         const view = this.view;
         const s = view.plugin.settings;
         const me = s.replyName || 'Me';
-        const mine = entries.find((e) => e.name === me);
+        const mine = view.selfNames();
+        const own = entries.find((e) => e.name === me) ||
+            entries.find((e) => mine.has(e.name));
         const { mid } = this.row('dendrite-reviewer-self', 'You',
-            mine ? mine.colour : 'blue', async (c) => {
+            own ? own.colour : 'blue', async (c) => {
+                // Every name of yours in the colour: Me as well.
                 const now = this.entries();
-                const e = now.find((x) => x.name === me);
-                if (e) e.colour = c;
-                else now.push({ name: me, note: null, colour: c });
-                await view.saveEntries(now);
-                this.draw();
+                for (const e of now) if (mine.has(e.name)) e.colour = c;
+                if (!now.some((e) => e.name === me)) {
+                    now.push({ name: me, note: null, colour: c });
+                }
+                await this.save(now);
             });
         const field = (cls, label, value, placeholder, set) => {
             const at = mid.createEl('label', {
@@ -9398,6 +9458,8 @@ class ReviewersModal extends Modal {
             input.addEventListener('change', async () => {
                 set(input.value.trim());
                 if (view.plugin.saveSettings) await view.plugin.saveSettings();
+                // Which names are yours may have changed.
+                view.reviewerMap = null;
                 view.recolour();
                 this.draw();
             });
@@ -9406,7 +9468,7 @@ class ReviewersModal extends Modal {
               (v) => { s.replyName = v; });
         field('dendrite-reviewer-shown', 'Shown as', s.presentName, me,
               (v) => { s.presentName = v; });
-        return me;
+        return mine;
     }
 
     /** A note as a link reaches it: by its name, or its path if shared. */
