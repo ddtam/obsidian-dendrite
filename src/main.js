@@ -1451,6 +1451,9 @@ class DendriteView extends ItemView {
         const tall = cards.map(([, c]) => c.offsetHeight);
         cards.forEach(([id, card], i) => {
             if (tall[i]) this.heights.set(id, tall[i]);
+            // Its drawn text let go too, or a long session would end up
+            // holding every card's; it is drawn again when near.
+            this.invalidate(id);
             card.empty();
             card.removeClass('is-pending');
             this.makeSlot(id, card);

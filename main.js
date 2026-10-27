@@ -6353,6 +6353,7 @@ var DendriteView = class extends ItemView {
     const tall = cards.map(([, c]) => c.offsetHeight);
     cards.forEach(([id, card], i) => {
       if (tall[i]) this.heights.set(id, tall[i]);
+      this.invalidate(id);
       card.empty();
       card.removeClass("is-pending");
       this.makeSlot(id, card);

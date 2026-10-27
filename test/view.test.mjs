@@ -529,6 +529,8 @@ test('a drawn card far from the view goes back to its slot at the height ' +
         assert.ok(b.hasClass('is-slot'));
         assert.equal(b.style.height, '137px');
         assert.equal(b.childElementCount, 0);
+        assert.ok(!view.rendered.has('G-bbbbb'),
+                  'its drawn text let go, so memory stays bounded');
         assert.ok(!view.cardEls.get('G-aaaaa').hasClass('is-slot'),
                   'the active card stays drawn');
         assert.ok(!view.cardEls.get('G-ccccc').hasClass('is-slot'));
