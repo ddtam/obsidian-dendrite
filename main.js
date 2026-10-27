@@ -5347,6 +5347,47 @@ function openExternal(url) {
     window.open(url);
   }
 }
+function setStyles(el, styles) {
+  for (const [k, v] of Object.entries(styles)) {
+    if (el.style[k] !== v) el.style[k] = v;
+  }
+}
+var DRAW_REACH = 2;
+var DRAW_BATCH = 8;
+function idleDrawer(winOf, next, busy) {
+  let handle = null;
+  let stopped = false;
+  const run = async () => {
+    handle = null;
+    if (stopped) return;
+    if (busy()) {
+      handle = { timer: winOf().setTimeout(run, 250) };
+      return;
+    }
+    const job = next();
+    if (!job) return;
+    try {
+      await job;
+    } catch (err) {
+      console.error("Dendrite: drawing while idle failed", err);
+    }
+    schedule();
+  };
+  const schedule = () => {
+    if (stopped || handle) return;
+    const win = winOf();
+    handle = win.requestIdleCallback ? { idle: win.requestIdleCallback(run) } : { timer: win.setTimeout(run, 200) };
+  };
+  const stop = () => {
+    stopped = true;
+    if (!handle) return;
+    const win = winOf();
+    if (handle.idle !== void 0) win.cancelIdleCallback(handle.idle);
+    else win.clearTimeout(handle.timer);
+    handle = null;
+  };
+  return { schedule, stop };
+}
 function externalLinks(el) {
   for (const a of el.querySelectorAll("a.dendrite-review-link")) {
     a.target = "_blank";
@@ -5657,6 +5698,7 @@ var DendriteView = class extends ItemView {
     );
   }
   async onClose() {
+    if (this.idleDraw) this.idleDraw.stop();
     clearTimeout(this.renameTimer);
     clearTimeout(this.copiesTimer);
     for (const c of this.fanComps.splice(0)) c.unload();
@@ -5882,6 +5924,7 @@ var DendriteView = class extends ItemView {
         this.setColOffset(d, this.colOffset(d) + by);
       }
       this.scheduleFlow();
+      this.drawWhenIdle();
     }, true);
     for (const t of ["copy", "cut"]) {
       board.addEventListener(t, () => this.holdBoardScroll(), true);
@@ -6145,6 +6188,7 @@ var DendriteView = class extends ItemView {
         text: n.label || n.id
       });
       card.addClass("is-pending");
+      this.drawWhenIdle();
     }
     const foot = card.createDiv({ cls: "dendrite-card-foot" });
     this.renderQuotaWidget(foot, n.id);
@@ -6168,6 +6212,68 @@ var DendriteView = class extends ItemView {
       this.observer.unobserve(e.target);
       if (e.target.hasClass("is-pending")) this.renderCard(id);
     }
+  }
+  /**
+   * Cards not yet in view drawn while the board is idle, so moving to
+   * one, or scrolling to it, does not stop to draw it (idleDrawer).
+   */
+  drawWhenIdle() {
+    if (!this.idleDraw) {
+      this.idleDraw = idleDrawer(
+        () => this.pageWin(),
+        () => this.nextToDraw(),
+        () => !!this.anim || Date.now() - (this.plugin.typedAt || 0) < 1e3
+      );
+    }
+    this.idleDraw.schedule();
+  }
+  /**
+   * The waiting cards nearest the board's middle, up to DRAW_BATCH,
+   * drawn together; or null. Only a card within two screens of what the
+   * board shows is drawn, or the
+   * child of a card it shows, since moving to that card brings its
+   * children into view: so a long manuscript keeps only the part around
+   * the reader drawn, and moving or scrolling draws around the new
+   * place (DRAW_REACH).
+   */
+  nextToDraw() {
+    if (!this.board) return null;
+    this.undrawable = this.undrawable || /* @__PURE__ */ new WeakSet();
+    const box = this.board.getBoundingClientRect();
+    const cx = box.left + box.width / 2;
+    const cy = box.top + box.height / 2;
+    const reachX = box.width / 2 + box.width;
+    const reachY = box.height / 2 + DRAW_REACH * box.height;
+    const rects = /* @__PURE__ */ new Map();
+    const kids = /* @__PURE__ */ new Set();
+    for (const [id, el] of this.cardEls) {
+      const r = el.getBoundingClientRect();
+      rects.set(id, r);
+      const shown = r.bottom >= box.top && r.top <= box.bottom && r.right >= box.left && r.left <= box.right;
+      const node = shown && this.byId.get(id);
+      if (node) for (const k of this.kidsOf(node)) kids.add(k.id);
+    }
+    const near = [];
+    for (const [id, el] of this.cardEls) {
+      if (!el.hasClass("is-pending") || this.undrawable.has(el) || this.editing && this.editing.id === id) continue;
+      const r = rects.get(id);
+      const dx = Math.abs(r.left + r.width / 2 - cx);
+      const dy = Math.abs(r.top + r.height / 2 - cy);
+      if ((dx > reachX || dy > reachY) && !kids.has(id)) continue;
+      near.push([Math.hypot(dx, dy), id, el]);
+    }
+    if (!near.length) return null;
+    near.sort((a, b) => a[0] - b[0]);
+    this.drawingIdle = (this.drawingIdle || 0) + 1;
+    return Promise.all(near.slice(0, DRAW_BATCH).map(([, id, el]) => (
+      // One that fails is not tried again until the board is redrawn.
+      this.renderCard(id).catch((err) => {
+        this.undrawable.add(el);
+        console.error("Dendrite: a card could not be drawn", err);
+      })
+    ))).finally(() => {
+      this.drawingIdle--;
+    });
   }
   invalidate(id) {
     const r = this.rendered.get(id);
@@ -6265,8 +6371,8 @@ var DendriteView = class extends ItemView {
       b.appendChild(out);
       now.removeClass("is-pending");
       now.removeClass("is-missing");
-      if (this.lineage && this.lineage.has(id) && !this.scrolledByHand) {
-        this.centre(false);
+      if (this.lineage && this.lineage.has(id) && !this.scrolledByHand && !this.drawingIdle) {
+        this.centre(!!this.anim);
       }
       this.scheduleFlow();
       if (this.find) this.paintFind();
@@ -6302,7 +6408,7 @@ var DendriteView = class extends ItemView {
     if (this.resizeFrame) return;
     this.resizeFrame = this.pageWin().requestAnimationFrame(() => {
       this.resizeFrame = null;
-      if (!this.scrolledByHand) this.centre(false);
+      if (!this.scrolledByHand) this.centre(!!this.anim);
       if (this.nativeScroll || this.scrolledByHand) this.drawFlow();
     });
   }
@@ -6323,19 +6429,17 @@ var DendriteView = class extends ItemView {
     if (!svg || !this.board) return;
     this.placeFan();
     this.placeFloat();
-    while (svg.firstChild) svg.firstChild.remove();
-    for (const g of this.board.querySelectorAll(".is-flow")) {
-      g.classList.remove("is-flow");
-    }
     const node = this.active && this.byId.get(this.active);
-    if (!node) return;
-    svg.style.width = this.board.scrollWidth + "px";
-    svg.style.height = this.board.clientHeight + "px";
+    const cols = this.board.querySelectorAll(".dendrite-col");
+    const last = cols[cols.length - 1];
+    const width = `${last ? last.offsetLeft + last.offsetWidth : 0}px`;
+    const height = `${this.board.clientHeight}px`;
     const box = this.board.getBoundingClientRect();
     const sx = this.board.scrollLeft;
     const rel = (el) => this.flowBox(el, box, sx);
     const pairs = [];
     const steps = [];
+    const groups = /* @__PURE__ */ new Set();
     for (let n = node; n && n.id; n = this.upOf(n)) {
       const card = this.cardEls.get(n.id);
       if (!card) continue;
@@ -6349,19 +6453,43 @@ var DendriteView = class extends ItemView {
       const child = this.cardEls.get(kids[0].id);
       const group = child && child.parentElement;
       if (!group) continue;
-      group.classList.add("is-flow");
+      groups.add(group);
       pairs.push({ card: rel(card), group: rel(group) });
     }
-    const NS = "http://www.w3.org/2000/svg";
-    const draw = (cls, d) => {
-      if (!d) return;
-      const path = this.pageDoc().createElementNS(NS, "path");
+    for (const g of this.board.querySelectorAll(".is-flow")) {
+      if (!groups.has(g)) g.classList.remove("is-flow");
+    }
+    for (const g of groups) {
+      if (!g.classList.contains("is-flow")) g.classList.add("is-flow");
+    }
+    if (svg.style.width !== width) svg.style.width = width;
+    if (svg.style.height !== height) svg.style.height = height;
+    this.flowPath(
+      svg,
+      "dendrite-flow-context",
+      node ? core.flowPath(pairs) : ""
+    );
+    this.flowPath(
+      svg,
+      "dendrite-flow-thread",
+      node ? core.threadPath(steps) : ""
+    );
+  }
+  /** One of the flow's two shapes, given its path, or removed. */
+  flowPath(svg, cls, d) {
+    let path = svg.querySelector(`.${cls}`);
+    if (!d) {
+      if (path) path.remove();
+      return;
+    }
+    if (!path) {
+      const NS = "http://www.w3.org/2000/svg";
+      path = this.pageDoc().createElementNS(NS, "path");
       path.setAttribute("class", cls);
-      path.setAttribute("d", d);
-      svg.appendChild(path);
-    };
-    draw("dendrite-flow-context", core.flowPath(pairs));
-    draw("dendrite-flow-thread", core.threadPath(steps));
+      if (cls === "dendrite-flow-context") svg.prepend(path);
+      else svg.appendChild(path);
+    }
+    if (path.getAttribute("d") !== d) path.setAttribute("d", d);
   }
   /**
    * An element's box for the flow, in the board's content coordinates
@@ -6426,6 +6554,7 @@ var DendriteView = class extends ItemView {
       this.tellCentred(left);
       this.board.scrollTo({ left, behavior });
     }
+    this.drawWhenIdle();
   }
   /** With Say what moves the board on, a centring that moves it. */
   tellCentred(left) {
@@ -6667,6 +6796,7 @@ var DendriteView = class extends ItemView {
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? col.clientHeight : 1;
     this.setColOffset(d, this.colOffset(d) + e.deltaY * unit);
     this.drawFlow();
+    this.drawWhenIdle();
   }
   /** A link to the card, to paste where a table or figure is cited. */
   async copyRef(id) {
@@ -7606,6 +7736,7 @@ var DendriteView = class extends ItemView {
           () => this.save(ed),
           this.plugin.settings.autosaveMs
         );
+        this.plugin.typedAt = Date.now();
       },
       onBlur: () => {
         this.save(ed);
@@ -7792,16 +7923,19 @@ var DendriteView = class extends ItemView {
     const stage = el.parentElement.getBoundingClientRect();
     const r = card.getBoundingClientRect();
     const left = Math.max(0, r.left - stage.left);
-    el.style.left = `${left}px`;
-    el.style.top = `${r.top - stage.top}px`;
-    el.style.maxWidth = `${Math.max(
-      r.width,
-      stage.width - left - 12
-    )}px`;
+    setStyles(el, {
+      left: `${left}px`,
+      top: `${r.top - stage.top}px`,
+      maxWidth: `${Math.max(
+        r.width,
+        stage.width - left - 12
+      )}px`
+    });
     const body = card.querySelector(".dendrite-card-body");
     const extra = r.height - (body ? body.offsetHeight : 0);
-    if (body && el.offsetHeight) {
-      body.style.minHeight = `${Math.max(0, el.offsetHeight - extra)}px`;
+    const high = el.offsetHeight;
+    if (body && high) {
+      setStyles(body, { minHeight: `${Math.max(0, high - extra)}px` });
     }
   }
   /** The card's text in the plain editor, for this visit. */
@@ -8603,10 +8737,12 @@ var DendriteView = class extends ItemView {
     const inX = v.left - f.left;
     const inY = v.top - f.top;
     const top = Math.max(8, r.top - stage.top - inY);
-    fan.style.left = `${r.right - stage.left + 2 * gap - inX}px`;
-    fan.style.top = `${top}px`;
-    fan.style.width = `${r.width + 2 * inX}px`;
-    fan.style.maxHeight = `${Math.max(160, stage.height - top - 8)}px`;
+    setStyles(fan, {
+      left: `${r.right - stage.left + 2 * gap - inX}px`,
+      top: `${top}px`,
+      width: `${r.width + 2 * inX}px`,
+      maxHeight: `${Math.max(160, stage.height - top - 8)}px`
+    });
   }
   /**
    * An old version in the fan: read only, with its review comments,
@@ -11382,7 +11518,7 @@ var DendritePreview = class extends ItemView {
     });
   }
   async onClose() {
-    clearTimeout(this.drawnTimer);
+    if (this.idleDraw) this.idleDraw.stop();
     if (this.observer) this.observer.disconnect();
     if (this.resizer) this.resizer.disconnect();
     for (const b of this.blocks.values()) {
@@ -11472,7 +11608,7 @@ var DendritePreview = class extends ItemView {
       this.doc.scrollTop = Math.max(0, to);
     }, { passive: false });
     this.doc.addEventListener("scroll", () => {
-      if (this.drawByHand) this.drawNear();
+      this.drawWhenIdle();
       if (this.shiftFrame) return;
       const win = this.doc.ownerDocument.defaultView;
       this.shiftFrame = win.requestAnimationFrame(() => {
@@ -11511,7 +11647,7 @@ var DendritePreview = class extends ItemView {
     } catch (err) {
       this.failed(err);
     }
-    this.checkDrawn();
+    this.drawWhenIdle();
   }
   /** A failure to draw, shown once while the preview is open. */
   failed(err) {
@@ -11521,36 +11657,42 @@ var DendritePreview = class extends ItemView {
     new Notice(`Dendrite: the preview could not draw: ${err && err.message || err}`, 15e3);
   }
   /**
-   * Parts are drawn as they scroll into view. If a moment after a
-   * refresh parts are waiting and none has been drawn, as seen on an
-   * iPad, those near the view are drawn here, and from then on as the
-   * text scrolls, with a notice saying so.
+   * Parts drawn while the preview is idle, as well as when they scroll
+   * into view, so a scroll or a card selected on the board does not
+   * stop to draw them; and so they are drawn where the observer is
+   * never told they are in view, as on an iPad (idleDrawer).
    */
-  checkDrawn() {
-    clearTimeout(this.drawnTimer);
-    this.drawnTimer = setTimeout(() => {
-      if (this.drawByHand || !this.doc || !this.doc.isConnected) return;
-      const shown = [...this.blocks.values()].filter((b) => b.el.isConnected && !b.el.hasClass("is-empty"));
-      const waiting = shown.filter((b) => b.el.hasClass("is-pending"));
-      if (!waiting.length || waiting.length < shown.length) return;
-      this.drawByHand = true;
-      const n = this.drawNear();
-      new Notice(`Dendrite: the preview drew ${n} of ${waiting.length} parts itself, since none had been drawn (its text area ${Math.round(this.doc.clientHeight)} px high).`, 15e3);
-    }, 1500);
-  }
-  /** Waiting parts within a screen of the view drawn; how many. */
-  drawNear() {
-    const v = this.doc.getBoundingClientRect();
-    const reach = Math.max(800, v.height);
-    let n = 0;
-    for (const b of this.blocks.values()) {
-      if (!b.el.hasClass("is-pending") || b.el.hasClass("is-empty") || !b.el.isConnected) continue;
-      const r = b.el.getBoundingClientRect();
-      if (r.bottom < v.top - reach || r.top > v.bottom + reach) continue;
-      n++;
-      this.renderBlock(b.el.dataset.id).catch((err) => this.failed(err));
+  drawWhenIdle() {
+    if (!this.idleDraw) {
+      this.idleDraw = idleDrawer(
+        () => this.doc && this.doc.ownerDocument.defaultView || window,
+        () => this.nextToDraw(),
+        () => Date.now() - (this.plugin.typedAt || 0) < 1e3
+      );
     }
-    return n;
+    this.idleDraw.schedule();
+  }
+  /**
+   * The waiting parts nearest the middle of the view, up to
+   * DRAW_BATCH, drawn together; or null. Only parts within DRAW_REACH
+   * screens of the view are drawn, so a
+   * long document keeps only the part around the reader drawn.
+   */
+  nextToDraw() {
+    if (!this.doc) return null;
+    const v = this.doc.getBoundingClientRect();
+    const mid = v.top + v.height / 2;
+    const reach = v.height / 2 + DRAW_REACH * v.height;
+    const near = [];
+    for (const [id, b] of this.blocks) {
+      if (!b.el.hasClass("is-pending") || b.el.hasClass("is-empty") || !this.doc.contains(b.el)) continue;
+      const r = b.el.getBoundingClientRect();
+      const d = Math.abs(r.top + r.height / 2 - mid);
+      if (d <= reach) near.push([d, id]);
+    }
+    if (!near.length) return null;
+    near.sort((a, b) => a[0] - b[0]);
+    return Promise.all(near.slice(0, DRAW_BATCH).map(([, id]) => this.renderBlock(id).catch((err) => this.failed(err))));
   }
   async refreshNow() {
     if (!this.file || !this.doc) return;
@@ -12139,6 +12281,7 @@ var DendritePreview = class extends ItemView {
     for (const [bid, b2] of this.blocks) {
       b2.el.toggleClass("is-active", bid === id);
     }
+    this.drawWhenIdle();
     this.fadeBubbles();
     this.scheduleBubbles();
     const b = this.blocks.get(id);
@@ -13544,8 +13687,10 @@ module.exports = class DendritePlugin extends Plugin {
         timing.watch(l.view.containerEl.ownerDocument.defaultView);
       }
     }
-    const got = timing.take();
+    const memory = this.memoryNow();
+    const got = timing.take() || memory && {};
     if (!got) return;
+    if (memory) got.memory = memory;
     try {
       const fs = require("fs");
       const file = vaultFile(this.app.vault.getName(), TIMINGS);
@@ -13560,6 +13705,45 @@ module.exports = class DendritePlugin extends Plugin {
     } catch (err) {
       console.error("Dendrite: timings not written", err);
     }
+  }
+  /**
+   * The window's memory, in MB, and how much of the boards and previews
+   * open is drawn, for the timings file: `rss_mb` the window's process,
+   * `heap_mb` its script heap, `nodes` the elements in Dendrite's
+   * views, `cards` and `parts` those drawn of all there are. Written
+   * even when nothing was timed, so memory can be followed while idle.
+   */
+  memoryNow() {
+    let m;
+    try {
+      m = process.memoryUsage();
+    } catch (err) {
+      return null;
+    }
+    const mb = (x) => Math.round(x / 1048576);
+    const out = {
+      rss_mb: mb(m.rss),
+      heap_mb: mb(m.heapUsed),
+      nodes: 0,
+      cards: [0, 0],
+      parts: [0, 0]
+    };
+    for (const l of this.app.workspace.getLeavesOfType(VIEW)) {
+      out.nodes += l.view.containerEl.getElementsByTagName("*").length;
+      for (const el of (l.view.cardEls || /* @__PURE__ */ new Map()).values()) {
+        out.cards[1]++;
+        if (!el.hasClass("is-pending")) out.cards[0]++;
+      }
+    }
+    for (const l of this.app.workspace.getLeavesOfType(PREVIEW)) {
+      out.nodes += l.view.containerEl.getElementsByTagName("*").length;
+      for (const b of (l.view.blocks || /* @__PURE__ */ new Map()).values()) {
+        if (b.el.hasClass("is-empty")) continue;
+        out.parts[1]++;
+        if (!b.el.hasClass("is-pending")) out.parts[0]++;
+      }
+    }
+    return out;
   }
   async onload() {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());

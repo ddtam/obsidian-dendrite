@@ -233,6 +233,195 @@ test('a board scrolled sideways by hand stays there as cards are drawn ' +
     assert.equal(centred, 1);
 });
 
+test('cards never scrolled into view are drawn while the board is ' +
+     'idle, nearest the active card first, so a move need not draw them',
+     async () => {
+    // Only the first card is ever in view.
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+            '    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n',
+            { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
+        const pending = () => [...view.cardEls]
+            .filter(([, el]) => el.hasClass('is-pending')).map(([id]) => id);
+        assert.deepEqual(pending().sort(), ['G-bbbbb', 'G-ccccc'],
+                         'out of view, not drawn at once');
+        const order = [];
+        const draw = view.renderCard.bind(view);
+        view.renderCard = (id) => { order.push(id); return draw(id); };
+        await tick(1500);
+        assert.deepEqual(pending(), [], 'all drawn');
+        assert.equal(order.length, 2, 'each drawn once');
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
+test('idle drawing keeps to the cards near what the board shows, and ' +
+     'the children of those it shows, and follows a scroll', async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+            '    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n- [[G-ddddd|D]]\n',
+            { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C',
+              'G-ddddd': 'D' });
+        // A board 1000 by 500 px: A at its top, B (A's child) and C far
+        // below it, D just under the view.
+        const at = { 'G-aaaaa': 0, 'G-bbbbb': 9000, 'G-ccccc': 8000,
+                     'G-ddddd': 700 };
+        const rect = (top) => ({ top, bottom: top + 100, left: 0,
+                                 right: 300, width: 300, height: 100 });
+        view.board.getBoundingClientRect = () => ({ top: 0, bottom: 500,
+            left: 0, right: 1000, width: 1000, height: 500 });
+        for (const [id, el] of view.cardEls) {
+            el.getBoundingClientRect = () => rect(at[id]);
+        }
+        const pending = () => [...view.cardEls]
+            .filter(([, el]) => el.hasClass('is-pending')).map(([id]) => id)
+            .sort();
+        view.drawWhenIdle();
+        await tick(1200);
+        assert.deepEqual(pending(), ['G-ccccc'],
+                         'near ones and a shown card\'s child drawn');
+        // Scrolled down to C: it is drawn in turn.
+        at['G-ccccc'] = 300;
+        const col = view.board.querySelectorAll('.dendrite-col')[0];
+        view.onWheel({ target: col, deltaY: 200, deltaMode: 0,
+                       preventDefault() {} });
+        await tick(800);
+        assert.deepEqual(pending(), []);
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
+test('the preview draws while idle only the parts near its view',
+     async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|p]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), '# Aims');
+    await app.vault.create(cardPath('G-bbbbb'), 'The prose.');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    view.observer = { observe() {}, unobserve() {}, disconnect() {} };
+    h.window.document.body.appendChild(view.contentEl);
+    // The view 500 px high; the second part 5000 px down.
+    const tops = { 'G-aaaaa': 0, 'G-bbbbb': 5000 };
+    const proto = h.window.HTMLElement.prototype;
+    const real = proto.getBoundingClientRect;
+    proto.getBoundingClientRect = function () {
+        if (this.classList.contains('dendrite-preview-doc')) {
+            return { top: 0, bottom: 500, height: 500, left: 0, right: 600,
+                     width: 600 };
+        }
+        const top = tops[this.dataset && this.dataset.id] || 0;
+        return { top, bottom: top + 100, height: 100, left: 0, right: 600,
+                 width: 600 };
+    };
+    try {
+        await view.setState({ file: INDEX });
+        await tick(1200);
+        const waiting = () => [...view.blocks]
+            .filter(([, b]) => b.el.hasClass('is-pending')).map(([id]) => id);
+        assert.deepEqual(waiting(), ['G-bbbbb'], 'the far part waits');
+        tops['G-bbbbb'] = 600;
+        view.doc.dispatchEvent(new h.window.Event('scroll'));
+        await tick(800);
+        assert.deepEqual(waiting(), [], 'drawn once scrolled near');
+    } finally {
+        proto.getBoundingClientRect = real;
+        await view.onClose();
+        view.contentEl.remove();
+    }
+});
+
+test('cards drawn while idle are drawn together, and do not each ' +
+     'centre the board', async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+            '    - [[G-bbbbb|B]]\n    - [[G-ccccc|C]]\n',
+            { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
+        view.active = 'G-aaaaa';
+        view.applyActive(false);
+        let centred = 0;
+        const centre = view.centre.bind(view);
+        view.centre = (...a) => { centred++; return centre(...a); };
+        const started = [];
+        const draw = view.renderCard.bind(view);
+        view.renderCard = (id) => {
+            started.push([id, started.length]);
+            return draw(id);
+        };
+        await tick(1000);
+        assert.deepEqual(started.map(([id]) => id).sort(),
+                         ['G-bbbbb', 'G-ccccc'], 'both drawn');
+        assert.equal(centred, 0, 'B and C are on the active path, but ' +
+                     'drawn while idle they leave centring to the resize');
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
+test('idle drawing waits while the board is moving and just after a key',
+     async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+            { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+        const pending = () =>
+            view.cardEls.get('G-bbbbb').hasClass('is-pending');
+        view.anim = 1;
+        await tick(700);
+        assert.ok(pending(), 'not drawn while the board moves');
+        view.anim = null;
+        view.plugin.typedAt = Date.now() + 800;
+        await tick(700);
+        assert.ok(pending(), 'not drawn just after a key');
+        await tick(1800);
+        assert.ok(!pending(), 'drawn once things are quiet');
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
+test('a card drawn while the board moves to another turns the move ' +
+     'smoothly, rather than jumping the columns', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n' +
+        '    - [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    view.active = 'G-aaaaa';
+    view.applyActive(false);
+    const calls = [];
+    const centre = view.centre.bind(view);
+    view.centre = (...a) => { calls.push(a[0]); return centre(...a); };
+    // A smooth move under way.
+    view.anim = 1;
+    view.invalidate('G-bbbbb');
+    view.cardEls.get('G-bbbbb').addClass('is-pending');
+    await view.renderCard('G-bbbbb');
+    assert.deepEqual(calls, [true], 'the move goes on to the new place');
+    view.resizer.cb([]);
+    await tick(5);
+    assert.deepEqual(calls, [true, true], 'a resize turns it too');
+    // At rest, a card drawn places the board at once, as before.
+    view.anim = null;
+    calls.length = 0;
+    view.invalidate('G-bbbbb');
+    view.cardEls.get('G-bbbbb').addClass('is-pending');
+    await view.renderCard('G-bbbbb');
+    assert.deepEqual(calls, [false]);
+});
+
 test('a phone\'s touch scroll counts as by hand when the board is rebuilt',
      async () => {
     const { app, view } = await open(
@@ -551,6 +740,57 @@ test('the active path flows into each child group', async () => {
     assert.equal(thread.length, 1);
     assert.equal(thread[0].getAttribute('d').split(' Z')
         .filter((s) => s.trim()).length, 1, 'one step: A to B');
+});
+
+test('the flow is sized without reading the board\'s scroll width, ' +
+     'which lays out every card while a column moves', async () => {
+    // Measured 2026-10-27 on a 2,646-card board: reading scrollWidth
+    // after a column moved took about 194 ms, on every wheel step and
+    // every frame of a move.
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|A]]\n    - [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    await view.select('G-bbbbb');
+    let reads = 0;
+    Object.defineProperty(view.board, 'scrollWidth', {
+        get() { reads++; return 0; } });
+    const cols = view.board.querySelectorAll('.dendrite-col');
+    const last = cols[cols.length - 1];
+    Object.defineProperty(last, 'offsetLeft', { get: () => 900 });
+    Object.defineProperty(last, 'offsetWidth', { get: () => 400 });
+    view.drawFlow();
+    assert.equal(reads, 0);
+    assert.equal(view.flowSvg.style.width, '1300px',
+                 'as wide as the board\'s columns reach');
+});
+
+test('the flow drawn again with nothing moved changes nothing, so it ' +
+     'leaves no layout for the next read to pay for', async () => {
+    // Measured 2026-10-27 on a 2,646-card board: rewriting the flow's
+    // size and paths on every draw made the next position read lay the
+    // board out again, about 194 ms a draw.
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|A]]\n    - [[G-bbbbb|B]]\n        - [[G-ccccc|C]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
+    await view.select('G-bbbbb');
+    view.drawFlow();
+    const changes = [];
+    const watch = new h.window.MutationObserver((m) => changes.push(...m));
+    watch.observe(view.board, { subtree: true, childList: true,
+                                attributes: true });
+    view.drawFlow();
+    await tick();
+    watch.disconnect();
+    assert.deepEqual(changes.map((m) => `${m.type} ${m.attributeName}`),
+                     []);
+    // Moving to another card still moves the flow.
+    await view.select('G-aaaaa');
+    view.drawFlow();
+    const flows = [...view.board.querySelectorAll('.is-flow')]
+        .map((g) => g.querySelector('.dendrite-card').dataset.id);
+    assert.deepEqual(flows, ['G-bbbbb'], 'A opens into B\'s group only');
 });
 
 test('vim keys move, insert, rearrange and delete in normal mode',
@@ -1088,7 +1328,7 @@ test('the preview prints by role, follows edits, and links to the board',
 });
 
 test('a preview whose parts are never seen scrolling into view draws ' +
-     'them itself, and a failure to draw says so', async () => {
+     'them while idle, and a failure to draw says so', async () => {
     const { DendritePreview } = require('../src/main.js');
     const app = h.makeApp();
     app.vault.folders.add('W/Grant/cards');
@@ -1110,7 +1350,7 @@ test('a preview whose parts are never seen scrolling into view draws ' +
     assert.deepEqual(drawn(), [], 'nothing drawn yet');
     await tick(1700);
     assert.deepEqual(drawn(), ['# Aims', 'The prose.']);
-    assert.match(h.notices.join('|'), /drew 2 of 2 parts itself/);
+    assert.deepEqual(h.notices, [], 'drawn without a word');
     // A refresh that throws shows its message, once.
     h.notices.length = 0;
     app.vault.cachedRead = async () => { throw new Error('no read'); };

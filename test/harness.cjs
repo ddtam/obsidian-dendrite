@@ -82,9 +82,11 @@ global.ResizeObserver = class {
     fire() { this.cb([]); }
 };
 
+// Everything is in view, unless a test says what is: global.inView.
 global.IntersectionObserver = class {
     constructor(cb) { this.cb = cb; }
     observe(el) {
+        if (global.inView && !global.inView(el)) return;
         queueMicrotask(() => this.cb([{ isIntersecting: true, target: el }]));
     }
     unobserve() {}
