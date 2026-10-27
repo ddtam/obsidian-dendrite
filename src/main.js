@@ -107,6 +107,8 @@ const DEFAULTS = {
     reviewApiKey: '',
     // The name a reply to a review comment is signed with.
     replyName: '',
+    // How you are shown where your replies are, and in what is sent out.
+    presentName: '',
     recordTimings: false,
     // A notice for each time the board is moved sideways other than by
     // hand, naming what moved it.
@@ -5772,7 +5774,10 @@ class DendriteView extends ItemView {
             this.app.metadataCache.getFileCache(this.file)?.frontmatter;
         const names = review.reviewerNames(
             fm && fm.dendrite_reviewer_colours);
-        return (who) => names.get(who) || who;
+        const me = this.plugin.settings.replyName || 'Me';
+        const shown = this.plugin.settings.presentName;
+        return (who) => (shown && who === me ? shown :
+            names.get(who) || who);
     }
 
     /**
@@ -5781,7 +5786,11 @@ class DendriteView extends ItemView {
      */
     noteReviewers(id, notes) {
         this.reviewersOf = this.reviewersOf || new Map();
-        const names = [...new Set(notes.map((x) => x.author || 'Reviewer'))];
+        // Those who replied as well, so a reply is drawn in its writer's
+        // colour.
+        const names = [...new Set(notes.flatMap((x) => [
+            x.author || 'Reviewer',
+            ...(x.replies || []).map((r) => r.author || 'Me')]))];
         this.reviewersOf.set(id, names);
         const map = this.reviewers();
         if (names.some((x) => !map.has(x)) && !this.colourTimer) {
@@ -5846,7 +5855,9 @@ class DendriteView extends ItemView {
         for (const [id, names] of this.reviewersOf || new Map()) {
             if (!names.length) continue;
             this.invalidate(id);
-            this.renderCard(id);
+            // A slot is drawn afresh when it is filled.
+            const card = this.cardEls.get(id);
+            if (card && !card.hasClass('is-slot')) this.renderCard(id);
         }
     }
 
@@ -5922,7 +5933,7 @@ class DendriteView extends ItemView {
             new SuggestModal(this, id, body, after, async () => {
                 await write(after);
                 if (item) await this.rememberDone(item);
-            }).open();
+            }, item && this.colourOf()(item.author || 'Reviewer')).open();
             return;
         }
         // A Google comment on several passages comes in as one comment
@@ -7494,6 +7505,9 @@ class DendritePreview extends ItemView {
             ?.frontmatter || {};
         this.colours = review.reviewerColours(fm.dendrite_reviewer_colours);
         this.names = review.reviewerNames(fm.dendrite_reviewer_colours);
+        // You, as you are shown, where your replies are.
+        const s = this.plugin.settings || {};
+        if (s.presentName) this.names.set(s.replyName || 'Me', s.presentName);
         const colourOf = (who) => this.colours.get(who) || null;
         const top = Number(fm.dendrite_heading_top);
         const headingTop = top >= 1 && top <= 6 ? top :
@@ -7789,9 +7803,13 @@ class DendritePreview extends ItemView {
                     `Suggests adding: ${it.text.trim()}` });
             // Its replies, under it; one taken back from the board.
             for (const r of it.replies || []) {
-                const rel = el.createDiv({ cls: 'dendrite-review-reply' });
+                const rc = this.colours &&
+                    this.colours.get(r.author || 'Me');
+                const rel = el.createDiv({ cls: 'dendrite-review-reply' +
+                    (rc ? ` is-c-${rc}` : '') });
                 const by = rel.createDiv({ cls: 'dendrite-review-meta' });
-                by.createEl('b', { text: r.author || 'Me' });
+                review.shownAs(by.createEl('b'), r.author || 'Me',
+                               (who) => this.names.get(who));
                 by.appendText(` · ${review.shortDate(r.date)}`);
                 rel.createDiv({ cls: 'dendrite-review-text', text: r.text });
             }
@@ -8850,16 +8868,22 @@ VersionModal.mode = 'unified';
  * the card now and the card with it, to apply or not.
  */
 class SuggestModal extends VersionModal {
-    constructor(view, id, now, after, apply) {
+    constructor(view, id, now, after, apply, tint = null) {
         super(view, id);
         this.now = now;
         this.after = after;
         this.apply = apply;
+        this.tint = tint;
         this.labels = ['the card now', 'with the change'];
     }
 
     async onOpen() {
         const { contentEl, view, id } = this;
+        // The card now in grey, with the change in the reviewer's colour,
+        // or the accent's, as their suggestions are drawn on the board.
+        this.modalEl.style.setProperty('--dendrite-now', 'var(--text-muted)');
+        this.modalEl.style.setProperty('--dendrite-before', this.tint ?
+            `var(--color-${this.tint})` : 'var(--interactive-accent)');
         const node = view.byId.get(id);
         this.titleEl.setText(`Apply the suggested change to card ` +
             `${core.shortId(id)}` + (node && node.label ?
@@ -9184,8 +9208,11 @@ class ReviewersModal extends Modal {
         }
         const find = (n) => this.app.metadataCache.getFirstLinkpathDest(n,
             this.view.file.path);
+        const me = this.drawYou(entries);
         for (const names of people) {
             const e = names[0];
+            // You are drawn above, apart from the reviewers.
+            if (names.length === 1 && e.name === me) continue;
             const block = this.list.createDiv({ cls: 'dendrite-reviewer' });
             block.dataset.name = e.name;
             const person = e.note ? e.note.split('/').pop() : e.name;
@@ -9261,6 +9288,56 @@ class ReviewersModal extends Modal {
                 b.onclick = () => link(named);
             }
         }
+    }
+
+    /**
+     * You, at the top: your colour, the name your replies are signed with
+     * in the cards, and the name you are shown as, on the board, in the
+     * preview and in what is sent out. The name you sign with, or Me.
+     */
+    drawYou(entries) {
+        const view = this.view;
+        const s = view.plugin.settings;
+        const me = s.replyName || 'Me';
+        const mine = entries.find((e) => e.name === me);
+        const colour = mine ? mine.colour : 'blue';
+        const block = this.list.createDiv({ cls: 'dendrite-reviewer-self' });
+        const dot = block.createSpan({ cls: 'dendrite-reviewer-dot' });
+        dot.style.background = `var(--color-${colour})`;
+        block.createSpan({ cls: 'dendrite-reviewer-name', text: 'You' });
+        const sel = block.createEl('select', { cls: 'dropdown' });
+        for (const c of review.REVIEWER_COLOURS) {
+            const o = sel.createEl('option', {
+                text: c[0].toUpperCase() + c.slice(1) });
+            o.value = c;
+        }
+        sel.value = colour;
+        sel.addEventListener('change', async () => {
+            const now = this.entries();
+            const e = now.find((x) => x.name === me);
+            if (e) e.colour = sel.value;
+            else now.push({ name: me, note: null, colour: sel.value });
+            await view.saveEntries(now);
+            this.draw();
+        });
+        const field = (cls, label, value, placeholder, set) => {
+            const row = block.createDiv({ cls: 'dendrite-reviewer-self-row' });
+            row.createSpan({ text: label });
+            const input = row.createEl('input', { type: 'text', cls });
+            input.value = value || '';
+            input.placeholder = placeholder;
+            input.addEventListener('change', async () => {
+                set(input.value.trim());
+                if (view.plugin.saveSettings) await view.plugin.saveSettings();
+                view.recolour();
+                this.draw();
+            });
+        };
+        field('dendrite-reviewer-signed', 'Replies signed', s.replyName, 'Me',
+              (v) => { s.replyName = v; });
+        field('dendrite-reviewer-shown', 'Shown as', s.presentName, me,
+              (v) => { s.presentName = v; });
+        return me;
     }
 
     /** A note as a link reaches it: by its name, or its path if shared. */

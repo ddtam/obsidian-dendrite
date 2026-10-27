@@ -3183,6 +3183,13 @@ test('review comments go into their cards as one undo step, set them to ' +
     await view.reviewAction('G-bbbbb', 0, 'apply');
     const m = h.obsidian.lastModal;
     assert.match(m.titleEl.textContent, /Apply the suggested change/);
+    // The card now in grey, with the change in the reviewer's colour, as
+    // their suggestions are drawn.
+    const tint = view.colourOf()('Aly Karsan');
+    assert.equal(m.modalEl.style.getPropertyValue('--dendrite-now'),
+                 'var(--text-muted)');
+    assert.equal(m.modalEl.style.getPropertyValue('--dendrite-before'),
+                 tint ? `var(--color-${tint})` : 'var(--interactive-accent)');
     assert.equal(text(cardPath('G-bbbbb')).includes('[!suggest]'), true,
                  'nothing written until applied');
     await [...m.contentEl.querySelectorAll('button')]
@@ -5160,6 +5167,47 @@ test('Reviewers… in the Review menu sets each reviewer\'s colour and links ' +
     assert.deepEqual(fm(), ['Joshua Bridgers: blue', 'Aly Karsan: pink']);
     // Colours stay per reviewer though the link changed.
     assert.ok(view.cardEls.get('G-aaaaa').querySelector('mark.is-c-blue'));
+});
+
+test('your replies are drawn in your colour and under the name you are ' +
+     'shown as, both set in Reviewers… under You', async () => {
+    const cards = { 'G-aaaaa': 'First ==one==%%[!review] Joshua Bridgers, ' +
+        '2026-10-23: Why?%%%%[!reply] Me, 2026-10-24: Because.%%.' };
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', cards);
+    let saved = 0;
+    view.plugin.saveSettings = async () => { saved++; };
+    await tick(30);
+    const fm = () => app.metadataCache.getFileCache(
+        app.vault.getAbstractFileByPath(INDEX)).frontmatter
+        .dendrite_reviewer_colours;
+    // A replier is a reviewer too: given a colour as the reviewers are.
+    assert.deepEqual(fm(), ['Joshua Bridgers: blue', 'Me: green']);
+    const reply = () => view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-reply');
+    assert.ok(reply().classList.contains('is-c-green'));
+    await menuItem(view.reviewMenu(), 'Reviewers…').click();
+    const modal = h.obsidian.lastModal;
+    const you = modal.contentEl.querySelector('.dendrite-reviewer-self');
+    assert.ok(you, 'You, at the top');
+    assert.deepEqual([...modal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')].map((r) => r.dataset.name),
+        ['Joshua Bridgers'], 'not among the reviewers');
+    const sel = you.querySelector('select');
+    sel.value = 'orange';
+    sel.dispatchEvent(new h.window.Event('change'));
+    await tick(30);
+    assert.deepEqual(fm(), ['Joshua Bridgers: blue', 'Me: orange']);
+    assert.ok(reply().classList.contains('is-c-orange'));
+    const shown = you.querySelector('input.dendrite-reviewer-shown');
+    shown.value = 'Derek Tam';
+    shown.dispatchEvent(new h.window.Event('change'));
+    await tick(30);
+    assert.equal(view.plugin.settings.presentName, 'Derek Tam');
+    assert.ok(saved > 0);
+    assert.equal(reply().querySelector('.dendrite-review-meta b')
+        .textContent, 'Derek Tam', 'shown as, the card still says Me');
+    assert.match(app.vault.text.get(cardPath('G-aaaaa')), /\[!reply\] Me,/);
 });
 
 test('names linked to the same note are one person: one colour for all ' +

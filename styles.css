@@ -1081,8 +1081,10 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
-/* In the preview, a flagged card's part has a faint line in the margin
-   at its left, set apart from the text. */
+/* In the preview, a flagged card's part has a line in the margin at its
+   left, set apart from the text, in the accent colour (on trial,
+   2026-10-27, against the neutral grey of the board's revise chip) or the
+   colour Pretty Properties gives the status. */
 .dendrite-pblock.is-flagged {
     position: relative;
 }
@@ -1095,7 +1097,7 @@ body {
     width: 2px;
     border-radius: 1px;
     background: color-mix(in srgb,
-        var(--dendrite-chip, var(--dendrite-flag)) 35%, transparent);
+        var(--dendrite-chip, var(--interactive-accent)) 60%, transparent);
 }
 
 /* Dragging a card: a small label follows the pointer, the card being
@@ -2105,6 +2107,27 @@ button.dendrite-review-btn:hover {
     column-gap: 10px;
     row-gap: 2px;
 }
+/* You, above the reviewers: your colour, then the name your replies are
+   signed with and the name you are shown as, each on its own row. */
+.dendrite-reviewer-self {
+    display: grid;
+    grid-template-columns: 12px minmax(8em, 1fr) auto minmax(10em, 1fr);
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 4px;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+.dendrite-reviewer-self-row {
+    grid-column: 2 / -1;
+    display: grid;
+    grid-template-columns: 8em 1fr;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
 .dendrite-reviewer-dot {
     width: 12px;
     height: 12px;
@@ -2156,11 +2179,18 @@ button.dendrite-review-btn:hover {
 }
 
 /* Replies to a review comment, under it in its callout or bubble, set in
-   from it; and the box to write one in. */
+   from it, in their writer's colour where they have one; and the box to
+   write one in. */
 .dendrite-review-reply {
     margin: 4px 0 0 2px;
     padding-left: 8px;
     border-left: 1px solid var(--background-modifier-border);
+}
+.dendrite-review-reply[class*="is-c-"] {
+    border-left: 2px solid var(--dendrite-review);
+}
+.dendrite-review-reply[class*="is-c-"] > .dendrite-review-meta b {
+    color: var(--dendrite-review);
 }
 .dendrite-review-reply-form {
     display: flex;

@@ -114,10 +114,12 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
                             c.passage ? `Suggests: ${c.text.trim()}` :
                                 `Suggests adding: ${c.text.trim()}`;
                 for (const r of c.replies || []) {
-                    const rel = div('dendrite-review-reply', main);
+                    const rc = colourOf(r.author || 'Me');
+                    const rel = div('dendrite-review-reply' +
+                        (rc ? ` is-c-${rc}` : ''), main);
                     const by = div('dendrite-review-meta', rel);
                     const b = doc.createElement('b');
-                    b.textContent = r.author || 'Me';
+                    review.shownAs(b, r.author || 'Me', nameOf);
                     by.append(b, ` · ${review.shortDate(r.date)}`);
                     div('dendrite-review-text', rel).textContent = r.text;
                 }

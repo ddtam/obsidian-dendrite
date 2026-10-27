@@ -1612,11 +1612,14 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
             // Its replies, under it, each with its own right-click menu.
             (it.replies || []).forEach((r, k) => {
                 const el = doc.createElement('div');
-                el.className = 'dendrite-review-reply';
+                // In its writer's colour, under the name they are shown as.
+                const rc = colourOf && colourOf(r.author || 'Me');
+                el.className = 'dendrite-review-reply' +
+                    (rc ? ` is-c-${rc}` : '');
                 const by = doc.createElement('div');
                 by.className = 'dendrite-review-meta';
                 const b = doc.createElement('b');
-                b.textContent = r.author || 'Me';
+                shownAs(b, r.author || 'Me', nameOf);
                 by.append(b, ` · ${shortDate(r.date)}`);
                 const said = doc.createElement('div');
                 said.className = 'dendrite-review-text';
