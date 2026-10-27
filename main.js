@@ -2587,14 +2587,28 @@ var require_review = __commonJS({
       if (!it) return md;
       const use = apply && it.kind === "suggest";
       if (!it.open) {
-        return md.slice(0, it.start) + (use ? it.text : it.passage) + md.slice(it.end);
+        const put = use ? it.text : it.passage;
+        const out = md.slice(0, it.start) + put + md.slice(it.end);
+        return use ? tidyJoin(out, it.start, it.start + put.length) : out;
       }
       let inner = md.slice(it.open.end, it.noteStart);
       if (use) {
         const { syntax } = scan(md);
-        inner = it.text + syntax.filter(([a, b]) => a >= it.open.end && b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join("");
+        const kept = syntax.filter(([a, b]) => a >= it.open.end && b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join("");
+        const out = md.slice(0, it.open.start) + it.text + kept + md.slice(it.end);
+        const s = it.open.start;
+        return tidyJoin(out, s, s + it.text.length + kept.length);
       }
       return md.slice(0, it.open.start) + inner + md.slice(it.end);
+    }
+    function tidyJoin(out, start, end) {
+      if (out[end - 1] === " " && /^[ .,;:!?)]/.test(out.slice(end))) {
+        out = out.slice(0, end - 1) + out.slice(end);
+      }
+      if (out[start - 1] === " " && out[start] === " ") {
+        out = out.slice(0, start - 1) + out.slice(start);
+      }
+      return out;
     }
     function editorRanges(md) {
       const items = reviewItems(md);

@@ -295,9 +295,9 @@ test('comments written with start and end markers may overlap: each is ' +
     // Aly's applied: her text in, Claude's comment around the result.
     const applied = r.removeItem(md, 0, true);
     assert.equal(r.stripReview(applied),
-                 'Samples, of which  and paired RNA. More text.');
+                 'Samples, of which and paired RNA. More text.');
     assert.deepEqual(r.reviewItems(applied).map((x) => x.passage),
-                     ['of which  and paired RNA', 'text']);
+                     ['of which and paired RNA', 'text']);
     // A reply goes after Claude's own note, not into Aly's.
     const replied = r.addReply(md, 1, { author: 'Me', date: '2026-10-25',
                                         text: 'Again.' });
@@ -1014,5 +1014,26 @@ test('a place in an earlier version is carried to the card that replaced ' +
     assert.equal(r.mapThrough(al, was, now, g, g + 7), null);
     const h = was.indexOf('single-cell assays');
     assert.equal(r.mapThrough(al, was, now, h, h + 18), null);
+});
+
+test('applying a change leaves no doubled space, nor a space before ' +
+     'punctuation, where it joins the text', () => {
+    const A = 'Aly Karsan 2, 2026-10-23: ';
+    // A deletion that missed the space before it.
+    assert.equal(r.removeItem('more than 50 cases %%{5%%respectively%%}5 ' +
+        `[!suggest] ${A}%%.`, 0, true), 'more than 50 cases.');
+    // A replacement whose new text ends with the space after it.
+    assert.equal(r.removeItem(`collected from %%{2%%175%%}2 [!suggest] ` +
+        `${A}200+ %% AML patients.`, 0, true),
+        'collected from 200+ AML patients.');
+    // An addition starting with a space after one.
+    assert.equal(r.removeItem(`the protocol. %%[!suggest] ${A} All ` +
+        'consented.%%', 0, true), 'the protocol. All consented.');
+    // Nothing to tidy: as it was.
+    assert.equal(r.removeItem(`a %%{1%%b%%}1 [!suggest] ${A}c%% d.`, 0,
+                              true), 'a c d.');
+    // Dismissed, the passage is kept as it was, spaces and all.
+    assert.equal(r.removeItem('cases %%{5%%respectively%%}5 ' +
+        `[!suggest] ${A}%%.`, 0), 'cases respectively.');
 });
 

@@ -1221,18 +1221,39 @@ function removeItem(md, n, apply = false) {
     if (!it) return md;
     const use = apply && it.kind === 'suggest';
     if (!it.open) {
-        return md.slice(0, it.start) + (use ? it.text : it.passage) +
-            md.slice(it.end);
+        const put = use ? it.text : it.passage;
+        const out = md.slice(0, it.start) + put + md.slice(it.end);
+        return use ? tidyJoin(out, it.start, it.start + put.length) : out;
     }
     // Between its markers: other comments' markers and notes are kept,
     // after its new text where it is applied.
     let inner = md.slice(it.open.end, it.noteStart);
     if (use) {
         const { syntax } = scan(md);
-        inner = it.text + syntax.filter(([a, b]) => a >= it.open.end &&
+        const kept = syntax.filter(([a, b]) => a >= it.open.end &&
             b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join('');
+        const out = md.slice(0, it.open.start) + it.text + kept +
+            md.slice(it.end);
+        const s = it.open.start;
+        return tidyJoin(out, s, s + it.text.length + kept.length);
     }
     return md.slice(0, it.open.start) + inner + md.slice(it.end);
+}
+
+/**
+ * Text a change was applied to, `start` to `end` its new text, with no
+ * doubled space or space before punctuation where it joins the rest: a
+ * reviewer's deletion or a passage placed without the space beside it
+ * leaves one, and Apply is to be relied on to give clean text.
+ */
+function tidyJoin(out, start, end) {
+    if (out[end - 1] === ' ' && /^[ .,;:!?)]/.test(out.slice(end))) {
+        out = out.slice(0, end - 1) + out.slice(end);
+    }
+    if (out[start - 1] === ' ' && out[start] === ' ') {
+        out = out.slice(0, start - 1) + out.slice(start);
+    }
+    return out;
 }
 
 /**
