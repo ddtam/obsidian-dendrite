@@ -287,8 +287,11 @@
 /* A card far from the view: one empty element, as tall as the card was
    drawn or is estimated to be, its height counting its padding and
    border as the drawn card's does. It keeps the card's outline, so a
-   fast scroll shows cards still to be filled. */
-.dendrite-card.is-slot {
+   fast scroll shows cards still to be filled. A card filled from its
+   slot keeps that height, counted the same way, until its text is
+   drawn. */
+.dendrite-card.is-slot,
+.dendrite-card.is-pending {
     box-sizing: border-box;
 }
 

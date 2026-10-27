@@ -1392,6 +1392,7 @@ class DendriteView extends ItemView {
         const n = this.byId.get(id);
         if (!card || !n) return card;
         if (card.childElementCount && !card.hasClass('is-slot')) return card;
+        const was = card.style.height;
         card.removeClass('is-slot');
         card.style.height = '';
         // Top right: what the card prints, which turns into the handle
@@ -1411,8 +1412,12 @@ class DendriteView extends ItemView {
         } else if (cached && f && cached.mtime === f.stat.mtime) {
             body.appendChild(cached.el);
         } else {
-            body.createDiv({ cls: 'dendrite-placeholder',
-                             text: n.label || n.id });
+            // Blank, at the slot's height until its text is drawn: a label
+            // in place of the text, and the card shrinking to it and
+            // growing again, flickered as a column moved to a card far
+            // away.
+            body.createDiv({ cls: 'dendrite-placeholder' });
+            if (was) card.style.minHeight = was;
             card.addClass('is-pending');
             this.drawWhenIdle();
         }
@@ -1688,6 +1693,7 @@ class DendriteView extends ItemView {
             b.appendChild(out);
             now.removeClass('is-pending');
             now.removeClass('is-missing');
+            now.style.minHeight = '';
             // Its rendered height replaces the placeholder's, which moves
             // the centre if the card is on the active card's lineage;
             // unless a column has been scrolled by hand since, as cards
@@ -1746,16 +1752,15 @@ class DendriteView extends ItemView {
                 card.classList.contains('is-editing')) continue;
             this.learnHeight(card.dataset.id, size.blockSize);
         }
-        if (this.resizeFrame) return;
-        this.resizeFrame = this.pageWin().requestAnimationFrame(() => {
-            this.resizeFrame = null;
-            // Cards are drawn as a scrolled column brings them into view,
-            // and change height as they are, so after a scroll by hand a
-            // resize only redraws the flow. On the desktop, centring
-            // redraws the flow itself. During a move, the move turns.
-            if (!this.scrolledByHand) this.centre(!!this.anim);
-            if (this.nativeScroll || this.scrolledByHand) this.drawFlow();
-        });
+        // Cards are drawn as a scrolled column brings them into view, and
+        // change height as they are, so after a scroll by hand a resize
+        // only redraws the flow. On the desktop, centring redraws the
+        // flow itself. During a move, the move turns. Done here, after
+        // layout and before painting, not on the next frame: waiting a
+        // frame painted the column shifted, then put it back, a flicker
+        // for each card filled as a column arrived at a card far away.
+        if (!this.scrolledByHand) this.centre(!!this.anim);
+        if (this.nativeScroll || this.scrolledByHand) this.drawFlow();
     }
 
     scheduleFlow() {
@@ -2786,6 +2791,14 @@ class DendriteView extends ItemView {
         const parent = node && this.upOf(node);
         if (parent && parent.id) this.lastChild.set(parent.id, id);
         this.active = id;
+        // A card not yet drawn is drawn first, so the board is moved to it
+        // at its own height rather than moved again once it is drawn.
+        const card = move && this.cardEls.get(id);
+        if (card && (card.hasClass('is-slot') ||
+                     card.hasClass('is-pending'))) {
+            await this.renderCard(id);
+            if (this.active !== id) return;
+        }
         if (move) this.applyActive();
         else this.highlight();
     }

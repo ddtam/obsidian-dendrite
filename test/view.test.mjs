@@ -759,6 +759,59 @@ test('a burst of notes changed, as a sync brings, updates the board ' +
     assert.equal(statuses, 1);
 });
 
+test('a slot filled keeps its height, blank, until its text is drawn, ' +
+     'and a card selected is drawn before the board moves to it',
+     async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n' +
+            '- [[G-ccccc|C]]\n',
+            { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
+        view.plugin.typedAt = Date.now() + 5000;
+        const b = view.cardEls.get('G-bbbbb');
+        b.style.height = '230px';
+        view.fillFrame('G-bbbbb');
+        assert.ok(b.hasClass('is-pending'));
+        assert.equal(b.querySelector('.dendrite-placeholder').textContent, '',
+                     'no label shown while it waits');
+        assert.equal(b.style.minHeight, '230px', 'kept at its height');
+        await view.renderCard('G-bbbbb');
+        assert.equal(b.style.minHeight, '', 'its own height once drawn');
+        // Selected, C is drawn before the board is centred on it.
+        const c = view.cardEls.get('G-ccccc');
+        assert.ok(c.hasClass('is-slot'));
+        let drawnWhenCentred = null;
+        const centre = view.centre.bind(view);
+        view.centre = (...a) => {
+            if (drawnWhenCentred === null) {
+                drawnWhenCentred = !!c.querySelector('.dendrite-md');
+            }
+            return centre(...a);
+        };
+        await view.select('G-ccccc');
+        assert.equal(drawnWhenCentred, true);
+        view.plugin.typedAt = 0;
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
+test('a card changing height re-centres the board in the same frame, ' +
+     'so the shifted column is never painted', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    view.active = 'G-bbbbb';
+    view.applyActive(false);
+    let centred = 0;
+    const centre = view.centre.bind(view);
+    view.centre = (...a) => { centred++; return centre(...a); };
+    // The resize observer calls back after layout and before painting.
+    view.resizer.cb([]);
+    assert.equal(centred, 1, 'at once, not on the next frame');
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';

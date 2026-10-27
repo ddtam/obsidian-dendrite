@@ -6298,6 +6298,7 @@ var DendriteView = class extends ItemView {
     const n = this.byId.get(id);
     if (!card || !n) return card;
     if (card.childElementCount && !card.hasClass("is-slot")) return card;
+    const was = card.style.height;
     card.removeClass("is-slot");
     card.style.height = "";
     const grip = card.createDiv({ cls: "dendrite-grip" });
@@ -6319,10 +6320,8 @@ var DendriteView = class extends ItemView {
     } else if (cached && f && cached.mtime === f.stat.mtime) {
       body.appendChild(cached.el);
     } else {
-      body.createDiv({
-        cls: "dendrite-placeholder",
-        text: n.label || n.id
-      });
+      body.createDiv({ cls: "dendrite-placeholder" });
+      if (was) card.style.minHeight = was;
       card.addClass("is-pending");
       this.drawWhenIdle();
     }
@@ -6579,6 +6578,7 @@ var DendriteView = class extends ItemView {
       b.appendChild(out);
       now.removeClass("is-pending");
       now.removeClass("is-missing");
+      now.style.minHeight = "";
       if (this.lineage && this.lineage.has(id) && !this.scrolledByHand && !this.drawingIdle) {
         this.centre(!!this.anim);
       }
@@ -6621,12 +6621,8 @@ var DendriteView = class extends ItemView {
       if (!size || !card.classList.contains("dendrite-card") || card.classList.contains("is-slot") || card.classList.contains("is-pending") || card.classList.contains("is-editing")) continue;
       this.learnHeight(card.dataset.id, size.blockSize);
     }
-    if (this.resizeFrame) return;
-    this.resizeFrame = this.pageWin().requestAnimationFrame(() => {
-      this.resizeFrame = null;
-      if (!this.scrolledByHand) this.centre(!!this.anim);
-      if (this.nativeScroll || this.scrolledByHand) this.drawFlow();
-    });
+    if (!this.scrolledByHand) this.centre(!!this.anim);
+    if (this.nativeScroll || this.scrolledByHand) this.drawFlow();
   }
   scheduleFlow() {
     if (this.flowFrame) return;
@@ -7634,6 +7630,11 @@ var DendriteView = class extends ItemView {
     const parent = node && this.upOf(node);
     if (parent && parent.id) this.lastChild.set(parent.id, id);
     this.active = id;
+    const card = move && this.cardEls.get(id);
+    if (card && (card.hasClass("is-slot") || card.hasClass("is-pending"))) {
+      await this.renderCard(id);
+      if (this.active !== id) return;
+    }
     if (move) this.applyActive();
     else this.highlight();
   }
