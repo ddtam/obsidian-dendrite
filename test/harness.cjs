@@ -325,6 +325,7 @@ function makeApp() {
 }
 
 const notices = [];
+const shown = [];
 const requests = [];
 const obsidian = {
     TFile, TFolder,
@@ -463,9 +464,16 @@ const obsidian = {
                 k % 2 ? x : `<p>${x}</p>`).join('');
         },
     },
+    // Each notice's text in `notices`; the notices themselves, with
+    // whether each was hidden, in `shown`.
     Notice: class {
-        constructor(m) { notices.push(m); }
-        hide() {}
+        constructor(m) {
+            notices.push(m);
+            shown.push(this);
+            this.message = m;
+            this.hidden = false;
+        }
+        hide() { this.hidden = true; }
     },
     Scope: class {
         constructor() { this.keys = []; }
@@ -483,5 +491,6 @@ Module._load = function (req, ...a) {
     return orig.call(this, req, ...a);
 };
 
-module.exports = { makeApp, makePopout, notices, requests, TFile,
+module.exports = { makeApp, makePopout, notices, shown, requests,
+                   TFile,
                    window: w, obsidian };

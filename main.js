@@ -5347,6 +5347,20 @@ function openExternal(url) {
     window.open(url);
   }
 }
+var stuckNotices = /* @__PURE__ */ new Map();
+function stickyNotice(key, text) {
+  const old = stuckNotices.get(key);
+  if (old) old.hide();
+  const n = new Notice(text, 0);
+  stuckNotices.set(key, n);
+  return n;
+}
+function dismissNotices() {
+  const n = stuckNotices.size;
+  for (const x of stuckNotices.values()) x.hide();
+  stuckNotices.clear();
+  return n;
+}
 function setStyles(el, styles) {
   for (const [k, v] of Object.entries(styles)) {
     if (el.style[k] !== v) el.style[k] = v;
@@ -9025,7 +9039,10 @@ var DendriteView = class extends ItemView {
       this.reverted.add(ed.id);
       this.revertedAt.set(ed.id, Date.now());
       const node = this.byId.get(ed.id);
-      new Notice(`Dendrite: Card ${core.shortId(ed.id)}` + (node && node.label ? ` (${node.label})` : "") + ' changed outside Dendrite while you were typing in it, usually from a sync. Your typing was not saved over it. Click "typing kept" on the card to compare and choose.', 0);
+      stickyNotice(
+        `card:${this.file.path}:${ed.id}`,
+        `Dendrite: Card ${core.shortId(ed.id)}` + (node && node.label ? ` (${node.label})` : "") + ' changed outside Dendrite while you were typing in it, usually from a sync. Your typing was not saved over it. Click "typing kept" on the card to compare and choose.'
+      );
       this.updateStatuses();
       return;
     }
@@ -9115,7 +9132,10 @@ var DendriteView = class extends ItemView {
       this.revertedAt.set(key, Date.now());
       const node = id && this.byId.get(id);
       const name = id === null ? "The index" : `Card ${core.shortId(id)}` + (node && node.label ? ` (${node.label})` : "");
-      new Notice(`Dendrite: ${name} changed outside Dendrite to text this device had before, usually an old copy from a sync. Nothing was written. Click "older copy" on ${id === null ? "the bar" : "the card"} to compare and choose.`, 0);
+      stickyNotice(
+        `card:${this.file.path}:${key}`,
+        `Dendrite: ${name} changed outside Dendrite to text this device had before, usually an old copy from a sync. Nothing was written. Click "older copy" on ${id === null ? "the bar" : "the card"} to compare and choose.`
+      );
     }
     this.updateStatuses();
   }
@@ -9148,7 +9168,10 @@ var DendriteView = class extends ItemView {
       this.revertedAt.set("index", Date.now());
       const names = gone.slice(0, 5).map((n) => core.shortId(n.id) + (n.label ? ` (${n.label})` : "")).join(", ");
       const more = gone.length > 5 ? `, and ${gone.length - 5} more` : "";
-      new Notice(`Dendrite: the index changed outside Dendrite and no longer lists ${gone.length} card${gone.length === 1 ? "" : "s"} whose notes still exist: ${names}${more}. This is probably a sync of an old copy. Nothing was written. Click "older copy" on the bar to compare and choose.`, 0);
+      stickyNotice(
+        `gone:${this.file.path}`,
+        `Dendrite: the index changed outside Dendrite and no longer lists ${gone.length} card${gone.length === 1 ? "" : "s"} whose notes still exist: ${names}${more}. This is probably a sync of an old copy. Nothing was written. Click "older copy" on the bar to compare and choose.`
+      );
     }
     this.flagIndex();
   }
@@ -9360,7 +9383,10 @@ var DendriteView = class extends ItemView {
     const name = safeName(title);
     const plan = this.renamePlan(prefix);
     if (plan.clashes.length) {
-      new Notice("Dendrite: not renamed: these cards have a note under both the old and the new name: " + plan.clashes.join(", ") + ". Keep one of each first.", 0);
+      stickyNotice(
+        `rename:${this.file.path}`,
+        "Dendrite: not renamed: these cards have a note under both the old and the new name: " + plan.clashes.join(", ") + ". Keep one of each first."
+      );
       return false;
     }
     const target = this.renameTargets(name);
@@ -9439,7 +9465,10 @@ var DendriteView = class extends ItemView {
       await this.reload();
     }
     if (failed) {
-      new Notice("Dendrite: the rename stopped part way: " + failed.message + ". Rename again with the same title and prefix to finish it.", 0);
+      stickyNotice(
+        `rename:${this.file.path}`,
+        "Dendrite: the rename stopped part way: " + failed.message + ". Rename again with the same title and prefix to finish it."
+      );
       return false;
     }
     new Notice(`Dendrite: renamed to ${name}, cards ${prefix}-\u2026, ${plan.moves.length} card notes renamed.`, 1e4);
@@ -9536,7 +9565,10 @@ var DendriteView = class extends ItemView {
     if (fresh.length) {
       const names = fresh.slice(0, 5).map((c) => c.file.basename).join(", ");
       const more = fresh.length > 5 ? `, and ${fresh.length - 5} more` : "";
-      new Notice(`Dendrite: ${fresh.length} note${fresh.length === 1 ? "" : "s"} under this manuscript's name before its rename came back, probably from a device that had not synced: ${names}${more}. They are not used. Click "old copies" on the bar to see them.`, 0);
+      stickyNotice(
+        `copies:${this.file.path}`,
+        `Dendrite: ${fresh.length} note${fresh.length === 1 ? "" : "s"} under this manuscript's name before its rename came back, probably from a device that had not synced: ${names}${more}. They are not used. Click "old copies" on the bar to see them.`
+      );
     }
     if (fresh.length || before.size !== out.length) {
       this.updateStatuses();
@@ -13707,6 +13739,26 @@ module.exports = class DendritePlugin extends Plugin {
     }
   }
   /**
+   * Dendrite's notices left on screen, hidden: those it keeps, and any
+   * others showing whose text is its own, such as an earlier version's,
+   * clicked away as a click would, in every window a board or preview
+   * is open in.
+   */
+  dismissAllNotices() {
+    dismissNotices();
+    const docs = /* @__PURE__ */ new Set([document]);
+    for (const t of [VIEW, PREVIEW]) {
+      for (const l of this.app.workspace.getLeavesOfType(t)) {
+        docs.add(l.view.containerEl.ownerDocument);
+      }
+    }
+    for (const doc of docs) {
+      for (const el of doc.querySelectorAll(".notice")) {
+        if (el.textContent.startsWith("Dendrite:")) el.click();
+      }
+    }
+  }
+  /**
    * The window's memory, in MB, and how much of the boards and previews
    * open is drawn, for the timings file: `rss_mb` the window's process,
    * `heap_mb` its script heap, `nodes` the elements in Dendrite's
@@ -13767,6 +13819,11 @@ module.exports = class DendritePlugin extends Plugin {
         if (!checking) this.openPreview(f);
         return true;
       }
+    });
+    this.addCommand({
+      id: "dismiss-notices",
+      name: "Dismiss notices",
+      callback: () => this.dismissAllNotices()
     });
     this.addSettingTab(new DendriteSettings(this.app, this));
     this.addRibbonIcon("list-tree", "Open in Dendrite", () => {
@@ -14136,7 +14193,10 @@ module.exports = class DendritePlugin extends Plugin {
       const drop = new Set(decided.slice(0, -50));
       this.settings.reviewQueue = queue.filter((r) => !drop.has(r));
       await this.saveSettings();
-      new Notice(`Dendrite: ${title}: ${items.length} comment${items.length === 1 ? "" : "s"} from ${reviewAuthors(items)}, for ${file.basename}. Click "review" on its board's bar to choose which to add.`, 0);
+      stickyNotice(
+        `review:${file.path}:${entry.id}`,
+        `Dendrite: ${title}: ${items.length} comment${items.length === 1 ? "" : "s"} from ${reviewAuthors(items)}, for ${file.basename}. Click "review" on its board's bar to choose which to add.`
+      );
       for (const v of this.openViews()) v.refreshInbox();
     }
     return { status: 202, json: {
@@ -14807,3 +14867,5 @@ module.exports.DendritePreview = DendritePreview;
 module.exports.DendriteSettings = DendriteSettings;
 module.exports.exportStyle = exportStyle;
 module.exports.callers = callers;
+module.exports.stickyNotice = stickyNotice;
+module.exports.dismissNotices = dismissNotices;

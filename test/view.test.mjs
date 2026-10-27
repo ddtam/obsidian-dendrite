@@ -793,6 +793,38 @@ test('the flow drawn again with nothing moved changes nothing, so it ' +
     assert.deepEqual(flows, ['G-bbbbb'], 'A opens into B\'s group only');
 });
 
+test('a warning left on screen is replaced by the next about the same ' +
+     'thing, and Dismiss notices clears them all', async () => {
+    const { stickyNotice, dismissNotices } = require('../src/main.js');
+    h.shown.length = 0;
+    stickyNotice('reverted:W/Grant.md:G-aaaaa', 'A changed, once');
+    stickyNotice('reverted:W/Grant.md:G-bbbbb', 'B changed');
+    stickyNotice('reverted:W/Grant.md:G-aaaaa', 'A changed, again');
+    const open = () => h.shown.filter((n) => !n.hidden)
+        .map((n) => n.message);
+    assert.deepEqual(open(), ['B changed', 'A changed, again']);
+    assert.equal(dismissNotices(), 2);
+    assert.deepEqual(open(), []);
+    assert.equal(dismissNotices(), 0, 'none left');
+    // Notices from an earlier version, still showing, are clicked away,
+    // and another plugin's are left.
+    const Plugin = require('../src/main.js');
+    const doc = h.window.document;
+    const clicked = [];
+    for (const text of ['Dendrite: Card 0007 changed', 'Other: hello']) {
+        const el = doc.createElement('div');
+        el.className = 'notice';
+        el.textContent = text;
+        el.addEventListener('click', () => clicked.push(text));
+        doc.body.appendChild(el);
+    }
+    const plugin = Object.create(Plugin.prototype);
+    plugin.app = h.makeApp();
+    plugin.dismissAllNotices();
+    assert.deepEqual(clicked, ['Dendrite: Card 0007 changed']);
+    for (const el of [...doc.querySelectorAll('.notice')]) el.remove();
+});
+
 test('vim keys move, insert, rearrange and delete in normal mode',
      async () => {
     const { view, read, text } = await open(
