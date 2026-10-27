@@ -60,6 +60,13 @@ const cardPath = (id) => `W/Grant/cards/${id}.md`;
 // A card not yet drawn: a slot, far from the view, or a frame whose text
 // waits to be drawn.
 const waiting = (el) => el.hasClass('is-slot') || el.hasClass('is-pending');
+// A colour picked for a row of Reviewers…: its colour button pressed
+// and the colour chosen from its menu, each colour a chip and its name.
+const pickColour = async (row, name) => {
+    row.querySelector('button.dendrite-reviewer-colour')
+        .dispatchEvent(new h.window.MouseEvent('click'));
+    await menuItem(h.obsidian.lastMenu, name).click();
+};
 // A board or preview shown, 1000 by 500 px: jsdom lays nothing out, and
 // one measuring nothing is taken as not shown.
 const shown = (el) => {
@@ -5142,11 +5149,14 @@ test('Reviewers… in the Review menu sets each reviewer\'s colour and links ' +
     assert.deepEqual(rows().map((r) => r.dataset.name),
                      ['Joshua Bridgers', 'Aly Karsan'], 'in reading order');
     let [josh, aly] = rows();
-    assert.equal(josh.querySelector('select').value, 'blue');
+    assert.equal(josh.querySelector('button.dendrite-reviewer-colour')
+        .dataset.colour, 'blue');
+    // Each row the same: who, then their note, then their colour.
+    assert.deepEqual([...josh.children].map((c) => c.className),
+        ['dendrite-reviewer-who', 'dendrite-reviewer-mid',
+         'dendrite-reviewer-colour']);
     // A colour chosen: saved, the comments drawn in it.
-    const sel = aly.querySelector('select');
-    sel.value = 'pink';
-    sel.dispatchEvent(new h.window.Event('change'));
+    await pickColour(aly, 'Pink');
     await tick(30);
     assert.deepEqual(fm(), ['Joshua Bridgers: blue', 'Aly Karsan: pink']);
     assert.ok(view.cardEls.get('G-bbbbb').querySelector('mark.is-c-pink'));
@@ -5198,9 +5208,10 @@ test('your replies are drawn in your colour and under the name you are ' +
     assert.deepEqual([...modal.contentEl.querySelectorAll(
         '.dendrite-reviewer')].map((r) => r.dataset.name),
         ['Joshua Bridgers'], 'not among the reviewers');
-    const sel = you.querySelector('select');
-    sel.value = 'orange';
-    sel.dispatchEvent(new h.window.Event('change'));
+    assert.deepEqual([...you.children].map((c) => c.className),
+        ['dendrite-reviewer-who', 'dendrite-reviewer-mid',
+         'dendrite-reviewer-colour'], 'laid out as the reviewers are');
+    await pickColour(you, 'Orange');
     await tick(30);
     assert.deepEqual(fm(), ['Joshua Bridgers: blue', 'Me: orange']);
     assert.ok(reply().classList.contains('is-c-orange'));
@@ -5254,9 +5265,7 @@ test('names linked to the same note are one person: one colour for all ' +
     assert.match(row('Joshua Bridgers').querySelector(
         '.dendrite-reviewer-names').textContent, /^includes:/);
     // A colour set for the person, in the dialog: both names.
-    const sel = row('Joshua Bridgers').querySelector('select');
-    sel.value = 'cyan';
-    sel.dispatchEvent(new h.window.Event('change'));
+    await pickColour(row('Joshua Bridgers'), 'Cyan');
     await tick(30);
     assert.deepEqual(fm(), ['[[Joshua Bridgers]]: cyan',
         '[[Joshua Bridgers|jbridgers]]: cyan', 'Aly Karsan: green'],

@@ -9192,6 +9192,7 @@ class ReviewersModal extends Modal {
     }
 
     onOpen() {
+        this.modalEl.addClass('dendrite-reviewers-modal');
         this.titleEl.setText('Reviewers');
         this.contentEl.createEl('p', { cls: 'setting-item-description',
             text: 'Each reviewer\'s comments and suggested changes are ' +
@@ -9229,29 +9230,17 @@ class ReviewersModal extends Modal {
             const e = names[0];
             // You are drawn above, apart from the reviewers.
             if (names.length === 1 && e.name === me) continue;
-            const block = this.list.createDiv({ cls: 'dendrite-reviewer' });
-            block.dataset.name = e.name;
             const person = e.note ? e.note.split('/').pop() : e.name;
+            // Who, then their note, then their colour, as You's row is.
+            const { block, mid } = this.row('dendrite-reviewer', person,
+                e.colour, (c) => change(names, (x) => { x.colour = c; }));
+            block.dataset.name = e.name;
             block.dataset.person = person;
-            const dot = block.createSpan({ cls: 'dendrite-reviewer-dot' });
-            dot.style.background = `var(--color-${e.colour})`;
-            block.createSpan({ cls: 'dendrite-reviewer-name',
-                               text: person });
-            const sel = block.createEl('select', { cls: 'dropdown' });
-            for (const c of review.REVIEWER_COLOURS) {
-                const o = sel.createEl('option', {
-                    text: c[0].toUpperCase() + c.slice(1) });
-                o.value = c;
-            }
-            sel.value = e.colour;
-            sel.addEventListener('change', () => change(names, (x) => {
-                x.colour = sel.value;
-            }));
-            const note = block.createEl('input', { type: 'text',
+            const note = mid.createEl('input', { type: 'text',
                 cls: 'dendrite-reviewer-note' });
             note.placeholder = 'Their note, if a person';
             note.value = e.note ? e.note.split('/').pop() : '';
-            const said = block.createDiv({ cls: 'dendrite-reviewer-said' });
+            const said = mid.createDiv({ cls: 'dendrite-reviewer-said' });
             // Every name of this person linked to note `f`, or to none;
             // linked to someone already here, they take that colour.
             const link = (f) => {
@@ -9277,7 +9266,7 @@ class ReviewersModal extends Modal {
             });
             if (e.note) {
                 // The names the reviews wrote, each unlinked on its own.
-                const as = block.createDiv({ cls: 'dendrite-reviewer-names' });
+                const as = mid.createDiv({ cls: 'dendrite-reviewer-names' });
                 as.createSpan({ text: 'includes:' });
                 for (const x of names) {
                     const chip = as.createSpan({
@@ -9298,12 +9287,45 @@ class ReviewersModal extends Modal {
             const named = find(e.name) || (/\s\d+$/.test(e.name) &&
                 find(e.name.replace(/\s\d+$/, '')));
             if (named) {
-                const b = block.createEl('button', {
+                const b = mid.createEl('button', {
                     cls: 'dendrite-reviewer-offer',
                     text: `Link [[${named.basename}]]` });
                 b.onclick = () => link(named);
             }
         }
+    }
+
+    /**
+     * One row of the dialog, laid out alike for You and each reviewer:
+     * who, with their colour's dot; a middle part, returned to be
+     * filled; and their colour, a button showing it that opens a menu of
+     * the colours, each with its chip, `pick(colour)` told of the choice.
+     */
+    row(cls, name, colour, pick) {
+        const block = this.list.createDiv({ cls });
+        const who = block.createDiv({ cls: 'dendrite-reviewer-who' });
+        const dot = who.createSpan({ cls: 'dendrite-reviewer-dot' });
+        dot.style.background = `var(--color-${colour})`;
+        who.createSpan({ cls: 'dendrite-reviewer-name', text: name });
+        const mid = block.createDiv({ cls: 'dendrite-reviewer-mid' });
+        const btn = block.createEl('button', {
+            cls: 'dendrite-reviewer-colour' });
+        btn.dataset.colour = colour;
+        btn.append(colourTitle(colour));
+        btn.setAttr('aria-label', `Colour for ${name}`);
+        btn.addEventListener('click', (e) => {
+            const m = dendriteMenu(false);
+            for (const c of review.REVIEWER_COLOURS) {
+                m.addItem((i) => {
+                    i.setTitle(colourTitle(c)).onClick(() => pick(c));
+                    if (typeof i.setChecked === 'function') {
+                        i.setChecked(c === colour);
+                    }
+                });
+            }
+            if (m.showAtMouseEvent) m.showAtMouseEvent(e);
+        });
+        return { block, mid };
     }
 
     /**
@@ -9316,30 +9338,20 @@ class ReviewersModal extends Modal {
         const s = view.plugin.settings;
         const me = s.replyName || 'Me';
         const mine = entries.find((e) => e.name === me);
-        const colour = mine ? mine.colour : 'blue';
-        const block = this.list.createDiv({ cls: 'dendrite-reviewer-self' });
-        const dot = block.createSpan({ cls: 'dendrite-reviewer-dot' });
-        dot.style.background = `var(--color-${colour})`;
-        block.createSpan({ cls: 'dendrite-reviewer-name', text: 'You' });
-        const sel = block.createEl('select', { cls: 'dropdown' });
-        for (const c of review.REVIEWER_COLOURS) {
-            const o = sel.createEl('option', {
-                text: c[0].toUpperCase() + c.slice(1) });
-            o.value = c;
-        }
-        sel.value = colour;
-        sel.addEventListener('change', async () => {
-            const now = this.entries();
-            const e = now.find((x) => x.name === me);
-            if (e) e.colour = sel.value;
-            else now.push({ name: me, note: null, colour: sel.value });
-            await view.saveEntries(now);
-            this.draw();
-        });
+        const { mid } = this.row('dendrite-reviewer-self', 'You',
+            mine ? mine.colour : 'blue', async (c) => {
+                const now = this.entries();
+                const e = now.find((x) => x.name === me);
+                if (e) e.colour = c;
+                else now.push({ name: me, note: null, colour: c });
+                await view.saveEntries(now);
+                this.draw();
+            });
         const field = (cls, label, value, placeholder, set) => {
-            const row = block.createDiv({ cls: 'dendrite-reviewer-self-row' });
-            row.createSpan({ text: label });
-            const input = row.createEl('input', { type: 'text', cls });
+            const at = mid.createEl('label', {
+                cls: 'dendrite-reviewer-self-field' });
+            at.createSpan({ text: label });
+            const input = at.createEl('input', { type: 'text', cls });
             input.value = value || '';
             input.placeholder = placeholder;
             input.addEventListener('change', async () => {

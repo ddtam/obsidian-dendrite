@@ -2100,12 +2100,39 @@ button.dendrite-review-btn:hover {
     flex-direction: column;
     gap: 8px;
 }
-.dendrite-reviewer {
+/* Each row alike, You's and every reviewer's: who, with their colour's
+   dot; then their note, or your names; then their colour at the right,
+   a chip and its name. */
+.dendrite-reviewer,
+.dendrite-reviewer-self {
     display: grid;
-    grid-template-columns: 12px minmax(8em, 1fr) auto minmax(10em, 1fr);
+    grid-template-columns: minmax(9em, 12em) 1fr 7.5em;
+    align-items: start;
+    column-gap: 12px;
+}
+.dendrite-reviewer-mid input[type="text"] {
+    width: 100%;
+}
+.modal.dendrite-reviewers-modal {
+    width: min(720px, 92vw);
+}
+.dendrite-reviewer-who {
+    display: flex;
     align-items: center;
-    column-gap: 10px;
-    row-gap: 2px;
+    gap: 8px;
+    min-height: var(--input-height);
+}
+.dendrite-reviewer-mid {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+button.dendrite-reviewer-colour {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
 }
 /* On the Review button, how many reviews sent from programs wait to be
    added. */
@@ -2121,26 +2148,30 @@ button.dendrite-review-btn:hover {
     text-align: center;
 }
 
-/* You, above the reviewers: your colour, then the name your replies are
-   signed with and the name you are shown as, each on its own row. */
+/* You, above the reviewers, set apart from them; your two names one
+   under the other, each with its label. */
 .dendrite-reviewer-self {
-    display: grid;
-    grid-template-columns: 12px minmax(8em, 1fr) auto minmax(10em, 1fr);
-    align-items: center;
-    column-gap: 10px;
-    row-gap: 4px;
     padding-bottom: 10px;
     margin-bottom: 10px;
     border-bottom: 1px solid var(--background-modifier-border);
 }
-.dendrite-reviewer-self-row {
-    grid-column: 2 / -1;
+.dendrite-reviewer-self .dendrite-reviewer-mid {
     display: grid;
-    grid-template-columns: 8em 1fr;
+    grid-template-columns: max-content 1fr;
     align-items: center;
-    gap: 8px;
+    gap: 4px 8px;
+}
+/* Each label and its field in the middle's two columns, so both fields
+   start where the longer label ends. */
+.dendrite-reviewer-self-field {
+    display: contents;
     color: var(--text-muted);
     font-size: var(--font-ui-small);
+}
+.dendrite-reviewer-self-field > span {
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+    white-space: nowrap;
 }
 .dendrite-reviewer-dot {
     width: 12px;
@@ -2164,7 +2195,6 @@ button.dendrite-review-btn:hover {
 }
 /* A person's names as the reviews wrote them, under the person. */
 .dendrite-reviewer-names {
-    grid-column: 2 / -1;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
