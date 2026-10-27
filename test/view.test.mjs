@@ -691,6 +691,25 @@ test('find goes to a match in a card that is a slot: it is filled, ' +
     }
 });
 
+test('a card\'s note is resolved once, not on every pass over the ' +
+     'cards, and again after notes are created or renamed', async () => {
+    const { app, view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    let resolved = 0;
+    const mc = app.metadataCache;
+    const real = mc.getFirstLinkpathDest.bind(mc);
+    mc.getFirstLinkpathDest = (...a) => { resolved++; return real(...a); };
+    await view.loadBodies();
+    const once = resolved;
+    await view.loadBodies();
+    assert.equal(resolved, once, 'kept from the pass before');
+    await app.vault.create('W/Grant/cards/G-zzzzz.md', 'Z');
+    resolved = 0;
+    await view.loadBodies();
+    assert.equal(resolved, 2, 'resolved again after a note was created');
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';

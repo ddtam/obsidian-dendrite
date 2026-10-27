@@ -5376,6 +5376,17 @@ function dismissNotices() {
   stuckNotices.clear();
   return n;
 }
+function noteOf(app, cache, id, from) {
+  const had = cache.get(id);
+  if (had && had.basename === id && app.vault.getAbstractFileByPath(had.path) === had) return had;
+  const f = app.metadataCache.getFirstLinkpathDest(id, from);
+  if (f instanceof TFile) {
+    cache.set(id, f);
+    return f;
+  }
+  cache.delete(id);
+  return null;
+}
 function setStyles(el, styles) {
   for (const [k, v] of Object.entries(styles)) {
     if (el.style[k] !== v) el.style[k] = v;
@@ -5647,6 +5658,11 @@ var DendriteView = class extends ItemView {
       "modify",
       (f) => this.onModify(f)
     ));
+    for (const e of ["create", "delete", "rename"]) {
+      this.registerEvent(this.app.vault.on(e, () => {
+        if (this.notes) this.notes.clear();
+      }));
+    }
     this.registerEvent(this.app.vault.on("rename", (f, old) => {
       if (this.file && f === this.file) {
         this.leaf.updateHeader();
@@ -5809,11 +5825,13 @@ var DendriteView = class extends ItemView {
     return normalizePath((dir && dir !== "/" ? dir + "/" : "") + "cards");
   }
   cardFile(id) {
-    const f = this.app.metadataCache.getFirstLinkpathDest(
+    this.notes = this.notes || /* @__PURE__ */ new Map();
+    return noteOf(
+      this.app,
+      this.notes,
       id,
       this.file ? this.file.path : ""
     );
-    return f instanceof TFile ? f : null;
   }
   // ---- the print-only view ----------------------------------------------
   /**
@@ -6134,13 +6152,13 @@ var DendriteView = class extends ItemView {
    * writes, in a panel over the board.
    */
   async renderOldComments(pinned) {
-    const bodies = await this.loadBodies();
+    await this.loadBodies();
     let n = 0;
     let cards = 0;
-    for (const body of bodies.values()) {
-      const k = review.oldComments(body);
-      n += k;
-      if (k) cards++;
+    for (const b of this.bodies.values()) {
+      if (b.old === void 0) b.old = review.oldComments(b.body);
+      n += b.old;
+      if (b.old) cards++;
     }
     if (!n || !this.contentEl.contains(pinned)) return;
     const panel = pinned.createDiv({
@@ -11742,6 +11760,11 @@ var DendritePreview = class extends ItemView {
     };
     this.registerEvent(this.app.vault.on("modify", changed));
     this.registerEvent(this.app.metadataCache.on("changed", changed));
+    for (const e of ["create", "delete", "rename"]) {
+      this.registerEvent(this.app.vault.on(e, () => {
+        if (this.notes) this.notes.clear();
+      }));
+    }
     this.registerEvent(this.app.vault.on("rename", (f) => {
       if (f === this.file) this.leaf.updateHeader();
       else changed(f);
@@ -11877,11 +11900,8 @@ var DendritePreview = class extends ItemView {
     this.refreshTimer = setTimeout(() => this.refresh(), 300);
   }
   cardFile(id) {
-    const f = this.app.metadataCache.getFirstLinkpathDest(
-      id,
-      this.file.path
-    );
-    return f instanceof TFile ? f : null;
+    this.notes = this.notes || /* @__PURE__ */ new Map();
+    return noteOf(this.app, this.notes, id, this.file.path);
   }
   /** Draw the preview again, saying so if it fails rather than blank. */
   async refresh() {
