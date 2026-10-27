@@ -650,6 +650,15 @@ function locate(item, cards) {
         while (gap && c.norm.text[k] === ' ') k++;
         return k;
     };
+    // A suggested deletion that took a space with it takes the card's
+    // space there too, so applying it leaves one space, not two.
+    const wide = item.kind === 'suggest' && quote;
+    const grow = (c, s, e) => {
+        if (wide && /\s$/.test(item.quote) && c.norm.text[e] === ' ') e++;
+        else if (wide && /^\s/.test(item.quote) &&
+                 c.norm.text[s - 1] === ' ') s--;
+        return [s, e];
+    };
     // Exact: the passage as sent, the context deciding between copies.
     const found = [];
     // A point with no text before it, as a paragraph added above another,
@@ -690,7 +699,7 @@ function locate(item, cards) {
                 const k = past(best.c, best.s);
                 return place(best.c, k, k, 'exact');
             }
-            return place(best.c, best.s, best.e, 'exact');
+            return place(best.c, ...grow(best.c, best.s, best.e), 'exact');
         }
     }
     // Close: most of the words of the passage and its context, in order.
@@ -715,7 +724,8 @@ function locate(item, cards) {
     if (qw.length && inQuote.length >= Math.ceil(qw.length / 2)) {
         const first = best.cw[inQuote[0]];
         const last = best.cw[inQuote[inQuote.length - 1]];
-        return place(best.c, first.at, last.at + last.w.length, 'close');
+        return place(best.c, ...grow(best.c, first.at,
+                                     last.at + last.w.length), 'close');
     }
     // The passage is gone: after the last word of the text before it.
     const pre = best.r.match.slice(0, bw.length).filter((j) => j >= 0);

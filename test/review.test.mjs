@@ -930,3 +930,24 @@ test('an insertion after a space goes after the space, as the reviewer ' +
         .length);
 });
 
+test('a deletion that took a space with it takes the same space, so ' +
+     'applying it leaves one', () => {
+    // Aly Karsan's .docx: "from 200+ " inserted, "175 " deleted.
+    const text = 'Applied to samples from 175 patients with paired WGS.';
+    const cards = [{ id: 'x', text }];
+    const del = { kind: 'suggest', quote: '175 ', text: '',
+        before: 'Applied to samples from ', after: 'patients with paired' };
+    const at = r.locate(del, cards);
+    assert.equal(text.slice(at.start, at.end), '175 ');
+    // Its space before instead, as at the end of a sentence.
+    const end = r.locate({ kind: 'suggest', quote: ' nested', text: '',
+        before: 'performed on a', after: '.' },
+        [{ id: 'y', text: 'Also performed on a nested.' }]);
+    assert.equal('Also performed on a nested.'.slice(end.start, end.end),
+                 ' nested');
+    // A comment's passage stays as it was.
+    const note = r.locate({ kind: 'review', quote: '175 ',
+        before: 'samples from ', after: 'patients' }, cards);
+    assert.equal(text.slice(note.start, note.end), '175');
+});
+

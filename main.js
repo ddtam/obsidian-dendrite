@@ -2188,6 +2188,12 @@ var require_review = __commonJS({
         while (gap && c.norm.text[k2] === " ") k2++;
         return k2;
       };
+      const wide = item.kind === "suggest" && quote;
+      const grow = (c, s, e) => {
+        if (wide && /\s$/.test(item.quote) && c.norm.text[e] === " ") e++;
+        else if (wide && /^\s/.test(item.quote) && c.norm.text[s - 1] === " ") s--;
+        return [s, e];
+      };
       const found = [];
       const head = !quote && !before ? after.slice(0, 30) : "";
       const probe = quote || head || tail(before, 30);
@@ -2221,7 +2227,7 @@ var require_review = __commonJS({
             const k2 = past(best2.c, best2.s);
             return place(best2.c, k2, k2, "exact");
           }
-          return place(best2.c, best2.s, best2.e, "exact");
+          return place(best2.c, ...grow(best2.c, best2.s, best2.e), "exact");
         }
       }
       const qw = words(quote);
@@ -2243,7 +2249,11 @@ var require_review = __commonJS({
       if (qw.length && inQuote.length >= Math.ceil(qw.length / 2)) {
         const first = best.cw[inQuote[0]];
         const last = best.cw[inQuote[inQuote.length - 1]];
-        return place(best.c, first.at, last.at + last.w.length, "close");
+        return place(best.c, ...grow(
+          best.c,
+          first.at,
+          last.at + last.w.length
+        ), "close");
       }
       const pre = best.r.match.slice(0, bw.length).filter((j) => j >= 0);
       if (!pre.length) {
