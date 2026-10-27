@@ -5669,8 +5669,8 @@ class DendriteView extends ItemView {
 
     /**
      * Write the chosen comments and changes into their cards, each card
-     * found again in its text as it is now, and set the cards that print
-     * their text to revise; one step to undo. A change goes in as one to
+     * found again in its text as it is now; one step to undo. The cards
+     * show revise while the comments are open. A change goes in as one to
      * apply only where its passage is still exactly as it was sent.
      */
     async addReview(rows, fallback, relinks = []) {
@@ -5755,8 +5755,9 @@ class DendriteView extends ItemView {
             });
             restores.push({ path: f.path, text: data,
                             ifBody: core.splitFrontmatter(out).body });
-            const info = this.statusInfo && this.statusInfo.get(id);
-            if (info && info.prints) await this.setStatus(id, 'revise');
+            // No status is written: a card shows revise while it has open
+            // comments (core.statusReport), and not once they are dealt
+            // with, so a revise set by hand is not mistaken for one.
             this.invalidate(id);
             await this.renderCard(id);
         }

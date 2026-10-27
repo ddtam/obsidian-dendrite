@@ -1031,8 +1031,8 @@ test('a footnote of citations only is labelled by first author and ' +
     assert.equal(c.footnoteLabel('Plain words.'), null);
 });
 
-test('a printing card with open comments is to revise unless it is set ' +
-     'done, as a heading card with comments is', () => {
+test('a printing card is to revise while it has open comments, whatever ' +
+     'it is set to, as a heading card with comments is', () => {
     const root = c.parseIndex('- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n' +
         '- [[G-ccccc|c]]\n- [[G-ddddd|d]]\n').root;
     const status = { 'G-bbbbb': 'done', 'G-ddddd': 'draft' };
@@ -1041,9 +1041,9 @@ test('a printing card with open comments is to revise unless it is set ' +
         () => null, (id) => open[id] || 0);
     const own = (id) => r.cards.get(id).own;
     assert.equal(own('G-aaaaa'), 'revise', 'unset, with comments');
-    assert.equal(own('G-bbbbb'), 'done', 'set done: left done');
+    assert.equal(own('G-bbbbb'), 'revise', 'set done: revise while open');
     assert.equal(own('G-ccccc'), 'draft', 'no comments');
     assert.equal(own('G-ddddd'), 'revise', 'draft, with comments');
-    assert.equal(r.tally.revise, 2);
+    assert.equal(r.tally.revise, 3);
 });
 

@@ -3169,7 +3169,7 @@ test('a card set to table prints numbered, a link to it prints its ' +
     assert.match(read('W/Grant/exports/Grant.md'), /See \[\[G-ttttt\]\]\./);
 });
 
-test('review comments go into their cards as one undo step, set them to ' +
+test('review comments go into their cards as one undo step, show them to ' +
      'revise, and are resolved, dismissed or applied from the card',
      async () => {
     const A = 'The cohort is composed of longitudinally paired samples.';
@@ -3200,8 +3200,12 @@ test('review comments go into their cards as one undo step, set them to ' +
         '2026-10-23: from 2014 to 2023%% under the protocol.%%[!review] R, ' +
         '2026-10-24: On “gone entirely from the text”: Not in any card.%%',
         'one never found goes on the selected card, quoted');
-    assert.match(read(cardPath('G-aaaaa')), /dendrite_status: revise/);
-    assert.match(read(cardPath('G-bbbbb')), /dendrite_status: revise/);
+    // No status written: the cards show revise while the comments are
+    // open, and not once they are dealt with.
+    assert.doesNotMatch(read(cardPath('G-aaaaa')), /dendrite_status/);
+    view.updateStatuses();
+    assert.equal(view.statusInfo.get('G-aaaaa').own, 'revise');
+    assert.equal(view.statusInfo.get('G-bbbbb').own, 'revise');
     await view.doUndo();
     assert.equal(text(cardPath('G-aaaaa')), A, 'one step undoes all');
     assert.equal(text(cardPath('G-bbbbb')), B);
@@ -3446,7 +3450,10 @@ test('a JSON review list opens the same dialog, each comment found in the ' +
         '%%{1%%paired samples%%}1 [!review] Claude, 2026-10-23: How ' +
         'many?%%.');
     assert.equal(text(cardPath('G-aaaaa')), A);
-    assert.match(read(cardPath('G-bbbbb')), /dendrite_status: revise/);
+    assert.doesNotMatch(read(cardPath('G-bbbbb')), /dendrite_status/);
+    view.updateStatuses();
+    assert.equal(view.statusInfo.get('G-bbbbb').own, 'revise',
+                 'revise while its comment is open');
     await view.doUndo();
     assert.equal(text(cardPath('G-bbbbb')), B);
     assert.equal(await view.reviewFrom('bad.json', Buffer.from('{')),

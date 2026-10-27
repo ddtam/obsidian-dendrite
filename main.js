@@ -923,7 +923,7 @@ var require_core = __commonJS({
         const set = statusOf(node.id);
         let own = null;
         if (prints) {
-          own = ["done", "revise"].includes(set) ? set : commentsOf(node.id) > 0 ? "revise" : "draft";
+          own = commentsOf(node.id) > 0 || set === "revise" ? "revise" : set === "done" ? "done" : "draft";
         } else if (set === "unsplit") own = "unsplit";
         else if (commentsOf(node.id) > 0) own = "revise";
         if (own) tally[own] += 1;
@@ -10603,8 +10603,8 @@ var DendriteView = class extends ItemView {
   }
   /**
    * Write the chosen comments and changes into their cards, each card
-   * found again in its text as it is now, and set the cards that print
-   * their text to revise; one step to undo. A change goes in as one to
+   * found again in its text as it is now; one step to undo. The cards
+   * show revise while the comments are open. A change goes in as one to
    * apply only where its passage is still exactly as it was sent.
    */
   async addReview(rows, fallback, relinks = []) {
@@ -10693,8 +10693,6 @@ var DendriteView = class extends ItemView {
         text: data,
         ifBody: core.splitFrontmatter(out).body
       });
-      const info = this.statusInfo && this.statusInfo.get(id);
-      if (info && info.prints) await this.setStatus(id, "revise");
       this.invalidate(id);
       await this.renderCard(id);
     }
