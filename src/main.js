@@ -7685,9 +7685,11 @@ class DendritePreview extends ItemView {
                 if (!sg.text || sg.gathered) continue;
                 const body = (this.bodies.get(sg.id) || {}).body || '';
                 const items = review.reviewItems(body);
+                // Which comments the part prints, by the comment each
+                // number names: a Google comment's passages share one
+                // number, so the numbers themselves do not say.
                 const shown = new Set([...sg.text.matchAll(
-                    /<sup class="dendrite-review-n[^"]*">(\d+)<\/sup>/g)]
-                    .map((m) => Number(m[1]) - 1));
+                    /\bdendrite-item-(\d+)\b/g)].map((m) => Number(m[1])));
                 items.forEach((item, n) => {
                     if (!shown.has(n)) return;
                     // A Google comment on several passages, in this card
@@ -7764,26 +7766,9 @@ class DendritePreview extends ItemView {
         });
     }
 
-    /**
-     * A comment's passage in a card's rendered text, `n` its index in the
-     * card: the marked text before its number, with the number.
-     */
+    /** A comment's passage in a card's drawn text, `n` its index. */
     passageOf(el, n) {
-        const sup = [...el.querySelectorAll('sup.dendrite-review-n')]
-            .find((x) => x.textContent === String(n + 1));
-        if (!sup) return [];
-        // Held between markers: every piece drawn for it, by its id.
-        const rid = [...sup.classList].find((c) =>
-            c.startsWith('dendrite-rid-'));
-        if (rid) {
-            return [...el.querySelectorAll(`.${rid}`)].filter((x) =>
-                !/\bdendrite-review-(from|upto)\b/.test(x.className));
-        }
-        const out = [sup];
-        for (let p = sup.previousElementSibling; p &&
-             /\bdendrite-review-(mark|old|new)\b/.test(p.className);
-             p = p.previousElementSibling) out.unshift(p);
-        return out;
+        return review.passageEls(el, n);
     }
 
     /**

@@ -1375,6 +1375,9 @@ function renderMarkdown(md, colourOf = null) {
         return c ? ` is-c-${c}` : '';
     };
     SCAN.lastIndex = 0;
+    // Which comment each number is, as reviewItems counts them: a Google
+    // comment's passages share one number, so the number cannot say.
+    let item = -1;
     return md.replace(SCAN, (m, openId, passage, id, kind, body) => {
         if (openId !== undefined) {
             const it = byId.get(openId);
@@ -1398,7 +1401,9 @@ function renderMarkdown(md, colourOf = null) {
         const marked = id !== undefined && byId.has(id);
         const rid = marked ? ` dendrite-rid-${id}` : '';
         const cls = (kind === 'suggest' ? ' is-suggest' : '') + tint;
-        const sup = `<sup class="dendrite-review-n${cls}${rid}">${num}</sup>`;
+        item++;
+        const sup = `<sup class="dendrite-review-n${cls}${rid} ` +
+            `dendrite-item-${item}">${num}</sup>`;
         // Between markers: the end of its passage, which is marked once
         // drawn (wrapPassages), then what it adds and its number.
         const upto = marked ?
@@ -1425,6 +1430,28 @@ function renderMarkdown(md, colourOf = null) {
         return `<mark class="dendrite-review-mark${tint}">${passage}</mark>` +
             sup;
     });
+}
+
+/**
+ * The elements a card's `n`th comment marks once drawn (renderMarkdown,
+ * wrapPassages): its passage, every piece of it where it is held between
+ * markers, a suggestion's old and new text, and its number; none if it
+ * is not drawn.
+ */
+function passageEls(root, n) {
+    const sup = root.querySelector(`sup.dendrite-item-${n}`);
+    if (!sup) return [];
+    // Held between markers: every piece drawn for it, by its id.
+    const rid = [...sup.classList].find((c) => c.startsWith('dendrite-rid-'));
+    if (rid) {
+        return [...root.querySelectorAll(`.${rid}`)].filter((x) =>
+            !/\bdendrite-review-(from|upto)\b/.test(x.className));
+    }
+    const out = [sup];
+    for (let p = sup.previousElementSibling; p &&
+         /\bdendrite-review-(mark|old|new)\b/.test(p.className);
+         p = p.previousElementSibling) out.unshift(p);
+    return out;
 }
 
 /**
@@ -1704,6 +1731,7 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
         if (!blocks.has(b)) blocks.set(b, []);
         blocks.get(b).push(i);
     });
+    const noteOf = new Map();
     for (const [b, list] of blocks) {
         const box = doc.createElement('div');
         box.className = 'dendrite-review-notes';
@@ -1795,15 +1823,41 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                 note.append(btn);
             }
             box.append(note);
+            noteOf.set(i, note);
         }
         if (b) b.after(box);
         else root.append(box);
     }
+    // Pointing at a comment marks its passages, all of a Google comment's,
+    // and pointing at a passage or its number marks its comment; the other
+    // comments are dimmed meanwhile. Shown in the selected card only.
+    const hover = (i, on) => {
+        root.classList.toggle('has-hover', on);
+        const note = noteOf.get(i);
+        if (note) note.classList.toggle('is-hover', on);
+        items.forEach((_, j) => {
+            if (first[j] !== i) return;
+            for (const el of passageEls(root, j)) {
+                el.classList.toggle('is-hover', on);
+            }
+        });
+    };
+    for (const [i, note] of noteOf) {
+        note.addEventListener('mouseenter', () => hover(i, true));
+        note.addEventListener('mouseleave', () => hover(i, false));
+    }
+    items.forEach((_, j) => {
+        for (const el of passageEls(root, j)) {
+            el.addEventListener('mouseenter', () => hover(first[j], true));
+            el.addEventListener('mouseleave', () => hover(first[j], false));
+        }
+    });
 }
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    reviewerNames, shownAs, wrapPassages, editorRanges,
                    passagesLost, changeAsComment, alignWords, mapThrough,
+                   passageEls,
                    oldComments, convertOld,
                    plainMap,
                    normalise, locate, reviewItems, alreadyIn,

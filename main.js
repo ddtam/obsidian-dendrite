@@ -2709,6 +2709,7 @@ var require_review = __commonJS({
         return c ? ` is-c-${c}` : "";
       };
       SCAN.lastIndex = 0;
+      let item = -1;
       return md.replace(SCAN, (m, openId, passage, id, kind, body) => {
         if (openId !== void 0) {
           const it = byId.get(openId);
@@ -2728,7 +2729,8 @@ var require_review = __commonJS({
         const marked = id !== void 0 && byId.has(id);
         const rid = marked ? ` dendrite-rid-${id}` : "";
         const cls = (kind === "suggest" ? " is-suggest" : "") + tint;
-        const sup = `<sup class="dendrite-review-n${cls}${rid}">${num}</sup>`;
+        item++;
+        const sup = `<sup class="dendrite-review-n${cls}${rid} dendrite-item-${item}">${num}</sup>`;
         const upto = marked ? `<span class="dendrite-review-upto${rid}"></span>` : "";
         if (kind === "suggest" && (marked || !passage)) {
           if (marked && !text) return upto + sup;
@@ -2744,6 +2746,17 @@ var require_review = __commonJS({
         }
         return `<mark class="dendrite-review-mark${tint}">${passage}</mark>` + sup;
       });
+    }
+    function passageEls(root, n) {
+      const sup = root.querySelector(`sup.dendrite-item-${n}`);
+      if (!sup) return [];
+      const rid = [...sup.classList].find((c) => c.startsWith("dendrite-rid-"));
+      if (rid) {
+        return [...root.querySelectorAll(`.${rid}`)].filter((x) => !/\bdendrite-review-(from|upto)\b/.test(x.className));
+      }
+      const out = [sup];
+      for (let p = sup.previousElementSibling; p && /\bdendrite-review-(mark|old|new)\b/.test(p.className); p = p.previousElementSibling) out.unshift(p);
+      return out;
     }
     function wrapPassages(root) {
       const doc = root.ownerDocument;
@@ -2926,6 +2939,7 @@ var require_review = __commonJS({
         if (!blocks.has(b)) blocks.set(b, []);
         blocks.get(b).push(i);
       });
+      const noteOf2 = /* @__PURE__ */ new Map();
       for (const [b, list] of blocks) {
         const box = doc.createElement("div");
         box.className = "dendrite-review-notes";
@@ -3008,10 +3022,32 @@ var require_review = __commonJS({
             note.append(btn);
           }
           box.append(note);
+          noteOf2.set(i, note);
         }
         if (b) b.after(box);
         else root.append(box);
       }
+      const hover = (i, on) => {
+        root.classList.toggle("has-hover", on);
+        const note = noteOf2.get(i);
+        if (note) note.classList.toggle("is-hover", on);
+        items.forEach((_, j) => {
+          if (first[j] !== i) return;
+          for (const el of passageEls(root, j)) {
+            el.classList.toggle("is-hover", on);
+          }
+        });
+      };
+      for (const [i, note] of noteOf2) {
+        note.addEventListener("mouseenter", () => hover(i, true));
+        note.addEventListener("mouseleave", () => hover(i, false));
+      }
+      items.forEach((_, j) => {
+        for (const el of passageEls(root, j)) {
+          el.addEventListener("mouseenter", () => hover(first[j], true));
+          el.addEventListener("mouseleave", () => hover(first[j], false));
+        }
+      });
     }
     module2.exports = {
       readReview,
@@ -3026,6 +3062,7 @@ var require_review = __commonJS({
       changeAsComment,
       alignWords,
       mapThrough,
+      passageEls,
       oldComments,
       convertOld,
       plainMap,
@@ -12562,8 +12599,8 @@ var DendritePreview = class extends ItemView {
         const body = (this.bodies.get(sg.id) || {}).body || "";
         const items = review.reviewItems(body);
         const shown = new Set([...sg.text.matchAll(
-          /<sup class="dendrite-review-n[^"]*">(\d+)<\/sup>/g
-        )].map((m) => Number(m[1]) - 1));
+          /\bdendrite-item-(\d+)\b/g
+        )].map((m) => Number(m[1])));
         items.forEach((item, n) => {
           if (!shown.has(n)) return;
           const g = review.googleOf(item);
@@ -12632,20 +12669,9 @@ var DendritePreview = class extends ItemView {
       return b ? this.passageOf(b.el, p.n) : [];
     });
   }
-  /**
-   * A comment's passage in a card's rendered text, `n` its index in the
-   * card: the marked text before its number, with the number.
-   */
+  /** A comment's passage in a card's drawn text, `n` its index. */
   passageOf(el, n) {
-    const sup = [...el.querySelectorAll("sup.dendrite-review-n")].find((x) => x.textContent === String(n + 1));
-    if (!sup) return [];
-    const rid = [...sup.classList].find((c) => c.startsWith("dendrite-rid-"));
-    if (rid) {
-      return [...el.querySelectorAll(`.${rid}`)].filter((x) => !/\bdendrite-review-(from|upto)\b/.test(x.className));
-    }
-    const out = [sup];
-    for (let p = sup.previousElementSibling; p && /\bdendrite-review-(mark|old|new)\b/.test(p.className); p = p.previousElementSibling) out.unshift(p);
-    return out;
+    return review.passageEls(el, n);
   }
   /**
    * Go to the next comment, or the one before, round from the end:

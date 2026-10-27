@@ -323,11 +323,11 @@ test('on the board a comment\'s passage is marked and numbered, with a ' +
         'point.%%[!review] R, 2026-10-24: Cite this.%%';
     const html = r.renderMarkdown(md);
     assert.equal(html, 'First <mark class="dendrite-review-mark">passage' +
-        '</mark><sup class="dendrite-review-n">1</sup> here.\n\nThen ' +
-        '<span class="dendrite-review-old">old</span><span ' +
+        '</mark><sup class="dendrite-review-n dendrite-item-0">1</sup> ' +
+        'here.\n\nThen <span class="dendrite-review-old">old</span><span ' +
         'class="dendrite-review-new">new</span><sup class="dendrite-review-n' +
-        ' is-suggest">2</sup> and a point.<sup class="dendrite-review-n">3' +
-        '</sup>');
+        ' is-suggest dendrite-item-1">2</sup> and a point.<sup class=' +
+        '"dendrite-review-n dendrite-item-2">3</sup>');
     // As Obsidian would render it: one paragraph per block.
     const root = doc.getElementById('root');
     root.innerHTML = html.split('\n\n').map((x) => `<p>${x}</p>`).join('');
@@ -715,7 +715,8 @@ test('a Google comment on several passages of a card is one comment: ' +
     const md = `A ${n('one', 'Same.', true)} and ${n('two', 'Other.')} ` +
         `then ${n('three', 'Same.', true)}.`;
     const html = r.renderMarkdown(md);
-    assert.deepEqual([...html.matchAll(/review-n">(\d+)</g)].map((m) => m[1]),
+    assert.deepEqual([...html.matchAll(/review-n dendrite-item-\d+">(\d+)</g)]
+        .map((m) => m[1]),
                      ['1', '2', '1'], 'its passages share its number');
     const root = doc.getElementById('root');
     root.innerHTML = `<p>${html}</p>`;
@@ -1035,5 +1036,53 @@ test('applying a change leaves no doubled space, nor a space before ' +
     // Dismissed, the passage is kept as it was, spaces and all.
     assert.equal(r.removeItem('cases %%{5%%respectively%%}5 ' +
         `[!suggest] ${A}%%.`, 0), 'cases respectively.');
+});
+
+test('each comment\'s number names which comment it is, though a Google ' +
+     'comment on several passages shares one number', () => {
+    const g = 'https://docs.google.com/document/d/x/edit?disco=doco.A1';
+    const md = `%%{1%%WGS%%}1 [!review] Josh, 2026-10-23: Same. ${g}%% ` +
+        `%%{2%%175%%}2 [!suggest] Aly, 2026-10-23: 200%% ` +
+        `%%{3%%RNA%%}3 [!review] Josh, 2026-10-23: Same. ${g}%% ` +
+        `%%{4%%18%%}4 [!suggest] Aly, 2026-10-23: 51%%`;
+    const html = r.renderMarkdown(md);
+    const sups = [...html.matchAll(
+        /<sup class="([^"]*)">(\d+)<\/sup>/g)].map((m) => [
+        (/dendrite-item-(\d+)/.exec(m[1]) || [])[1], m[2]]);
+    assert.deepEqual(sups, [['0', '1'], ['1', '2'], ['2', '1'], ['3', '3']]);
+});
+
+test('pointing at a comment on a card marks its passages and dims the ' +
+     'others, and pointing at a passage marks its comment', () => {
+    const g = 'https://docs.google.com/document/d/x/edit?disco=doco.A1';
+    const md = `%%{1%%WGS%%}1 [!review] Josh, 2026-10-23: Same. ${g}%% and ` +
+        `%%{2%%RNA%%}2 [!review] Josh, 2026-10-23: Same. ${g}%% from ` +
+        `%%{3%%18%%}3 [!suggest] Aly, 2026-10-23: 51%% patients.`;
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div id="root"></div>').window.document;
+    const root = doc.getElementById('root');
+    root.innerHTML = '<p>' + r.renderMarkdown(md) + '</p>';
+    r.wrapPassages(root);
+    const items = r.reviewItems(md);
+    r.decorate(root, items, () => {});
+    const notes = [...root.querySelectorAll('.dendrite-review-note')];
+    assert.equal(notes.length, 2, "the Google comment once, and Aly's");
+    const lit = () => [...root.querySelectorAll('.is-hover')]
+        .filter((el) => el.tagName !== 'DIV').map((el) => el.textContent);
+    notes[0].dispatchEvent(new doc.defaultView.MouseEvent('mouseenter'));
+    assert.ok(root.classList.contains('has-hover'));
+    assert.ok(notes[0].classList.contains('is-hover'));
+    assert.ok(!notes[1].classList.contains('is-hover'), 'the other dims');
+    assert.deepEqual(lit().filter((t) => t === 'WGS' || t === 'RNA'),
+                     ['WGS', 'RNA'], 'both its passages');
+    notes[0].dispatchEvent(new doc.defaultView.MouseEvent('mouseleave'));
+    assert.deepEqual(lit(), []);
+    // The other way: Aly's passage pointed at marks her comment.
+    const old = root.querySelector('.dendrite-review-old');
+    old.dispatchEvent(new doc.defaultView.MouseEvent('mouseenter'));
+    assert.ok(notes[1].classList.contains('is-hover'));
+    assert.ok(!notes[0].classList.contains('is-hover'));
+    old.dispatchEvent(new doc.defaultView.MouseEvent('mouseleave'));
+    assert.ok(!root.classList.contains('has-hover'));
 });
 

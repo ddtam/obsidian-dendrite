@@ -1874,6 +1874,34 @@ test('the preview prints by role, follows edits, and links to the board',
     assert.deepEqual(scrolled, [{ top: 19850, behavior: 'smooth' }]);
 });
 
+test('the preview shows every comment of a card where a Google comment ' +
+     'is on several passages, and that comment marks all of them',
+     async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const g = 'https://docs.google.com/document/d/x/edit?disco=doco.A1';
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|t]]\n');
+    await app.vault.create(cardPath('G-aaaaa'),
+        `%%{1%%WGS%%}1 [!review] Josh, 2026-10-23: Same. ${g}%% and ` +
+        `%%{2%%RNA%%}2 [!review] Josh, 2026-10-23: Same. ${g}%% from ` +
+        `%%{3%%18%%}3 [!suggest] Aly, 2026-10-23: 51%% patients.`);
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(50);
+    assert.deepEqual(view.reviewList.map((x) => [x.item.author,
+        x.parts.length]), [['Josh', 2], ['Aly', 1]], 'both, Aly\'s too');
+    assert.equal(view.contentEl.querySelectorAll('.dendrite-pbubble').length,
+                 2);
+    const marks = view.passagesOf(view.reviewList[0])
+        .filter((el) => el.tagName === 'MARK').map((el) => el.textContent);
+    assert.deepEqual(marks, ['WGS', 'RNA'], 'both passages');
+    await view.onClose();
+});
+
 test('a preview whose parts are never seen scrolling into view draws ' +
      'them while idle, and a failure to draw says so', async () => {
     const { DendritePreview } = require('../src/main.js');

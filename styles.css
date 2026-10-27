@@ -1892,6 +1892,28 @@ button.dendrite-review-btn:hover {
     font-weight: var(--font-bold);
 }
 
+/* On the selected card, a comment pointed at, or its passage: the
+   passage stands out as in the preview, and the other comments dim. */
+.dendrite-card.is-active mark.dendrite-review-mark.is-hover {
+    background: color-mix(in srgb, var(--dendrite-review) 45%,
+                          transparent);
+    box-shadow: 0 0 0 1px var(--dendrite-review);
+}
+.dendrite-card.is-active .dendrite-review-old.is-hover,
+.dendrite-card.is-active .dendrite-review-new.is-hover {
+    box-shadow: 0 0 0 1px var(--dendrite-suggest);
+    border-radius: 2px;
+}
+.dendrite-card.is-active sup.dendrite-review-n.is-hover {
+    font-weight: var(--font-bold);
+}
+.dendrite-card.is-active .has-hover .dendrite-review-note:not(.is-hover) {
+    opacity: 0.4;
+}
+.dendrite-review-note {
+    transition: opacity 120ms ease;
+}
+
 /* Cards picked together: outlined, and full strength while picked. */
 .dendrite-card.is-picked {
     opacity: 1;
