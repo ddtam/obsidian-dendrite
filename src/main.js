@@ -1186,9 +1186,10 @@ class DendriteView extends ItemView {
         btn('file-output', 'Export', 'Export the manuscript to markdown, ' +
             'PDF or Word', (e) => this.exportMenu(null, e), true)
             .addClass('dendrite-bar-gap-before');
-        btn('inbox', 'Review', 'Bring in review comments: from ' +
-            'the linked Google Doc, a returned Word file, or programs',
-            (e) => this.reviewMenu(e), true);
+        this.reviewBtn = btn('inbox', 'Review', 'Bring in review ' +
+            'comments: from the linked Google Doc, a returned Word file, ' +
+            'or programs', (e) => this.reviewMenu(e), true);
+        this.showInboxBadge();
         this.modeEl = bar.createDiv({ cls: 'dendrite-mode' });
         this.showMode();
         this.totalEl = bar.createDiv({ cls: 'dendrite-total' });
@@ -5500,7 +5501,22 @@ class DendriteView extends ItemView {
         const key = (l) => l.map((r) => r.id).join(' ');
         const changed = key(out) !== key(this.inbox);
         this.inbox = out;
+        this.showInboxBadge();
         if (changed) this.updateStatuses();
+    }
+
+    /** How many reviews wait to be added, on the Review button. */
+    showInboxBadge() {
+        const b = this.reviewBtn;
+        if (!b) return;
+        const old = b.querySelector('.dendrite-bar-badge');
+        if (old) old.remove();
+        const n = (this.inbox || []).length;
+        if (!n) return;
+        const badge = b.createSpan({ cls: 'dendrite-bar-badge',
+                                     text: String(n) });
+        badge.setAttr('aria-label', `${n} review${n === 1 ? '' : 's'} ` +
+                      'waiting to be added');
     }
 
     /** Show a submitted review's comments to add, or ignore it. */

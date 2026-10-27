@@ -2107,6 +2107,20 @@ button.dendrite-review-btn:hover {
     column-gap: 10px;
     row-gap: 2px;
 }
+/* On the Review button, how many reviews sent from programs wait to be
+   added. */
+.dendrite-bar-badge {
+    margin-left: 4px;
+    min-width: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+    font-size: var(--font-ui-smaller);
+    line-height: 16px;
+    text-align: center;
+}
+
 /* You, above the reviewers: your colour, then the name your replies are
    signed with and the name you are shown as, each on its own row. */
 .dendrite-reviewer-self {

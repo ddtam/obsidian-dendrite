@@ -3465,6 +3465,10 @@ test('a review submitted for a manuscript is queued with where its ' +
         '.dendrite-status-chip')].filter((s) =>
         /^review/.test(s.textContent)).map((s) => s.textContent);
     assert.deepEqual(chips(), ['review: 2 from Claude']);
+    // The Review button carries how many reviews wait.
+    const badge = () => view.contentEl.querySelector(
+        '.dendrite-bar .dendrite-bar-badge');
+    assert.equal(badge()?.textContent, '1');
     // Cancel leaves it; Add takes it.
     await view.openInbox(view.inbox[0]);
     const m = h.obsidian.lastModal;
@@ -3477,6 +3481,7 @@ test('a review submitted for a manuscript is queued with where its ' +
     assert.match(text(cardPath('G-aaaaa')),
                  /%%\{1%%paired samples%%\}1 \[!review\] Claude/);
     assert.deepEqual(chips(), []);
+    assert.equal(badge(), null, 'none left waiting');
     assert.deepEqual((await p.reviewStatus(out.json.id)).json.state,
                      'added');
     // Sent again once added: queued, but what is already in the card
