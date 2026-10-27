@@ -580,6 +580,65 @@ const words = (s) => {
     return out;
 };
 
+/**
+ * Two texts' words lined up, an earlier version of a card and the card
+ * that replaced it: { was, now, match }, `match[i]` the index in `now` of
+ * the word `was[i]`, or -1 where it has gone. Compared without case.
+ */
+function alignWords(wasText, nowText) {
+    const was = words(wasText);
+    const now = words(nowText);
+    const low = (l) => l.map((x) => x.w.toLowerCase());
+    return { was, now, match: lcs(low(was), low(now)).match };
+}
+
+/**
+ * A place in an earlier version carried to the card that replaced it,
+ * `al` the two lined up (alignWords): { start, end } in `nowText`, or
+ * null. A point goes before the next word that is still there, or after
+ * the last; a passage only where every one of its words is still there,
+ * side by side, so the same text is marked.
+ */
+function mapThrough(al, wasText, nowText, start, end) {
+    const { was, now, match } = al;
+    if (start === end) {
+        for (let i = 0; i < was.length; i++) {
+            if (was[i].at + was[i].w.length > start && match[i] >= 0 &&
+                was[i].at >= start) {
+                return { start: now[match[i]].at, end: now[match[i]].at };
+            }
+        }
+        for (let i = was.length - 1; i >= 0; i--) {
+            if (was[i].at < start && match[i] >= 0) {
+                const k = now[match[i]].at + now[match[i]].w.length;
+                return { start: k, end: k };
+            }
+        }
+        return null;
+    }
+    const inside = [];
+    for (let i = 0; i < was.length; i++) {
+        if (was[i].at < end && was[i].at + was[i].w.length > start) {
+            inside.push(i);
+        }
+    }
+    if (!inside.length) return null;
+    for (let k = 0; k < inside.length; k++) {
+        const j = match[inside[k]];
+        if (j < 0 || (k && j !== match[inside[k - 1]] + 1)) return null;
+    }
+    const first = was[inside[0]];
+    const last = was[inside[inside.length - 1]];
+    const a = now[match[inside[0]]].at + Math.max(0, start - first.at);
+    const lastNow = now[match[inside[inside.length - 1]]];
+    const b = lastNow.at + Math.min(lastNow.w.length,
+                                    end - last.at);
+    const same = (x) => normalise(x).text;
+    if (b <= a || same(nowText.slice(a, b)) !==
+        same(wasText.slice(start, end))) return null;
+    return { start: a, end: b };
+}
+
 /** Common words in order: the length, and which `b` index matched each `a`. */
 function lcs(a, b) {
     const n = a.length;
@@ -1723,7 +1782,7 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    reviewerNames, shownAs, wrapPassages, editorRanges,
-                   passagesLost, changeAsComment,
+                   passagesLost, changeAsComment, alignWords, mapThrough,
                    oldComments, convertOld,
                    plainMap,
                    normalise, locate, reviewItems, alreadyIn,

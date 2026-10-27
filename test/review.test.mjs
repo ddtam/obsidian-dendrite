@@ -990,3 +990,29 @@ test('grey can be chosen for a reviewer, as for one\'s own comments, ' +
     assert.ok(![...map.values()].includes('grey'));
 });
 
+test('a place in an earlier version is carried to the card that replaced ' +
+     'it by the words the two share', () => {
+    const was = 'Modern single-cell assays produce an immense volume of ' +
+        'data. Multiple such assays are often used in tandem.';
+    const now = 'Modern sequencing-based assays generate an immense volume ' +
+        'of data. Multiple such assays are often used in tandem.';
+    const al = r.alignWords(was, now);
+    // A point: before the first word, and before "Multiple".
+    assert.deepEqual(r.mapThrough(al, was, now, 0, 0), { start: 0, end: 0 });
+    const k = was.indexOf('Multiple');
+    assert.deepEqual(r.mapThrough(al, was, now, k, k),
+        { start: now.indexOf('Multiple'), end: now.indexOf('Multiple') });
+    // A passage still there, word for word, even starting inside a word.
+    const p = was.indexOf('immense volume');
+    const m = r.mapThrough(al, was, now, p, p + 'immense volume'.length);
+    assert.equal(now.slice(m.start, m.end), 'immense volume');
+    const q = was.indexOf('ften used');
+    const mq = r.mapThrough(al, was, now, q, q + 'ften used'.length);
+    assert.equal(now.slice(mq.start, mq.end), 'ften used');
+    // One whose words are gone, or are no longer side by side: none.
+    const g = was.indexOf('produce');
+    assert.equal(r.mapThrough(al, was, now, g, g + 7), null);
+    const h = was.indexOf('single-cell assays');
+    assert.equal(r.mapThrough(al, was, now, h, h + 18), null);
+});
+

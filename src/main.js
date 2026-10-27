@@ -5572,19 +5572,9 @@ class DendriteView extends ItemView {
             return bodies.get(id);
         };
         const rows = [];
+        const aligned = new Map();
         for (const item of items) {
-            let at = review.locate(item, cards);
-            // Wording now only in an old version: the comment goes on the
-            // card that replaced it, where it is answered.
-            if (!at) {
-                const o = review.locate(item, old);
-                const top = o && this.byId.get(o.id) &&
-                    this.byId.get(o.id).parent;
-                if (top && top.id) {
-                    at = Object.assign(this.endOf(top.id, cards),
-                                       { how: 'old', from: o.id });
-                }
-            }
+            const at = this.placeReview(item, cards, old, aligned);
             // Already in its card or the card's old versions, as from the
             // same review sent twice: shown, but not added again unless
             // ticked.
@@ -5620,6 +5610,46 @@ class DendriteView extends ItemView {
     }
 
     /**
+     * Where a review item goes, `cards` the cards as they print and `old`
+     * their earlier versions, `aligned` keeping each pair of versions
+     * lined up once: { id, start, end, how }, or null. As it was sent to
+     * a current card, 'exact'. Else as it was sent to an earlier version,
+     * carried to the card that replaced it where its text is still there
+     * (review.mapThrough), 'mapped': a change is not put on a version
+     * that does not print. Else found by most of its words, 'close'. Else
+     * in an earlier version only, at the end of the card that replaced
+     * it, its passage to be quoted, 'old'.
+     */
+    placeReview(item, cards, old, aligned = new Map()) {
+        const at = review.locate(item, cards);
+        if (at && at.how === 'exact') return at;
+        const o = review.locate(item, old);
+        const top = o && this.byId.get(o.id) && this.byId.get(o.id).parent;
+        if (o && o.how === 'exact' && top && top.id) {
+            const was = old.find((c) => c.id === o.id);
+            const now = cards.find((c) => c.id === top.id);
+            if (was && now) {
+                const key = `${o.id}\u0000${top.id}`;
+                if (!aligned.has(key)) {
+                    aligned.set(key, review.alignWords(was.text, now.text));
+                }
+                const m = review.mapThrough(aligned.get(key), was.text,
+                                            now.text, o.start, o.end);
+                if (m) {
+                    return { id: top.id, start: m.start, end: m.end,
+                             how: 'mapped', from: o.id };
+                }
+            }
+        }
+        if (at) return at;
+        if (top && top.id) {
+            return Object.assign(this.endOf(top.id, cards),
+                                 { how: 'old', from: o.id });
+        }
+        return null;
+    }
+
+    /**
      * Every card's text, in reading order, for finding passages in: only
      * what export prints, since that is what a reviewer was sent; the
      * rest blanked, so offsets still point into the card.
@@ -5641,23 +5671,20 @@ class DendriteView extends ItemView {
      */
     async addReview(rows, fallback, relinks = []) {
         const cards = await this.reviewCards();
+        const old = await this.oldVersionCards();
+        const aligned = new Map();
         const byId = new Map();
         let placed = 0;
         let missed = 0;
         for (const row of rows) {
             const item = row.item;
-            let at = review.locate(item, cards);
+            let at = this.placeReview(item, cards, old, aligned);
             let add;
             // Only one never found goes on the selected card; one found
             // before but not now has gone with its text.
             if (!at && !row.at && fallback) {
                 at = Object.assign(this.endOf(fallback.id, cards),
                                    { how: 'none' });
-            }
-            if (!at && row.at && row.at.how === 'old' &&
-                this.byId.has(row.at.id)) {
-                at = Object.assign(this.endOf(row.at.id, cards),
-                                   { how: 'old' });
             }
             if (!at) {
                 missed++;
@@ -5670,7 +5697,7 @@ class DendriteView extends ItemView {
             if (item.kind === 'comment') {
                 add = { kind: 'review', text: quoted + item.text +
                         (item.link ? ` ${item.link}` : '') };
-            } else if (at.how === 'exact' ||
+            } else if (at.how === 'exact' || at.how === 'mapped' ||
                        (!item.quote && at.how === 'close')) {
                 // An addition takes nothing away, so one found only by
                 // most of the words around it still goes in to apply,
@@ -9025,6 +9052,14 @@ class ReviewImportModal extends Modal {
                 where.addClass('is-known');
                 where.setText(`Already in the card, ` +
                     `${core.shortId(row.at.id)}: left unticked.`);
+            } else if (row.at && row.at.how === 'mapped') {
+                const node = view.byId.get(row.at.id);
+                where.addClass('is-close');
+                where.setText(`→ card ${core.shortId(row.at.id)}` +
+                    (node && node.label ? ` (${node.label})` : '') +
+                    ', found in an earlier version of it, card ' +
+                    `${core.shortId(row.at.from)}: placed where its text ` +
+                    'now is. Check it.');
             } else if (row.at && row.at.how === 'old') {
                 const node = view.byId.get(row.at.id);
                 where.addClass('is-close');

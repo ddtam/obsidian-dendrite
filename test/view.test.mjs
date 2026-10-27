@@ -3936,6 +3936,44 @@ test('a review comment on wording only in an old version goes on the ' +
                  'the old version is left as it was');
 });
 
+test('a change found exactly in an earlier version is carried to the ' +
+     'card that replaced it, where its text is still there', async () => {
+    const WAS = 'Modern single-cell assays produce an immense volume of ' +
+        'data. Multiple such assays are often used in tandem.';
+    const NOW = 'Modern sequencing-based assays generate an immense volume ' +
+        'of data. Multiple such assays are often used in tandem.';
+    const { view, text } = await open(STACK_INDEX, {
+        'G-aaaaa': '---\ndendrite_role: prose\n---\n' + WAS,
+        'G-ccccc': NOW, 'G-bbbbb': 'Next.' });
+    await view.promote('G-aaaaa', 'G-ccccc');
+    const ch = (quote, insert, before, after) => ({ kind: 'change', quote,
+        insert, before, after, author: 'Aly Karsan 2', date: '2026-10-23' });
+    const m = await view.reviewModal('Word', [
+        // Sent before the rewording: an opening sentence added.
+        ch('', 'AML is a deadly cancer. ', '',
+           'Modern single-cell assays produce an immense volume'),
+        // A word changed whose words are still in the new card: found
+        // there as it is, which comes first.
+        ch('immense volume', 'large amount', 'assays produce an ',
+           ' of data. Multiple'),
+        // A word changed that the new card no longer has.
+        ch('produce', 'yield', 'single-cell assays ', ' an immense')]);
+    assert.deepEqual(m.rows.map((x) => [x.at.id, x.at.how]), [
+        ['G-ccccc', 'mapped'], ['G-ccccc', 'exact'], ['G-ccccc', 'old']]);
+    assert.match(m.contentEl.textContent,
+                 /placed where its text now is/);
+    await m.contentEl.querySelector('.mod-cta').onclick();
+    const items = r.reviewItems(text(cardPath('G-ccccc')));
+    assert.deepEqual(items.map((x) => [x.kind, x.passage, x.text]), [
+        ['suggest', '', 'AML is a deadly cancer. '],
+        ['suggest', 'immense volume', 'large amount'],
+        ['review', '', 'On “produce”, in an earlier version: Suggested ' +
+            'replacing “produce” with “yield”. The text has changed here ' +
+            'since it was sent.']]);
+    assert.equal(text(cardPath('G-aaaaa')).includes('[!'), false,
+                 'nothing on the old version');
+});
+
 test('pasting the Google client in the settings unlocks signing in ' +
      'without reopening them', () => {
     const { DendriteSettings } = require('../src/main.js');
