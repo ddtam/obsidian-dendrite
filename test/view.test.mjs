@@ -659,6 +659,38 @@ test('a board or preview not shown, as in a tab behind another, draws ' +
     pv.contentEl.remove();
 });
 
+test('find goes to a match in a card that is a slot: it is filled, ' +
+     'selected and its match painted', async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+            { 'G-aaaaa': 'Aims.', 'G-bbbbb': 'Far away, TET2.' });
+        view.plugin.typedAt = Date.now() + 5000;
+        assert.ok(view.cardEls.get('G-bbbbb').hasClass('is-slot'));
+        h.window.CSS = { highlights: new Map() };
+        h.window.Highlight = class { constructor(...r) { this.ranges = r; } };
+        view.openFind();
+        view.find.input.value = 'tet2';
+        view.find.input.dispatchEvent(new h.window.Event('input'));
+        await tick(200);
+        const b = view.cardEls.get('G-bbbbb');
+        assert.equal(view.active, 'G-bbbbb');
+        assert.ok(!b.hasClass('is-slot'), 'filled');
+        assert.ok(b.hasClass('is-active'));
+        assert.ok(b.querySelector('.dendrite-md'), 'its text drawn');
+        await tick(50);
+        const lit = (h.window.CSS.highlights.get('dendrite-find-current') ||
+            { ranges: [] }).ranges.map((r) => r.toString());
+        assert.deepEqual(lit, ['TET2']);
+        view.plugin.typedAt = 0;
+    } finally {
+        globalThis.inView = null;
+        delete h.window.CSS;
+        delete h.window.Highlight;
+    }
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';

@@ -6323,12 +6323,13 @@ var DendriteView = class extends ItemView {
   }
   /**
    * Cards far from the view emptied back to their slots, keeping their
-   * heights; never the active card or the one being written. All are
-   * measured before any is emptied, so the board is laid out once.
+   * heights; never the active card, the one being written, dragged or
+   * with its versions fanned out. All are measured before any is
+   * emptied, so the board is laid out once.
    */
   emptyFar(ids) {
     this.heights = this.heights || /* @__PURE__ */ new Map();
-    const keep = (id) => id === this.active || this.editing && this.editing.id === id;
+    const keep = (id) => id === this.active || id === this.fannedId || this.editing && this.editing.id === id || this.drag && this.drag.id === id;
     const cards = ids.filter((id) => !keep(id)).map((id) => [id, this.cardEls.get(id)]).filter(([, c]) => c && !c.hasClass("is-slot"));
     const tall = cards.map(([, c]) => c.offsetHeight);
     cards.forEach(([id, card], i) => {
