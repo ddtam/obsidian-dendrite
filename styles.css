@@ -284,6 +284,14 @@
        are already rendered only as they near the screen. */
 }
 
+/* A card far from the view: one empty element, as tall as the card was
+   drawn or is estimated to be, its height counting its padding and
+   border as the drawn card's does. It keeps the card's outline, so a
+   fast scroll shows cards still to be filled. */
+.dendrite-card.is-slot {
+    box-sizing: border-box;
+}
+
 .dendrite-board.has-active .dendrite-card {
     opacity: 0.45;
 }

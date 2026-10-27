@@ -57,6 +57,9 @@ async function open(indexText, cards = {}) {
 }
 
 const cardPath = (id) => `W/Grant/cards/${id}.md`;
+// A card not yet drawn: a slot, far from the view, or a frame whose text
+// waits to be drawn.
+const waiting = (el) => el.hasClass('is-slot') || el.hasClass('is-pending');
 const type = (view, value) => {
     const ta = view.editing.ta;
     ta.value = value;
@@ -244,7 +247,7 @@ test('cards never scrolled into view are drawn while the board is ' +
             '    - [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n',
             { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
         const pending = () => [...view.cardEls]
-            .filter(([, el]) => el.hasClass('is-pending')).map(([id]) => id);
+            .filter(([, el]) => waiting(el)).map(([id]) => id);
         assert.deepEqual(pending().sort(), ['G-bbbbb', 'G-ccccc'],
                          'out of view, not drawn at once');
         const order = [];
@@ -279,8 +282,7 @@ test('idle drawing keeps to the cards near what the board shows, and ' +
             el.getBoundingClientRect = () => rect(at[id]);
         }
         const pending = () => [...view.cardEls]
-            .filter(([, el]) => el.hasClass('is-pending')).map(([id]) => id)
-            .sort();
+            .filter(([, el]) => waiting(el)).map(([id]) => id).sort();
         view.drawWhenIdle();
         await tick(1200);
         assert.deepEqual(pending(), ['G-ccccc'],
@@ -370,6 +372,96 @@ test('cards drawn while idle are drawn together, and do not each ' +
     }
 });
 
+test('a card far from the view is a slot of one element at its height, ' +
+     'filled with its number and status as it comes near', async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view } = await open(
+            '---\ndendrite_prefix: G\ndendrite_number_sections: true\n' +
+            '---\n- [[G-aaaaa|Aims]]\n- [[G-bbbbb|Methods]]\n',
+            { 'G-aaaaa': '# Aims',
+              'G-bbbbb': '---\ndendrite_status: revise\n---\n# Methods' });
+        const b = view.cardEls.get('G-bbbbb');
+        assert.ok(b.hasClass('is-slot'), 'out of view, a slot');
+        assert.equal(b.childElementCount, 0, 'with nothing in it');
+        assert.match(b.style.height, /^\d+px$/, 'kept at a height');
+        await tick(1000);
+        assert.ok(!b.hasClass('is-slot'), 'filled while idle');
+        assert.equal(b.querySelector('.dendrite-num')?.textContent, '2.');
+        assert.deepEqual([...b.querySelectorAll('.dendrite-status-chip')]
+            .map((c) => c.textContent), ['revise ⚑']);
+        assert.ok(b.querySelector('.dendrite-card-foot .dendrite-id'));
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
+test('a drawn card far from the view goes back to its slot at the height ' +
+     'it was drawn, but never the active card', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n' +
+        '- [[G-ccccc|C]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B', 'G-ccccc': 'C' });
+    await tick(600);
+    view.active = 'G-aaaaa';
+    // A board 500 px high; B and A far below it, C in it.
+    view.board.getBoundingClientRect = () => ({ top: 0, bottom: 500,
+        left: 0, right: 1000, width: 1000, height: 500 });
+    const at = { 'G-aaaaa': 20000, 'G-bbbbb': 9000, 'G-ccccc': 100 };
+    for (const [id, el] of view.cardEls) {
+        el.getBoundingClientRect = () => ({ top: at[id],
+            bottom: at[id] + 137, left: 0, right: 300, width: 300,
+            height: 137 });
+        Object.defineProperty(el, 'offsetHeight', { get: () => 137 });
+    }
+    // Only C is in view now.
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-ccccc';
+    try {
+        view.drawWhenIdle();
+        await tick(800);
+        const b = view.cardEls.get('G-bbbbb');
+        assert.ok(b.hasClass('is-slot'));
+        assert.equal(b.style.height, '137px');
+        assert.equal(b.childElementCount, 0);
+        assert.ok(!view.cardEls.get('G-aaaaa').hasClass('is-slot'),
+                  'the active card stays drawn');
+        assert.ok(!view.cardEls.get('G-ccccc').hasClass('is-slot'));
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
+test('the board rebuilt keeps drawn cards drawn; a slot is filled to be ' +
+     'edited, and not for a change to its note', async () => {
+    globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
+    try {
+        const { view, app } = await open(
+            '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+            { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+        assert.ok(!view.cardEls.get('G-aaaaa').hasClass('is-slot'));
+        view.render();
+        assert.ok(!view.cardEls.get('G-aaaaa').hasClass('is-slot'),
+                  'drawn at once after the rebuild');
+        assert.ok(view.cardEls.get('G-bbbbb').hasClass('is-slot'));
+        // A sync changes B: it stays a slot.
+        view.plugin.typedAt = Date.now() + 5000;
+        await app.vault.modify(app.vault.getAbstractFileByPath(
+            cardPath('G-bbbbb')), 'B, synced');
+        await tick(50);
+        assert.ok(view.cardEls.get('G-bbbbb').hasClass('is-slot'));
+        // Editing B fills it, with its editor.
+        await view.startEdit('G-bbbbb');
+        const b = view.cardEls.get('G-bbbbb');
+        assert.ok(!b.hasClass('is-slot'));
+        assert.ok(b.querySelector('.dendrite-card-body')
+            .contains(view.editing.editor.el));
+        await view.endEdit();
+        view.plugin.typedAt = 0;
+    } finally {
+        globalThis.inView = null;
+    }
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
@@ -377,8 +469,7 @@ test('idle drawing waits while the board is moving and just after a key',
         const { view } = await open(
             '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
             { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
-        const pending = () =>
-            view.cardEls.get('G-bbbbb').hasClass('is-pending');
+        const pending = () => waiting(view.cardEls.get('G-bbbbb'));
         view.anim = 1;
         await tick(700);
         assert.ok(pending(), 'not drawn while the board moves');

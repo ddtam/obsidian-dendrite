@@ -5368,6 +5368,11 @@ function setStyles(el, styles) {
 }
 var DRAW_REACH = 2;
 var DRAW_BATCH = 8;
+var SLOT_FRAME = 84;
+var SLOT_PADDING = 28;
+var SLOT_CHAR = 8;
+var SLOT_LINE = 24;
+var EMPTY_REACH = 5;
 function idleDrawer(winOf, next, busy) {
   let handle = null;
   let stopped = false;
@@ -5903,6 +5908,8 @@ var DendriteView = class extends ItemView {
     const el = this.contentEl;
     if (this.observer) this.observer.disconnect();
     if (this.resizer) this.resizer.disconnect();
+    this.keepFilled = /* @__PURE__ */ new Set();
+    for (const [id] of this.liveCards()) this.keepFilled.add(id);
     el.empty();
     this.cardEls.clear();
     el.style.setProperty(
@@ -5994,6 +6001,7 @@ var DendriteView = class extends ItemView {
       }
       inner.createDiv({ cls: "dendrite-spacer" });
     });
+    this.keepFilled = null;
     this.fanReady = this.renderFan(stage);
     if (held) {
       this.highlight();
@@ -6174,10 +6182,60 @@ var DendriteView = class extends ItemView {
     for (const f of files) await this.app.fileManager.trashFile(f);
     this.render();
   }
+  /**
+   * A card's place on the board. Far from the view it is a slot, one
+   * empty element as tall as the card was when last drawn, or as its
+   * text is estimated to be, so the board keeps its shape while holding
+   * a handful of elements per card instead of its full frame; near the
+   * view it is filled (fillFrame). A card filled before the board was
+   * rebuilt, or being written, is filled again at once.
+   */
   renderShell(group, n) {
     const card = group.createDiv({ cls: "dendrite-card" });
     card.dataset.id = n.id;
     if (this.kidsOf(n).length) card.addClass("has-children");
+    this.cardEls.set(n.id, card);
+    if (this.editing && this.editing.id === n.id || this.keepFilled && this.keepFilled.has(n.id)) {
+      this.fillFrame(n.id);
+    } else {
+      this.makeSlot(n.id, card);
+    }
+    if (this.observer && !card.hasClass("is-slot")) {
+      this.observer.observe(card);
+    }
+    if (this.resizer) this.resizer.observe(card);
+  }
+  /** A card emptied to its slot, at the height it is to keep. */
+  makeSlot(id, card) {
+    card.addClass("is-slot");
+    card.style.height = `${this.slotHeight(id)}px`;
+    if (this.observer) this.observer.observe(card);
+    this.drawWhenIdle();
+  }
+  /**
+   * How tall a card's slot is: as tall as the card was when last
+   * drawn, or, never drawn, an estimate from its text's length.
+   */
+  slotHeight(id) {
+    const known = this.heights && this.heights.get(id);
+    if (known) return known;
+    const b = this.bodies && this.bodies.get(id);
+    const chars = b ? b.body.length : 0;
+    const perLine = Math.max(20, (this.plugin.settings.cardWidth - SLOT_PADDING) / SLOT_CHAR);
+    return SLOT_FRAME + Math.max(1, Math.ceil(chars / perLine)) * SLOT_LINE;
+  }
+  /**
+   * A slot filled with the card's frame: its role icon and grip, its
+   * text, drawn or waiting to be, and its footer, then each thing shown
+   * on a card (decorateCard). The card, or undefined.
+   */
+  fillFrame(id) {
+    const card = this.cardEls.get(id);
+    const n = this.byId.get(id);
+    if (!card || !n) return card;
+    if (card.childElementCount && !card.hasClass("is-slot")) return card;
+    card.removeClass("is-slot");
+    card.style.height = "";
     const grip = card.createDiv({ cls: "dendrite-grip" });
     grip.createSpan({ cls: "dendrite-role-icon" });
     setIcon(
@@ -6215,16 +6273,63 @@ var DendriteView = class extends ItemView {
       e.stopPropagation();
       this.copyId(n.id);
     });
-    this.cardEls.set(n.id, card);
-    if (this.observer) this.observer.observe(card);
-    if (this.resizer) this.resizer.observe(card);
+    this.decorateCard(id, card);
+    return card;
+  }
+  /**
+   * Cards far from the view emptied back to their slots, keeping their
+   * heights; never the active card or the one being written. All are
+   * measured before any is emptied, so the board is laid out once.
+   */
+  emptyFar(ids) {
+    this.heights = this.heights || /* @__PURE__ */ new Map();
+    const keep = (id) => id === this.active || this.editing && this.editing.id === id;
+    const cards = ids.filter((id) => !keep(id)).map((id) => [id, this.cardEls.get(id)]).filter(([, c]) => c && !c.hasClass("is-slot"));
+    const tall = cards.map(([, c]) => c.offsetHeight);
+    cards.forEach(([id, card], i) => {
+      if (tall[i]) this.heights.set(id, tall[i]);
+      card.empty();
+      card.removeClass("is-pending");
+      this.makeSlot(id, card);
+    });
+    return cards.length;
+  }
+  /**
+   * What every drawn card shows, put on one just filled: its number,
+   * role, status chips, quota, the classes of the active path and the
+   * cards picked, and the active card's tools.
+   */
+  decorateCard(id, card) {
+    this.numberCard(id, card);
+    this.roleCard(id, card);
+    this.statusCard(id, card);
+    this.fillQuota(card, id);
+    card.toggleClass("is-active", id === this.active);
+    card.toggleClass("is-lineage", !!(this.lineage && this.lineage.has(id)));
+    card.toggleClass("is-picked", !!(this.picked && this.picked.has(id)));
+    if (id === this.active) this.renderToolbar();
+    if (this.find) this.schedulePaintFind();
+  }
+  /** Find's marks painted again once, after the cards being filled. */
+  schedulePaintFind() {
+    if (this.paintFrame) return;
+    this.paintFrame = this.pageWin().requestAnimationFrame(() => {
+      this.paintFrame = null;
+      if (this.find) this.paintFind();
+    });
+  }
+  /** The cards drawn as frames, not slots: [id, card]. */
+  *liveCards() {
+    for (const [id, card] of this.cardEls) {
+      if (!card.hasClass("is-slot")) yield [id, card];
+    }
   }
   onVisible(entries) {
     for (const e of entries) {
       if (!e.isIntersecting) continue;
       const id = e.target.dataset.id;
       this.observer.unobserve(e.target);
-      if (e.target.hasClass("is-pending")) this.renderCard(id);
+      if (e.target.hasClass("is-pending") || e.target.hasClass("is-slot")) this.renderCard(id);
     }
   }
   /**
@@ -6268,20 +6373,34 @@ var DendriteView = class extends ItemView {
       if (node) for (const k of this.kidsOf(node)) kids.add(k.id);
     }
     const near = [];
+    const far = [];
     for (const [id, el] of this.cardEls) {
-      if (!el.hasClass("is-pending") || this.undrawable.has(el) || this.editing && this.editing.id === id) continue;
       const r = rects.get(id);
       const dx = Math.abs(r.left + r.width / 2 - cx);
       const dy = Math.abs(r.top + r.height / 2 - cy);
+      const waiting = el.hasClass("is-pending") || el.hasClass("is-slot");
+      if (!waiting) {
+        if ((dx > box.width * (EMPTY_REACH + 0.5) || dy > box.height * (EMPTY_REACH + 0.5)) && !kids.has(id)) far.push(id);
+        continue;
+      }
+      if (this.undrawable.has(el) || this.editing && this.editing.id === id) continue;
       if ((dx > reachX || dy > reachY) && !kids.has(id)) continue;
       near.push([Math.hypot(dx, dy), id, el]);
     }
-    if (!near.length) return null;
+    if (!near.length) {
+      if (far.length) this.emptyFar(far);
+      return null;
+    }
     near.sort((a, b) => a[0] - b[0]);
     this.drawingIdle = (this.drawingIdle || 0) + 1;
     return Promise.all(near.slice(0, DRAW_BATCH).map(([, id, el]) => (
-      // One that fails is not tried again until the board is redrawn.
-      this.renderCard(id).catch((err) => {
+      // One that fails, or is still waiting after, is not tried
+      // again until the board is redrawn.
+      this.renderCard(id).then(() => {
+        if (el.hasClass("is-slot") || el.hasClass("is-pending")) {
+          this.undrawable.add(el);
+        }
+      }, (err) => {
         this.undrawable.add(el);
         console.error("Dendrite: a card could not be drawn", err);
       })
@@ -6299,6 +6418,10 @@ var DendriteView = class extends ItemView {
   async renderCard(id) {
     const card = this.cardEls.get(id);
     if (!card || this.editing && this.editing.id === id) return;
+    if (card.hasClass("is-slot")) {
+      this.fillFrame(id);
+      if (!card.hasClass("is-pending")) return;
+    }
     const body = card.querySelector(".dendrite-card-body");
     const f = this.cardFile(id);
     if (!f) {
@@ -6394,6 +6517,8 @@ var DendriteView = class extends ItemView {
   }
   /** Highlight the active card's lineage and bring it into view. */
   applyActive(smooth = true) {
+    const card = this.active && this.cardEls.get(this.active);
+    if (card && card.hasClass("is-slot")) this.renderCard(this.active);
     this.highlight();
     this.centre(smooth);
   }
@@ -6835,7 +6960,7 @@ var DendriteView = class extends ItemView {
     if (this.toolbar) this.toolbar.remove();
     this.toolbar = null;
     const card = this.active && this.cardEls.get(this.active);
-    if (!card || this.editing) return;
+    if (!card || this.editing || card.hasClass("is-slot")) return;
     const foot = card.querySelector(":scope > .dendrite-card-foot") || card.createDiv({ cls: "dendrite-card-foot" });
     const t = foot.createDiv({ cls: "dendrite-toolbar" });
     const btn = (icon, title, fn) => {
@@ -7798,7 +7923,7 @@ var DendriteView = class extends ItemView {
     ed.ta = editor.ta || null;
     this.editing = ed;
     this.caretAt = null;
-    const card = this.cardEls.get(id);
+    const card = this.fillFrame(id);
     if (card && editor.kind === "float") {
       this.mountFloat(card, editor);
     } else if (card) {
@@ -9014,7 +9139,10 @@ var DendriteView = class extends ItemView {
     }
     this.invalidate(id);
     const card = this.cardEls.get(id);
-    if (card) {
+    if (card && card.hasClass("is-slot")) {
+      if (this.heights) this.heights.delete(id);
+      card.style.height = `${this.slotHeight(id)}px`;
+    } else if (card) {
       card.addClass("is-pending");
       this.renderCard(id);
     }
@@ -9620,20 +9748,22 @@ var DendriteView = class extends ItemView {
   }
   /** Show each section card's number, updated in place. */
   updateNumbers() {
-    const nums = this.numbers();
-    for (const [id, card] of this.cardEls) {
-      let badge = card.querySelector(":scope > .dendrite-num");
-      const num = nums.get(id);
-      if (!num) {
-        if (badge) badge.remove();
-        continue;
-      }
-      if (!badge) {
-        badge = createDiv({ cls: "dendrite-num" });
-        card.prepend(badge);
-      }
-      badge.setText(num);
+    this.nums = this.numbers();
+    for (const [id, card] of this.liveCards()) this.numberCard(id, card);
+  }
+  /** A card's section number, from the last updateNumbers. */
+  numberCard(id, card) {
+    let badge = card.querySelector(":scope > .dendrite-num");
+    const num = this.nums && this.nums.get(id);
+    if (!num) {
+      if (badge) badge.remove();
+      return;
     }
+    if (!badge) {
+      badge = createDiv({ cls: "dendrite-num" });
+      card.prepend(badge);
+    }
+    badge.setText(num);
   }
   scheduleCounts() {
     clearTimeout(this.countTimer);
@@ -10424,6 +10554,59 @@ var DendriteView = class extends ItemView {
       this.updateStatuses();
     }, 0);
   }
+  /** A card's status chips, flag and stack edges, from statusInfo. */
+  statusCard(id, card) {
+    if (!this.statusInfo) return;
+    const old = card.querySelector(":scope > .dendrite-status");
+    if (old) old.remove();
+    card.removeClass("is-flagged");
+    const info = this.statusInfo.get(id) || { prints: false, own: null, below: 0 };
+    const chip = createDiv({ cls: "dendrite-status" });
+    const show = (status, text) => {
+      const s = chip.createSpan({ cls: `dendrite-status-chip is-${status}`, text });
+      const colour = this.plugin.statusColour(status);
+      if (colour) s.style.setProperty("--dendrite-chip", colour);
+      return s;
+    };
+    if (this.reverted.has(id)) {
+      const held = this.held.has(id);
+      const s = show("reverted", held ? "typing kept \u27F2" : "older copy \u27F2");
+      s.setAttr("aria-label", held ? "Changed outside Dendrite while you were typing in it. Click to compare and choose; your typing is not written until you do" : "Changed outside Dendrite to text this card had before. Click to compare and choose; nothing is written until you do");
+      s.onclick = (e) => {
+        e.stopPropagation();
+        this.reviewVersion(id);
+      };
+    }
+    if (this.changed && this.changed.ids.has(id)) {
+      const s = show("changed", "changed since " + review.shortDate(this.changed.date));
+      s.setAttr("aria-label", "What this card prints changed since it was sent to " + (this.changed.to || "review"));
+    }
+    if (info.own === "done") show("done", "done \u2713");
+    else if (info.own === "revise") show("revise", "revise \u2691");
+    else if (info.own === "unsplit") show("unsplit", "unsplit");
+    if (!info.prints && info.below > 0) {
+      show("revise", `${info.below} to revise \u2691`);
+    } else if (!info.prints && info.derived === "done" && !info.own) {
+      show("done", "done \u2713");
+    }
+    const stack = this.stackOf(id).length;
+    card.toggleClass("has-stack", stack > 0);
+    card.toggleClass("has-stacks", stack > 1);
+    card.toggleClass("is-fanned", stack > 0 && this.fannedId === id);
+    if (stack) {
+      const s = show("stack", `${stack + 1} versions`);
+      s.dataset.stack = id;
+      s.toggleClass("is-on", this.fannedId === id);
+      s.setAttr("aria-label", this.fannedId === id ? "Click to fold the old versions away" : "Earlier versions of this card, kept and not printed. Click to fan them out to its right");
+      s.onclick = (e) => {
+        e.stopPropagation();
+        return this.toggleFan(id);
+      };
+    }
+    if (core.isFlag(info.own)) card.addClass("is-flagged");
+    if (!chip.childElementCount) return;
+    card.appendChild(chip);
+  }
   updateStatuses() {
     if (!this.board) return;
     const open = this.openComments || /* @__PURE__ */ new Map();
@@ -10434,57 +10617,7 @@ var DendriteView = class extends ItemView {
       (id) => open.get(id) || 0
     );
     this.statusInfo = report.cards;
-    for (const [id, card] of this.cardEls) {
-      const old = card.querySelector(":scope > .dendrite-status");
-      if (old) old.remove();
-      card.removeClass("is-flagged");
-      const info = report.cards.get(id) || { prints: false, own: null, below: 0 };
-      const chip = createDiv({ cls: "dendrite-status" });
-      const show = (status, text) => {
-        const s = chip.createSpan({ cls: `dendrite-status-chip is-${status}`, text });
-        const colour = this.plugin.statusColour(status);
-        if (colour) s.style.setProperty("--dendrite-chip", colour);
-        return s;
-      };
-      if (this.reverted.has(id)) {
-        const held = this.held.has(id);
-        const s = show("reverted", held ? "typing kept \u27F2" : "older copy \u27F2");
-        s.setAttr("aria-label", held ? "Changed outside Dendrite while you were typing in it. Click to compare and choose; your typing is not written until you do" : "Changed outside Dendrite to text this card had before. Click to compare and choose; nothing is written until you do");
-        s.onclick = (e) => {
-          e.stopPropagation();
-          this.reviewVersion(id);
-        };
-      }
-      if (this.changed && this.changed.ids.has(id)) {
-        const s = show("changed", "changed since " + review.shortDate(this.changed.date));
-        s.setAttr("aria-label", "What this card prints changed since it was sent to " + (this.changed.to || "review"));
-      }
-      if (info.own === "done") show("done", "done \u2713");
-      else if (info.own === "revise") show("revise", "revise \u2691");
-      else if (info.own === "unsplit") show("unsplit", "unsplit");
-      if (!info.prints && info.below > 0) {
-        show("revise", `${info.below} to revise \u2691`);
-      } else if (!info.prints && info.derived === "done" && !info.own) {
-        show("done", "done \u2713");
-      }
-      const stack = this.stackOf(id).length;
-      card.toggleClass("has-stack", stack > 0);
-      card.toggleClass("has-stacks", stack > 1);
-      card.toggleClass("is-fanned", stack > 0 && this.fannedId === id);
-      if (stack) {
-        const s = show("stack", `${stack + 1} versions`);
-        s.dataset.stack = id;
-        s.toggleClass("is-on", this.fannedId === id);
-        s.setAttr("aria-label", this.fannedId === id ? "Click to fold the old versions away" : "Earlier versions of this card, kept and not printed. Click to fan them out to its right");
-        s.onclick = (e) => {
-          e.stopPropagation();
-          return this.toggleFan(id);
-        };
-      }
-      if (core.isFlag(info.own)) card.addClass("is-flagged");
-      if (!chip.childElementCount) continue;
-      card.appendChild(chip);
-    }
+    for (const [id, card] of this.liveCards()) this.statusCard(id, card);
     this.stackOpenReady = this.markOpenStacks();
     if (this.statusEl) {
       const t = report.tally;
@@ -10597,44 +10730,46 @@ var DendriteView = class extends ItemView {
       this.render();
       return;
     }
-    for (const [id, card] of this.cardEls) {
-      const node = this.byId.get(id);
-      if (!node) continue;
-      let out = false;
-      for (let n = node; n && n.id; n = n.parent) {
-        if (core.roleFor(n, (x) => this.printRoleOf(x)) === "notes") {
-          out = true;
-          break;
-        }
+    for (const [id, card] of this.liveCards()) this.roleCard(id, card);
+  }
+  /** A card's role: its classes, and its icon in the corner. */
+  roleCard(id, card) {
+    const node = this.byId.get(id);
+    if (!node) return;
+    let out = false;
+    for (let n = node; n && n.id; n = n.parent) {
+      if (core.roleFor(n, (x) => this.printRoleOf(x)) === "notes") {
+        out = true;
+        break;
       }
-      card.toggleClass("is-left-out", out);
-      card.toggleClass(
-        "is-heading-only",
-        this.roleOf(id) === "section"
-      );
-      card.toggleClass("is-prints-heading", !out && core.roleFor(node, (x) => this.printRoleOf(x)) === "section");
-      const set = this.roleOf(id);
-      let role = out ? "notes" : core.roleFor(node, (x) => this.printRoleOf(x));
-      const auto = out ? set !== "notes" : !set;
-      const kind = this.kindOf(id);
-      if (kind && role === "prose") role = kind;
-      const grip = card.querySelector(":scope > .dendrite-grip");
-      if (grip && grip.dataset.role !== role) {
-        grip.dataset.role = role;
-        const icon = grip.querySelector(".dendrite-role-icon");
-        icon.empty();
-        setIcon(icon, (ROLE_ITEMS.find((r) => r[0] === role) || KIND_ITEMS.find((r) => r[0] === role))[2]);
-      }
-      if (grip) {
-        grip.toggleClass("is-auto", auto);
-        const what = (ROLE_ITEMS.find((r) => r[0] === role) || KIND_ITEMS.find((r) => r[0] === role))[1];
-        grip.setAttr("aria-label", what + (auto && !kind ? " (automatic)" : "") + ". Click to change; drag to move the card.");
-      }
-      card.toggleClass(
-        "is-scaffolding",
-        this.roleOf(id) === "scaffolding"
-      );
     }
+    card.toggleClass("is-left-out", out);
+    card.toggleClass(
+      "is-heading-only",
+      this.roleOf(id) === "section"
+    );
+    card.toggleClass("is-prints-heading", !out && core.roleFor(node, (x) => this.printRoleOf(x)) === "section");
+    const set = this.roleOf(id);
+    let role = out ? "notes" : core.roleFor(node, (x) => this.printRoleOf(x));
+    const auto = out ? set !== "notes" : !set;
+    const kind = this.kindOf(id);
+    if (kind && role === "prose") role = kind;
+    const grip = card.querySelector(":scope > .dendrite-grip");
+    if (grip && grip.dataset.role !== role) {
+      grip.dataset.role = role;
+      const icon = grip.querySelector(".dendrite-role-icon");
+      icon.empty();
+      setIcon(icon, (ROLE_ITEMS.find((r) => r[0] === role) || KIND_ITEMS.find((r) => r[0] === role))[2]);
+    }
+    if (grip) {
+      grip.toggleClass("is-auto", auto);
+      const what = (ROLE_ITEMS.find((r) => r[0] === role) || KIND_ITEMS.find((r) => r[0] === role))[1];
+      grip.setAttr("aria-label", what + (auto && !kind ? " (automatic)" : "") + ". Click to change; drag to move the card.");
+    }
+    card.toggleClass(
+      "is-scaffolding",
+      this.roleOf(id) === "scaffolding"
+    );
   }
   /** A card's quota, with whether the call requires it. */
   quotaOf(id) {
@@ -10659,7 +10794,9 @@ var DendriteView = class extends ItemView {
       (n) => this.quotaOf(n.id)
     );
     if (!any) {
-      for (const [id, card] of this.cardEls) this.fillQuota(card, id);
+      for (const [id, card] of this.liveCards()) {
+        this.fillQuota(card, id);
+      }
       return;
     }
     const bodies = await this.loadBodies();
@@ -10688,7 +10825,7 @@ var DendriteView = class extends ItemView {
       }
     );
     this.quotaReports = reports;
-    for (const [id, card] of this.cardEls) this.fillQuota(card, id);
+    for (const [id, card] of this.liveCards()) this.fillQuota(card, id);
     if (!this.totalEl) return;
     const top = reports.get(null);
     if (top) {
@@ -11199,7 +11336,7 @@ var DendriteView = class extends ItemView {
    */
   paintFind() {
     const f = this.find;
-    for (const [id, card] of this.cardEls) {
+    for (const [id, card] of this.liveCards()) {
       const tag = card.querySelector(".dendrite-id");
       if (!tag) continue;
       const m = f && f.matches.find((x) => x.card && x.id === id);
@@ -13688,7 +13825,10 @@ timing.wrap(DendriteView.prototype, "board", [
   "animateOffsets",
   "newEditor",
   "focusEditor",
-  "renderToolbar"
+  "renderToolbar",
+  "fillFrame",
+  "emptyFar",
+  "nextToDraw"
 ]);
 timing.wrap(DendritePreview.prototype, "preview", [
   "refresh",
@@ -13784,7 +13924,7 @@ module.exports = class DendritePlugin extends Plugin {
       out.nodes += l.view.containerEl.getElementsByTagName("*").length;
       for (const el of (l.view.cardEls || /* @__PURE__ */ new Map()).values()) {
         out.cards[1]++;
-        if (!el.hasClass("is-pending")) out.cards[0]++;
+        if (!el.hasClass("is-pending") && !el.hasClass("is-slot")) out.cards[0]++;
       }
     }
     for (const l of this.app.workspace.getLeavesOfType(PREVIEW)) {
