@@ -1741,6 +1741,7 @@ class DendriteView extends ItemView {
     }
 
     onResize(entries = []) {
+        this.anchorColumns(entries);
         // The cards drawn tell their heights for nothing, as they resize:
         // kept for their slots, and learnt from for those never drawn.
         for (const e of entries) {
@@ -1761,6 +1762,37 @@ class DendriteView extends ItemView {
         // for each card filled as a column arrived at a card far away.
         if (!this.scrolledByHand) this.centre(!!this.anim);
         if (this.nativeScroll || this.scrolledByHand) this.drawFlow();
+    }
+
+    /**
+     * Each column kept where it shows when a card beginning above its view
+     * changes height, as when one is filled or drawn: the columns move by
+     * transform, outside the browser's own scroll anchoring, so a column
+     * scrolled by hand jumped as the cards above it were drawn. The column
+     * moves by the change, here before painting. A phone's columns scroll
+     * natively and are anchored by the browser.
+     */
+    anchorColumns(entries) {
+        if (this.nativeScroll) return;
+        this.seenHeights = this.seenHeights || new WeakMap();
+        const shift = new Map();
+        for (const e of entries) {
+            const card = e.target;
+            const size = e.borderBoxSize && e.borderBoxSize[0];
+            if (!size || !card.classList.contains('dendrite-card')) continue;
+            const was = this.seenHeights.get(card);
+            this.seenHeights.set(card, size.blockSize);
+            if (was === undefined || was === size.blockSize) continue;
+            const col = card.closest('.dendrite-col');
+            if (!col) continue;
+            const d = Number(col.dataset.depth);
+            if (card.offsetTop < this.colOffset(d)) {
+                shift.set(d, (shift.get(d) || 0) + size.blockSize - was);
+            }
+        }
+        for (const [d, by] of shift) {
+            this.setColOffset(d, this.colOffset(d) + by);
+        }
     }
 
     scheduleFlow() {

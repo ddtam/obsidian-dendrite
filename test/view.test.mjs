@@ -812,6 +812,31 @@ test('a card changing height re-centres the board in the same frame, ' +
     assert.equal(centred, 1, 'at once, not on the next frame');
 });
 
+test('a card above a column\'s view changing height moves the column ' +
+     'with it, so what is on screen stays put', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    const col = view.board.querySelector('.dendrite-col');
+    Object.defineProperty(col, 'clientHeight', { get: () => 500 });
+    Object.defineProperty(view.colInners[0], 'scrollHeight',
+                          { get: () => 20000 });
+    const a = view.cardEls.get('G-aaaaa');
+    const b = view.cardEls.get('G-bbbbb');
+    Object.defineProperty(a, 'offsetTop', { get: () => 200 });
+    Object.defineProperty(b, 'offsetTop', { get: () => 3000 });
+    const size = (el, h) => ({ target: el, borderBoxSize: [{ blockSize: h }] });
+    // Scrolled by hand to 1000 px down: A is above the view, B below.
+    view.resizer.cb([size(a, 100), size(b, 100)]);
+    view.onWheel({ target: col, deltaY: 1000, deltaMode: 0,
+                   preventDefault() {} });
+    assert.equal(view.colOffset(0), 1000);
+    view.resizer.cb([size(a, 300)]);
+    assert.equal(view.colOffset(0), 1200, 'moved with A, 200 px taller');
+    view.resizer.cb([size(b, 50)]);
+    assert.equal(view.colOffset(0), 1200, 'B is below the view');
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
