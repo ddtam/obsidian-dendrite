@@ -5372,7 +5372,8 @@ test('a colour picked in Reviewers… shows at once, though the index ' +
     mc.getFileCache = real;
     const fm = real(index).frontmatter.dendrite_reviewer_colours;
     assert.ok(fm.includes('Derek Tam: orange'));
-    assert.ok(fm.includes('Me: orange'), 'Me with you');
+    assert.ok(!fm.some((x) => /^Me:/.test(x)),
+              'Me has no colour of its own: it takes yours');
     view.recolour();
     await tick(30);
     const reply = view.cardEls.get('G-aaaaa')

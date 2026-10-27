@@ -5808,11 +5808,6 @@ class DendriteView extends ItemView {
                 .getFileCache(this.file)?.frontmatter) || {};
             this.reviewerMap = review.reviewerColours(
                 fm.dendrite_reviewer_colours);
-            // Replies signed Me are yours, in your colour.
-            const me = this.plugin.settings.replyName || 'Me';
-            if (me !== 'Me' && this.reviewerMap.has(me)) {
-                this.reviewerMap.set('Me', this.reviewerMap.get(me));
-            }
         }
         return this.reviewerMap;
     }
@@ -5827,7 +5822,21 @@ class DendriteView extends ItemView {
 
     colourOf() {
         const map = this.reviewers();
-        return (who) => map.get(who) || null;
+        // Replies signed Me are yours, in your colour, which is kept under
+        // the name you sign with now.
+        const me = this.plugin.settings.replyName || 'Me';
+        const mine = this.selfNames();
+        return (who) => (mine.has(who) && map.has(me) ? map.get(me) :
+            map.get(who) || null);
+    }
+
+    /**
+     * Your names other than the one you sign with now: Me, once you sign
+     * with your name, which is given no colour of its own.
+     */
+    otherSelves() {
+        const me = this.plugin.settings.replyName || 'Me';
+        return [...this.selfNames()].filter((x) => x !== me);
     }
 
     /** A reviewer name as the person it is linked to, or as it is. */
@@ -5873,7 +5882,9 @@ class DendriteView extends ItemView {
         for (const n of core.allNodes(this.root)) {
             names.push(...((this.reviewersOf || new Map()).get(n.id) || []));
         }
-        const { map, added } = review.assignColours(this.reviewers(), names);
+        const others = this.otherSelves();
+        const { map, added } = review.assignColours(this.reviewers(),
+            names.filter((x) => !others.includes(x)));
         if (added) await this.saveReviewers(map);
     }
 
@@ -7581,6 +7592,11 @@ class DendritePreview extends ItemView {
         const fm = this.app.metadataCache.getFileCache(this.file)
             ?.frontmatter || {};
         this.colours = review.reviewerColours(fm.dendrite_reviewer_colours);
+        // Replies signed Me in your colour, kept under the name you sign.
+        const signed = (this.plugin.settings || {}).replyName;
+        if (signed && signed !== 'Me' && this.colours.has(signed)) {
+            this.colours.set('Me', this.colours.get(signed));
+        }
         this.names = review.reviewerNames(fm.dendrite_reviewer_colours);
         // You, as you are shown, where your replies are.
         const s = this.plugin.settings || {};
@@ -9268,8 +9284,11 @@ class ReviewersModal extends Modal {
             }
         }
         for (const e of kept) if (!order.includes(e.name)) order.push(e.name);
-        const all = order.map((name) => kept.find((e) => e.name === name) ||
-            { name, note: null, colour: map.get(name) || 'blue' });
+        // Me, once you sign with your name, is you, with no entry of its own.
+        const others = view.otherSelves();
+        const all = order.filter((name) => !others.includes(name))
+            .map((name) => kept.find((e) => e.name === name) ||
+                { name, note: null, colour: map.get(name) || 'blue' });
         // One person's names together, where the first of them comes.
         const out = [];
         for (const e of all) {
@@ -9440,12 +9459,10 @@ class ReviewersModal extends Modal {
             entries.find((e) => mine.has(e.name));
         const { mid } = this.row('dendrite-reviewer-self', 'You',
             own ? own.colour : 'blue', async (c) => {
-                // Every name of yours in the colour: Me as well.
                 const now = this.entries();
-                for (const e of now) if (mine.has(e.name)) e.colour = c;
-                if (!now.some((e) => e.name === me)) {
-                    now.push({ name: me, note: null, colour: c });
-                }
+                const e = now.find((x) => x.name === me);
+                if (e) e.colour = c;
+                else now.push({ name: me, note: null, colour: c });
                 await this.save(now);
             });
         const field = (cls, label, value, placeholder, set) => {
