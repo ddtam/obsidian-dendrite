@@ -710,6 +710,53 @@ test('a card\'s note is resolved once, not on every pass over the ' +
     assert.equal(resolved, 2, 'resolved again after a note was created');
 });
 
+test('a long move jumps to within a screen of its place and slides the ' +
+     'rest, so the cards it would pass are not drawn', async () => {
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': 'A' });
+    // A column 500 px high over 20,000 px of cards, at the top.
+    const col = view.board.querySelector('.dendrite-col');
+    Object.defineProperty(col, 'clientHeight', { get: () => 500 });
+    Object.defineProperty(view.colInners[0], 'scrollHeight',
+                          { get: () => 20000 });
+    Object.defineProperty(view.board, 'clientHeight', { get: () => 500 });
+    view.setColOffset(0, 0);
+    const seen = [];
+    const set = view.setColOffset.bind(view);
+    view.setColOffset = (d, y) => { seen.push(Math.round(y)); set(d, y); };
+    view.animateOffsets([10000], true);
+    await tick(400);
+    assert.equal(view.colOffset(0), 10000, 'it arrives');
+    assert.ok(seen.every((y) => y >= 9500),
+              `never between: ${seen.slice(0, 3).join(', ')}`);
+    // A short move slides all the way, as before.
+    seen.length = 0;
+    view.animateOffsets([10300], true);
+    await tick(400);
+    assert.equal(view.colOffset(0), 10300);
+    assert.ok(seen.some((y) => y < 10300 && y > 10000), 'slid');
+});
+
+test('a burst of notes changed, as a sync brings, updates the board ' +
+     'once, not once a note', async () => {
+    const ids = ['G-aaaaa', 'G-bbbbb', 'G-ccccc', 'G-ddddd'];
+    const { app, view } = await open(
+        '---\ndendrite_prefix: G\n---\n' +
+        ids.map((id) => `- [[${id}|x]]`).join('\n') + '\n',
+        Object.fromEntries(ids.map((id) => [id, 'Text.'])));
+    await tick(20);
+    let statuses = 0;
+    const real = view.updateStatuses.bind(view);
+    view.updateStatuses = () => { statuses++; return real(); };
+    for (const id of ids) {
+        app.metadataCache.trigger('changed',
+            app.vault.getAbstractFileByPath(cardPath(id)));
+    }
+    await tick(50);
+    assert.equal(statuses, 1);
+});
+
 test('idle drawing waits while the board is moving and just after a key',
      async () => {
     globalThis.inView = (el) => el.dataset && el.dataset.id === 'G-aaaaa';
@@ -1690,13 +1737,27 @@ test('the preview prints by role, follows edits, and links to the board',
     b.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
     b.dispatchEvent(new h.window.MouseEvent('dblclick', { bubbles: true }));
     assert.deepEqual(focused, [['G-bbbbb', false], ['G-bbbbb', true]]);
+    // A view 400 px high; C 100 px high, 600 px down.
     const scrolled = [];
-    view.blocks.get('G-ccccc').el.scrollIntoView = (o) => scrolled.push(o);
+    const c = view.blocks.get('G-ccccc').el;
+    Object.defineProperty(view.doc, 'clientHeight', { get: () => 400 });
+    let down = 600;
+    Object.defineProperty(c, 'offsetTop', { get: () => down });
+    Object.defineProperty(c, 'offsetHeight', { get: () => 100 });
+    view.doc.scrollTo = (o) => scrolled.push(o);
     view.highlight('G-ccccc');
-    assert.ok(view.blocks.get('G-ccccc').el.hasClass('is-active'));
-    assert.equal(scrolled[0].block, 'center',
-                 'the card selected is brought to the middle');
+    assert.ok(c.hasClass('is-active'));
+    assert.deepEqual(scrolled, [{ top: 450, behavior: 'smooth' }],
+                     'the card selected is brought to the middle');
     assert.ok(!b.hasClass('is-active'));
+    // Far down, it jumps to a screen short of it and slides the rest, so
+    // the parts between are not drawn on the way.
+    scrolled.length = 0;
+    down = 20000;
+    view.doc.scrollTop = 0;
+    view.highlight('G-ccccc');
+    assert.equal(view.doc.scrollTop, 19850 - 400);
+    assert.deepEqual(scrolled, [{ top: 19850, behavior: 'smooth' }]);
 });
 
 test('a preview whose parts are never seen scrolling into view draws ' +

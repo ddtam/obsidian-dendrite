@@ -5399,6 +5399,7 @@ var SLOT_PADDING = 28;
 var SLOT_CHAR = 8;
 var SLOT_LINE = 24;
 var HEIGHT_SAMPLES = 8;
+var LONG_MOVE = 1.5;
 var EMPTY_REACH = 5;
 function idleDrawer(winOf, next, busy) {
   let handle = null;
@@ -6766,6 +6767,14 @@ var DendriteView = class extends ItemView {
     if (col) {
       const left = col.offsetLeft - (this.board.clientWidth - col.offsetWidth) / 2;
       this.tellCentred(left);
+      const wide = this.board.clientWidth;
+      const by = left - this.board.scrollLeft;
+      if (smooth && wide && Math.abs(by) > LONG_MOVE * wide) {
+        this.board.scrollTo({
+          left: left - Math.sign(by) * wide,
+          behavior: "auto"
+        });
+      }
       this.board.scrollTo({ left, behavior });
     }
     this.drawWhenIdle();
@@ -6940,6 +6949,13 @@ var DendriteView = class extends ItemView {
     if (this.anim) this.pageWin().cancelAnimationFrame(this.anim);
     this.anim = null;
     const from = targets.map((_, d) => this.colOffset(d));
+    const screen = this.board.clientHeight;
+    targets.forEach((y, d) => {
+      if (!smooth || y === null || !screen) return;
+      if (Math.abs(y - from[d]) > LONG_MOVE * screen) {
+        from[d] = y - Math.sign(y - from[d]) * screen;
+      }
+    });
     if (!smooth) {
       targets.forEach((y, d) => {
         if (y !== null) this.setColOffset(d, y);
@@ -9282,15 +9298,29 @@ var DendriteView = class extends ItemView {
       return;
     }
     if (!this.byId.has(f.basename)) return;
-    this.updateNumbers();
-    this.updateRoles();
-    this.updateStatuses();
-    this.scheduleCounts();
+    this.scheduleCardMeta();
     if (this.editing && this.editing.id === f.basename) return;
     const body = core.splitFrontmatter(
       await this.app.vault.cachedRead(f)
     ).body;
     this.noteLabel(f.basename, body);
+  }
+  /**
+   * Numbers, roles, statuses and counts brought up to date once, after
+   * the cards' notes changed: each is worked out over the whole
+   * manuscript, and Obsidian indexing the 2,900 notes of the deep test
+   * manuscript ran them about 180 times in 10 s, 2 to 3 s of work.
+   */
+  scheduleCardMeta() {
+    if (this.metaFrame) return;
+    this.metaFrame = this.pageWin().requestAnimationFrame(() => {
+      this.metaFrame = null;
+      if (!this.board) return;
+      this.updateNumbers();
+      this.updateRoles();
+      this.updateStatuses();
+      this.scheduleCounts();
+    });
   }
   // ---- versions going back ---------------------------------------------
   historyKey(id, path = this.file.path) {
@@ -12415,10 +12445,7 @@ var DendritePreview = class extends ItemView {
     if (!doc || !knots || !doc.clientHeight || !doc.scrollTo) {
       return false;
     }
-    doc.scrollTo({
-      top: Math.max(0, core.scrollFor(t - y, knots)),
-      behavior: "smooth"
-    });
+    this.glideTo(Math.max(0, core.scrollFor(t - y, knots)));
     return true;
   }
   /**
@@ -12613,13 +12640,24 @@ var DendritePreview = class extends ItemView {
       const tall = view && b.el.offsetHeight > view * 0.8;
       const y = tall ? 16 : (view - b.el.offsetHeight) / 2;
       const done = this.showComments && this.scrollToText(b.el.offsetTop, y);
-      if (!done && b.el.scrollIntoView) {
-        b.el.scrollIntoView({
-          block: tall ? "start" : "center",
-          behavior: "smooth"
-        });
+      if (!done && this.doc && this.doc.scrollTo) {
+        this.glideTo(Math.max(0, b.el.offsetTop - y));
       }
     }
+  }
+  /**
+   * Scroll the text to `top`, smoothly. From far away it jumps to within
+   * a screen first and slides the rest: a long smooth scroll brought
+   * every part it passed into view, each drawn only to leave it.
+   */
+  glideTo(top) {
+    const doc = this.doc;
+    const screen = doc.clientHeight;
+    const by = top - doc.scrollTop;
+    if (screen && Math.abs(by) > LONG_MOVE * screen) {
+      doc.scrollTop = top - Math.sign(by) * screen;
+    }
+    doc.scrollTo({ top, behavior: "smooth" });
   }
 };
 function textProp(v) {

@@ -345,6 +345,12 @@ const SLOT_LINE = 24;
 /** How many drawn cards' heights are measured before estimates use them. */
 const HEIGHT_SAMPLES = 8;
 
+/**
+ * How many screens a move must cover before it jumps to within one of its
+ * place and slides only the rest.
+ */
+const LONG_MOVE = 1.5;
+
 /** How many screens from the view a drawn card is emptied to its slot. */
 const EMPTY_REACH = 5;
 
@@ -1888,6 +1894,13 @@ class DendriteView extends ItemView {
             const left = col.offsetLeft -
                 (this.board.clientWidth - col.offsetWidth) / 2;
             this.tellCentred(left);
+            // Far to go sideways, the same: a jump, then a screen's slide.
+            const wide = this.board.clientWidth;
+            const by = left - this.board.scrollLeft;
+            if (smooth && wide && Math.abs(by) > LONG_MOVE * wide) {
+                this.board.scrollTo({ left: left - Math.sign(by) * wide,
+                                      behavior: 'auto' });
+            }
             this.board.scrollTo({ left, behavior });
         }
         // What is around the new place is drawn next.
@@ -2066,6 +2079,16 @@ class DendriteView extends ItemView {
         if (this.anim) this.pageWin().cancelAnimationFrame(this.anim);
         this.anim = null;
         const from = targets.map((_, d) => this.colOffset(d));
+        // A column with far to go jumps to within a screen of its place
+        // and slides the rest: sliding the whole way brought every card
+        // it passed into view, each drawn only to leave it again.
+        const screen = this.board.clientHeight;
+        targets.forEach((y, d) => {
+            if (!smooth || y === null || !screen) return;
+            if (Math.abs(y - from[d]) > LONG_MOVE * screen) {
+                from[d] = y - Math.sign(y - from[d]) * screen;
+            }
+        });
         if (!smooth) {
             targets.forEach((y, d) => {
                 if (y !== null) this.setColOffset(d, y);
@@ -4534,11 +4557,9 @@ class DendriteView extends ItemView {
         }
         if (!this.byId.has(f.basename)) return;
         // A heading added or removed changes the numbering, and a limit
-        // or role set in the card's properties changes what is counted.
-        this.updateNumbers();
-        this.updateRoles();
-        this.updateStatuses();
-        this.scheduleCounts();
+        // or role set in the card's properties changes what is counted;
+        // once for a burst of notes, as a sync or an index brings.
+        this.scheduleCardMeta();
         // A label can come from aliases, which only the metadata cache
         // knows once parsed, so labels follow here rather than on modify;
         // in memory only, since the change may have come from a sync.
@@ -4546,6 +4567,24 @@ class DendriteView extends ItemView {
         const body = core.splitFrontmatter(
             await this.app.vault.cachedRead(f)).body;
         this.noteLabel(f.basename, body);
+    }
+
+    /**
+     * Numbers, roles, statuses and counts brought up to date once, after
+     * the cards' notes changed: each is worked out over the whole
+     * manuscript, and Obsidian indexing the 2,900 notes of the deep test
+     * manuscript ran them about 180 times in 10 s, 2 to 3 s of work.
+     */
+    scheduleCardMeta() {
+        if (this.metaFrame) return;
+        this.metaFrame = this.pageWin().requestAnimationFrame(() => {
+            this.metaFrame = null;
+            if (!this.board) return;
+            this.updateNumbers();
+            this.updateRoles();
+            this.updateStatuses();
+            this.scheduleCounts();
+        });
     }
 
     // ---- versions going back ---------------------------------------------
@@ -7822,8 +7861,7 @@ class DendritePreview extends ItemView {
         if (!doc || !knots || !doc.clientHeight || !doc.scrollTo) {
             return false;
         }
-        doc.scrollTo({ top: Math.max(0, core.scrollFor(t - y, knots)),
-                       behavior: 'smooth' });
+        this.glideTo(Math.max(0, core.scrollFor(t - y, knots)));
         return true;
     }
 
@@ -8040,11 +8078,25 @@ class DendritePreview extends ItemView {
             const y = tall ? 16 : (view - b.el.offsetHeight) / 2;
             const done = this.showComments &&
                 this.scrollToText(b.el.offsetTop, y);
-            if (!done && b.el.scrollIntoView) {
-                b.el.scrollIntoView({ block: tall ? 'start' : 'center',
-                                      behavior: 'smooth' });
+            if (!done && this.doc && this.doc.scrollTo) {
+                this.glideTo(Math.max(0, b.el.offsetTop - y));
             }
         }
+    }
+
+    /**
+     * Scroll the text to `top`, smoothly. From far away it jumps to within
+     * a screen first and slides the rest: a long smooth scroll brought
+     * every part it passed into view, each drawn only to leave it.
+     */
+    glideTo(top) {
+        const doc = this.doc;
+        const screen = doc.clientHeight;
+        const by = top - doc.scrollTop;
+        if (screen && Math.abs(by) > LONG_MOVE * screen) {
+            doc.scrollTop = top - Math.sign(by) * screen;
+        }
+        doc.scrollTo({ top, behavior: 'smooth' });
     }
 }
 
