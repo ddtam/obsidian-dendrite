@@ -1240,8 +1240,11 @@ test('card status: chips, tally, keys, and status moving with text',
     assert.equal(plugin.statusColour('done'), 'var(--color-green)');
     assert.equal(plugin.statusColour('revise'), 'hsl(10, 80%, 50%)');
     assert.equal(plugin.statusColour('draft'), null);
+    // None set: no colour, so a flag is drawn in the neutral default
+    // rather than in what could be taken for a reviewer's colour.
     plugin.app = { plugins: { plugins: {} } };
-    assert.equal(plugin.statusColour('unsplit'), 'var(--color-orange)');
+    assert.equal(plugin.statusColour('unsplit'), null);
+    assert.equal(plugin.statusColour('revise'), null);
 });
 
 test('merging keeps the less mature status', async () => {
@@ -2402,11 +2405,11 @@ test('review comments go into their cards as one undo step, set them to ' +
     view.active = 'G-bbbbb';
     await view.addReview(rows, view.byId.get('G-bbbbb'));
     assert.equal(text(cardPath('G-aaaaa')), 'The cohort is composed of ' +
-        '==longitudinally paired samples==%%[!review] Aly Karsan, ' +
+        '%%{1%%longitudinally paired samples%%}1 [!review] Aly Karsan, ' +
         '2026-10-23: How many?%%.');
     assert.equal(text(cardPath('G-bbbbb')), 'Samples were collected ' +
-        '==between 2014 and 2023==%%[!suggest] Aly Karsan, 2026-10-23: ' +
-        'from 2014 to 2023%% under the protocol.%%[!review] R, ' +
+        '%%{1%%between 2014 and 2023%%}1 [!suggest] Aly Karsan, ' +
+        '2026-10-23: from 2014 to 2023%% under the protocol.%%[!review] R, ' +
         '2026-10-24: On “gone entirely from the text”: Not in any card.%%',
         'one never found goes on the selected card, quoted');
     assert.match(read(cardPath('G-aaaaa')), /dendrite_status: revise/);
@@ -2433,7 +2436,8 @@ test('review comments go into their cards as one undo step, set them to ' +
     assert.equal(text(cardPath('G-bbbbb')), 'Samples were collected from ' +
         '2014 to 2023 under the protocol.');
     await view.doUndo();
-    assert.match(text(cardPath('G-bbbbb')), /==between 2014 and 2023==/,
+    assert.match(text(cardPath('G-bbbbb')),
+                 /%%\{1%%between 2014 and 2023%%\}1 /,
                  'applying is undone in one step');
 });
 
@@ -2644,7 +2648,8 @@ test('a JSON review list opens the same dialog, each comment found in the ' +
     assert.equal(m.rows[1].at, null, 'in two cards, naming neither');
     await view.addReview(m.rows.filter((x) => x.use), null);
     assert.equal(text(cardPath('G-bbbbb')), 'Each patient gave ' +
-        '==paired samples==%%[!review] Claude, 2026-10-23: How many?%%.');
+        '%%{1%%paired samples%%}1 [!review] Claude, 2026-10-23: How ' +
+        'many?%%.');
     assert.equal(text(cardPath('G-aaaaa')), A);
     assert.match(read(cardPath('G-bbbbb')), /dendrite_status: revise/);
     await view.doUndo();
@@ -2709,7 +2714,7 @@ test('a review submitted for a manuscript is queued with where its ' +
     await view.openInbox(view.inbox[0]);
     await h.obsidian.lastModal.contentEl.querySelector('.mod-cta').onclick();
     assert.match(text(cardPath('G-aaaaa')),
-                 /==paired samples==%%\[!review\] Claude/);
+                 /%%\{1%%paired samples%%\}1 \[!review\] Claude/);
     assert.deepEqual(chips(), []);
     assert.deepEqual((await p.reviewStatus(out.json.id)).json.state,
                      'added');
@@ -3033,9 +3038,9 @@ test('a manuscript linked to a Google Doc pulls its comments and ' +
     assert.equal(m.rows.filter((r) => r.use).length, 2);
     await m.contentEl.querySelector('.mod-cta').onclick();
     assert.equal(text(cardPath('G-aaaaa')), 'Samples were collected ' +
-        '==between 2014 and 2023==%%[!suggest] Google Docs suggestion, ' +
-        '2026-10-24: from 2014 to 2023%% under ==the protocol==' +
-        '%%[!review] Aly Karsan, 2026-10-24: Which protocol?%%.');
+        '%%{2%%between 2014 and 2023%%}2 [!suggest] Google Docs ' +
+        'suggestion, 2026-10-24: from 2014 to 2023%% under %%{1%%the ' +
+        'protocol%%}1 [!review] Aly Karsan, 2026-10-24: Which protocol?%%.');
     // Pulled again: nothing comes ticked.
     const again = await view.pullGdoc();
     assert.equal(again.rows.filter((r) => r.use).length, 0);
@@ -3270,7 +3275,8 @@ test('a pulled comment keeps its Google Docs link on the card, and one ' +
         a.textContent === 'Open in Google Docs' && a.href === url));
     await m.contentEl.querySelector('.mod-cta').onclick();
     assert.equal(text(cardPath('G-aaaaa')), 'The cohort is composed of ' +
-        `==paired samples==%%[!review] Aly Karsan, 2026-10-24: How many? ` +
+        `%%{1%%paired samples%%}1 [!review] Aly Karsan, 2026-10-24: How ` +
+        `many? ` +
         `${url}%%.`);
     view.invalidate('G-aaaaa');
     await view.renderCard('G-aaaaa');
@@ -4269,6 +4275,32 @@ const REVIEWED = {
 const REVIEWED_INDEX = '---\ndendrite_prefix: G\n---\n' +
     '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n';
 
+test('comments in the old highlighted form are offered a one-way ' +
+     'conversion to markers in a pinned panel, done as one undo step',
+     async () => {
+    const { view, text } = await open(REVIEWED_INDEX, REVIEWED);
+    await tick(30);
+    const panel = () => view.contentEl.querySelector(
+        '.dendrite-pinned .dendrite-old-comments');
+    assert.ok(panel(), 'offered');
+    assert.match(panel().textContent,
+                 /3 review comments in 2 cards are in the old style/);
+    await [...panel().querySelectorAll('button')].find((b) =>
+        b.textContent === 'Convert').onclick();
+    await tick(30);
+    assert.equal(text(cardPath('G-aaaaa')), 'First %%{1%%one%%}1 ' +
+        '[!review] Joshua Bridgers, 2026-10-23: Why?%%.');
+    assert.equal(text(cardPath('G-bbbbb')), 'Second %%{1%%two%%}1 ' +
+        '[!review] Aly Karsan, 2026-10-23: Hm.%% and %%{2%%three%%}2 ' +
+        '[!suggest] Joshua Bridgers, 2026-10-23: 3%%.');
+    assert.equal(panel(), null, 'gone once converted');
+    assert.ok(h.notices.some((n) => /converted 3 review comments/.test(n)));
+    assert.ok(view.cardEls.get('G-bbbbb').querySelector(
+        'mark.dendrite-review-mark.dendrite-rid-1'), 'drawn as before');
+    await view.doUndo();
+    assert.equal(text(cardPath('G-bbbbb')), REVIEWED['G-bbbbb']);
+});
+
 test('each reviewer is given a colour for the manuscript, in reading ' +
      'order, kept in its index; right-click changes it', async () => {
     const { app, view, read } = await open(REVIEWED_INDEX, REVIEWED);
@@ -4404,7 +4436,7 @@ test('names linked to the same note are one person: one colour for all ' +
     assert.deepEqual(fm(), ['[[Joshua Bridgers]]: blue', 'Aly Karsan: green',
         '[[Joshua Bridgers|jbridgers]]: blue']);
     assert.ok(view.cardEls.get('G-ccccc').querySelector('mark.is-c-blue'));
-    // One block for the person, the names as written under it.
+    // One block for the person, the names it includes under it.
     const people = () => [...modal.contentEl.querySelectorAll(
         '.dendrite-reviewer')].map((r) => [r.dataset.person,
         [...r.querySelectorAll('.dendrite-reviewer-alias')]
@@ -4412,6 +4444,8 @@ test('names linked to the same note are one person: one colour for all ' +
     assert.deepEqual(people(), [
         ['Joshua Bridgers', ['Joshua Bridgers', 'jbridgers']],
         ['Aly Karsan', []]]);
+    assert.match(row('Joshua Bridgers').querySelector(
+        '.dendrite-reviewer-names').textContent, /^includes:/);
     // A colour set for the person, in the dialog: both names.
     const sel = row('Joshua Bridgers').querySelector('select');
     sel.value = 'cyan';

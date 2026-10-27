@@ -20,6 +20,7 @@
  * the view.
  */
 const { Scope } = require('obsidian');
+const { reviewExtension } = require('./cmreview.js');
 
 let EditorClass = null;
 let resolveFailed = false;
@@ -125,6 +126,20 @@ function obsidianEditor(app, parent, opts) {
             this.register(() => {
                 if (ws.setActiveLeaf === patched) ws.setActiveLeaf = original;
             });
+        }
+
+        // Review comments drawn in place of their syntax; the editor as
+        // Obsidian makes it should that fail.
+        buildLocalExtensions() {
+            const base = super.buildLocalExtensions();
+            try {
+                return [...base, reviewExtension(opts.colourOf,
+                                                 opts.nameOf)];
+            } catch (err) {
+                console.warn('Dendrite: review comments are shown as ' +
+                             'text in the editor.', err);
+                return base;
+            }
         }
 
         onUpdate(update, changed) {

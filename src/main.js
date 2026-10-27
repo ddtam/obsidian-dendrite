@@ -937,7 +937,11 @@ class DendriteView extends ItemView {
         board.addEventListener('pointerdown', (e) => {
             if (e.target === board) this.scrolledByHand = true;
         });
-        this.renderOrphans(stage);
+        // Notices that wait on a choice, floating over the board's top
+        // right, one under another.
+        const pinned = stage.createDiv({ cls: 'dendrite-pinned' });
+        this.renderOrphans(pinned);
+        this.renderOldComments(pinned);
         // A pane resized moves the columns, which the flow follows in the
         // same frame, as it does a scroll.
         if (this.resizer) this.resizer.observe(board);
@@ -1077,6 +1081,68 @@ class DendriteView extends ItemView {
         }
     }
 
+    /**
+     * Review comments still in the old form, ==passage== then its note,
+     * offered a one-way conversion to markers, the form Dendrite now
+     * writes, in a panel over the board.
+     */
+    async renderOldComments(pinned) {
+        const bodies = await this.loadBodies();
+        let n = 0;
+        let cards = 0;
+        for (const body of bodies.values()) {
+            const k = review.oldComments(body);
+            n += k;
+            if (k) cards++;
+        }
+        // Not on a board drawn again meanwhile.
+        if (!n || !this.contentEl.contains(pinned)) return;
+        const panel = pinned.createDiv({
+            cls: 'dendrite-orphans dendrite-old-comments' });
+        panel.createDiv({ cls: 'dendrite-orphans-head',
+            text: `${n} review comment${n === 1 ? '' : 's'} in ${cards} ` +
+                `card${cards === 1 ? '' : 's'} are in the old style` });
+        panel.createDiv({ cls: 'dendrite-old-comments-desc',
+            text: 'Converting holds each passage between markers, which ' +
+                'lets comments overlap and draws them alike everywhere. ' +
+                'It is one way: a device still on an older Dendrite ' +
+                'shows converted comments without their passages. The ' +
+                'text itself does not change, and Undo takes it back.' });
+        const foot = panel.createDiv({ cls: 'dendrite-orphans-foot' });
+        const go = foot.createEl('button', { cls: 'mod-cta',
+                                             text: 'Convert' });
+        go.onclick = () => this.convertOldComments();
+    }
+
+    /** Every card's old-form comments converted to markers, one undo. */
+    async convertOldComments() {
+        if (this.editing) await this.endEdit();
+        const restores = [];
+        let n = 0;
+        for (const node of core.allNodes(this.root)) {
+            const f = this.cardFile(node.id);
+            if (!f) continue;
+            const data = await this.app.vault.read(f);
+            const { body } = core.splitFrontmatter(data);
+            const k = review.oldComments(body);
+            if (!k) continue;
+            const next = review.convertOld(body);
+            const out = await this.writeCard(f, (d) =>
+                core.splitFrontmatter(d).fm + next);
+            restores.push({ path: f.path, text: data,
+                            ifBody: core.splitFrontmatter(out).body });
+            n += k;
+            this.invalidate(node.id);
+        }
+        if (restores.length) {
+            this.pushUndo({ active: this.active, files: [], text: true,
+                            restores });
+        }
+        new Notice(`Dendrite: converted ${n} review comment` +
+                   `${n === 1 ? '' : 's'} to the new style.`);
+        this.render();
+    }
+
     async trashOrphans(files) {
         for (const f of files) await this.app.fileManager.trashFile(f);
         this.render();
@@ -1189,6 +1255,7 @@ class DendriteView extends ItemView {
                 notes.length ? review.renderMarkdown(text, this.colourOf()) :
                     shown, out, f.path, comp);
             if (notes.length) {
+                review.wrapPassages(out);
                 review.decorate(out, notes,
                     (n, what, arg) => this.reviewAction(id, n, what, arg),
                     (n, e, k) => this.commentMenu(id, n, e, k),
@@ -2683,7 +2750,10 @@ class DendriteView extends ItemView {
 
     /** A card's editor: Obsidian's, unless the settings say not. */
     newEditor(handlers) {
-        return cardEditor(this.app, this, handlers,
+        const colours = this.colourOf();
+        return cardEditor(this.app, this, Object.assign({
+            colourOf: (who) => colours(who || 'Reviewer'),
+            nameOf: this.nameOf() }, handlers),
                           this.plugin.settings.obsidianEditor !== false);
     }
 
@@ -3709,6 +3779,7 @@ class DendriteView extends ItemView {
             notes.length ? review.renderMarkdown(text, this.colourOf()) :
                 text, out, f.path, comp);
         if (notes.length) {
+            review.wrapPassages(out);
             review.decorate(out, notes,
                 (n, what, arg) => this.reviewAction(id, n, what, arg),
                 (n, e, k) => this.commentMenu(id, n, e, k),
@@ -5445,11 +5516,6 @@ class DendriteView extends ItemView {
             (id) => this.statusOf(id), (id) => this.printRoleOf(id),
             (id) => open.get(id) || 0);
         this.statusInfo = report.cards;
-        // Suggested changes on cards take the revise flag's colour.
-        const revise = this.plugin.statusColour &&
-            this.plugin.statusColour('revise');
-        if (revise) this.board.style.setProperty('--dendrite-revise', revise);
-        else this.board.style.removeProperty('--dendrite-revise');
         for (const [id, card] of this.cardEls) {
             const old = card.querySelector(':scope > .dendrite-status');
             if (old) old.remove();
@@ -6949,6 +7015,13 @@ class DendritePreview extends ItemView {
         const sup = [...el.querySelectorAll('sup.dendrite-review-n')]
             .find((x) => x.textContent === String(n + 1));
         if (!sup) return [];
+        // Held between markers: every piece drawn for it, by its id.
+        const rid = [...sup.classList].find((c) =>
+            c.startsWith('dendrite-rid-'));
+        if (rid) {
+            return [...el.querySelectorAll(`.${rid}`)].filter((x) =>
+                !/\bdendrite-review-(from|upto)\b/.test(x.className));
+        }
         const out = [sup];
         for (let p = sup.previousElementSibling; p &&
              /\bdendrite-review-(mark|old|new)\b/.test(p.className);
@@ -7347,6 +7420,7 @@ class DendritePreview extends ItemView {
             await MarkdownRenderer.render(this.app,
                 core.normaliseMarkdown(s.text + notes), b.el.createDiv(),
                 path, b.comp);
+            review.wrapPassages(b.el);
             // Gathered: Obsidian still draws the references, numbered from
             // 1 in this card; they take the document's numbers, and the
             // card's own list is hidden by the stylesheet.
@@ -8486,7 +8560,7 @@ class ReviewersModal extends Modal {
             if (e.note) {
                 // The names the reviews wrote, each unlinked on its own.
                 const as = block.createDiv({ cls: 'dendrite-reviewer-names' });
-                as.createSpan({ text: 'written as:' });
+                as.createSpan({ text: 'includes:' });
                 for (const x of names) {
                     const chip = as.createSpan({
                         cls: 'dendrite-reviewer-alias' });
@@ -10054,8 +10128,8 @@ module.exports = class DendritePlugin extends Plugin {
     /**
      * A status's colour, from Pretty Properties' colour for that value of
      * dendrite_status, so the Properties panel, Bases and the board agree.
-     * Revise and unsplit fall back to orange; other values stay plain
-     * unless coloured there.
+     * Unset, null: a flag is drawn in the neutral --dendrite-flag, and
+     * other values stay plain.
      */
     statusColour(status) {
         const pp = this.app.plugins && this.app.plugins.plugins &&
@@ -10071,7 +10145,7 @@ module.exports = class DendritePlugin extends Plugin {
             pill !== 'none') {
             return pill.startsWith('#') ? pill : `var(--color-${pill})`;
         }
-        return core.isFlag(status) ? 'var(--color-orange)' : null;
+        return null;
     }
 
     previewStatuses(file) {

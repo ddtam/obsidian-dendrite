@@ -561,8 +561,11 @@ function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf,
     const heading = (id, text, depth) => '#'.repeat(Math.min(6, top + depth)) +
         ' ' + (numbers && numbers.has(id) ? numbers.get(id) + ' ' : '') +
         text;
+    // A review comment's markers are not comments: a start marker is
+    // left out, an end marker's id taken off its note.
     const comments = (raw) => (raw.match(/%%[\s\S]*?%%/g) || [])
-        .map((c) => c.slice(2, -2).trim()).filter(Boolean).join('\n\n');
+        .map((c) => c.slice(2, -2).trim().replace(/^\}[a-z0-9]+\s+/, ''))
+        .filter((c) => c && !/^\{[a-z0-9]+$/.test(c)).join('\n\n');
     const leftOut = (n, depth) => {
         segs.push({ id: n.id, depth, text: '',
                     left: (bodyOf(n.id) || '').trim() });
@@ -1515,7 +1518,8 @@ function findPatterns(query, opts = {}) {
 // A review comment, suggested change or reply in a card's text: its
 // reviewer, its date and what it says, the last ending in an optional
 // link to its thread.
-const REVIEW_NOTE = new RegExp('%%\\[!(review|suggest|reply)\\]\\s*' +
+const REVIEW_NOTE = new RegExp('%%(?:\\}[a-z0-9]+\\s+)?' +
+    '\\[!(review|suggest|reply)\\]\\s*' +
     '([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%', 'g');
 
 /**

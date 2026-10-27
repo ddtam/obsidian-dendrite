@@ -9,7 +9,8 @@ const ctx = await esbuild.context({
     platform: 'browser',
     target: 'es2020',
     external: ['obsidian', 'electron', 'fs', 'os', 'path',
-               'child_process', 'http', 'zlib', 'buffer', 'crypto'],
+               'child_process', 'http', 'zlib', 'buffer', 'crypto',
+               '@codemirror/view', '@codemirror/state'],
     outfile: 'main.js',
     logLevel: 'info',
     banner: { js: '/* Dendrite: bundled from src/ by esbuild; edit src/, ' +

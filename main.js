@@ -380,7 +380,7 @@ var require_core = __commonJS({
       const top = Math.max(1, Math.min(6, headingTop || 1));
       const segs = [];
       const heading = (id, text, depth) => "#".repeat(Math.min(6, top + depth)) + " " + (numbers && numbers.has(id) ? numbers.get(id) + " " : "") + text;
-      const comments = (raw) => (raw.match(/%%[\s\S]*?%%/g) || []).map((c) => c.slice(2, -2).trim()).filter(Boolean).join("\n\n");
+      const comments = (raw) => (raw.match(/%%[\s\S]*?%%/g) || []).map((c) => c.slice(2, -2).trim().replace(/^\}[a-z0-9]+\s+/, "")).filter((c) => c && !/^\{[a-z0-9]+$/.test(c)).join("\n\n");
       const leftOut = (n, depth) => {
         segs.push({
           id: n.id,
@@ -1065,7 +1065,7 @@ var require_core = __commonJS({
       const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return { patterns: terms.map((t) => new RegExp(esc(t), flags)) };
     }
-    var REVIEW_NOTE = new RegExp("%%\\[!(review|suggest|reply)\\]\\s*([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%", "g");
+    var REVIEW_NOTE = new RegExp("%%(?:\\}[a-z0-9]+\\s+)?\\[!(review|suggest|reply)\\]\\s*([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%", "g");
     function reviewText(body) {
       const out = [];
       REVIEW_NOTE.lastIndex = 0;
@@ -1371,292 +1371,6 @@ var require_textedit = __commonJS({
   }
 });
 
-// src/editor.js
-var require_editor = __commonJS({
-  "src/editor.js"(exports2, module2) {
-    "use strict";
-    var { Scope: Scope2 } = require("obsidian");
-    var EditorClass = null;
-    var resolveFailed = false;
-    function markdownEditorClass(app) {
-      if (EditorClass || resolveFailed) return EditorClass;
-      try {
-        const embed = app.embedRegistry.embedByExtension.md(
-          { app, containerEl: createDiv(), state: {} },
-          null,
-          ""
-        );
-        embed.editable = true;
-        embed.showEditor();
-        const proto = Object.getPrototypeOf(
-          Object.getPrototypeOf(embed.editMode)
-        );
-        embed.unload();
-        EditorClass = proto && proto.constructor;
-        if (typeof EditorClass !== "function") throw new Error("no class");
-      } catch (err) {
-        resolveFailed = true;
-        EditorClass = null;
-        console.warn("Dendrite: Obsidian's editor is unavailable; cards use the text box.", err);
-      }
-      return EditorClass;
-    }
-    function obsidianEditor(app, parent, opts) {
-      const Base = markdownEditorClass(app);
-      if (!Base) return null;
-      class CardEditor extends Base {
-        constructor(container) {
-          super(app, container, {
-            app,
-            onMarkdownScroll: () => {
-            },
-            getMode: () => "source"
-          });
-          this.cardOpts = opts;
-          this.scope = new Scope2(app.scope);
-          this.scope.register([], "Escape", () => {
-            opts.onEscape();
-            return false;
-          });
-          if (opts.onUndo) {
-            this.scope.register(["Mod"], "z", () => !opts.onUndo());
-          }
-          if (opts.onRedo) {
-            for (const [mods, key] of [
-              [["Mod", "Shift"], "z"],
-              [["Mod"], "y"]
-            ]) {
-              this.scope.register(mods, key, () => !opts.onRedo());
-            }
-          }
-          if (opts.onFind) {
-            this.scope.register(["Mod"], "f", () => {
-              opts.onFind();
-              return false;
-            });
-          }
-          this.owner.editMode = this;
-          this.owner.editor = this.editor;
-          this.owner.file = opts.file;
-          this.set(opts.value || "", false);
-          const content = this.editor.cm.contentDOM;
-          content.addEventListener("focusin", () => {
-            app.keymap.pushScope(this.scope);
-            app.workspace.activeEditor = this.owner;
-          });
-          content.addEventListener("blur", () => {
-            app.keymap.popScope(this.scope);
-            if (this._loaded) opts.onBlur();
-          });
-          const ws = app.workspace;
-          const original = ws.setActiveLeaf;
-          const self = this;
-          const hasFocus = () => {
-            const cm = self.editor && self.editor.cm;
-            if (!cm) return false;
-            const dom = cm.contentDOM;
-            return !!cm.hasFocus || !!dom && dom.contains(dom.ownerDocument.activeElement);
-          };
-          const patched = function(...args) {
-            if (hasFocus()) return void 0;
-            return original.apply(this, args);
-          };
-          ws.setActiveLeaf = patched;
-          this.register(() => {
-            if (ws.setActiveLeaf === patched) ws.setActiveLeaf = original;
-          });
-        }
-        onUpdate(update, changed) {
-          super.onUpdate(update, changed);
-          if (changed) this.cardOpts.onChange();
-          if (this.cardOpts.onRedraw) this.cardOpts.onRedraw();
-        }
-        onunload() {
-          super.onunload();
-          app.keymap.popScope(this.scope);
-          if (app.workspace.activeEditor === this.owner) {
-            app.workspace.activeEditor = null;
-          }
-        }
-      }
-      const el = createDiv({ cls: "dendrite-cm" });
-      let ed;
-      try {
-        ed = new CardEditor(el);
-        parent.addChild(ed);
-        if (!ed.editor || !ed.editor.cm) throw new Error("no CodeMirror");
-      } catch (err) {
-        console.warn("Dendrite: Obsidian's editor failed to start; using the text box.", err);
-        if (ed) {
-          try {
-            parent.removeChild(ed);
-          } catch (e) {
-          }
-        }
-        return null;
-      }
-      return {
-        kind: "obsidian",
-        el,
-        get value() {
-          return ed.editor.cm.state.doc.toString();
-        },
-        focus(atStart) {
-          const editor = ed.editor;
-          editor.focus();
-          if (atStart) {
-            editor.setCursor({ line: 0, ch: 0 });
-          } else {
-            const last = editor.lastLine();
-            editor.setCursor({
-              line: last,
-              ch: editor.getLine(last).length
-            });
-          }
-        },
-        selection() {
-          const editor = ed.editor;
-          return [
-            editor.posToOffset(editor.getCursor("from")),
-            editor.posToOffset(editor.getCursor("to"))
-          ];
-        },
-        replace(text, at) {
-          ed.editor.setValue(text);
-          this.focusAt(at);
-        },
-        focusAt(at, to = at) {
-          const editor = ed.editor;
-          editor.focus();
-          editor.setSelection(
-            editor.offsetToPos(at),
-            editor.offsetToPos(to)
-          );
-        },
-        caretRect() {
-          const cm = ed.editor.cm;
-          const r = cm.coordsAtPos(cm.state.selection.main.head);
-          return r ? { top: r.top, bottom: r.bottom } : null;
-        },
-        rangeAt(start, end) {
-          const cm = ed.editor.cm;
-          const vp = cm.viewport;
-          if (!cm.domAtPos || vp && (start < vp.from || end > vp.to)) {
-            return null;
-          }
-          try {
-            const a = cm.domAtPos(start);
-            const b = cm.domAtPos(end);
-            const r = el.ownerDocument.createRange();
-            r.setStart(a.node, a.offset);
-            r.setEnd(b.node, b.offset);
-            return r;
-          } catch (err) {
-            return null;
-          }
-        },
-        destroy() {
-          parent.removeChild(ed);
-        }
-      };
-    }
-    function textEditor(opts) {
-      const ta = createEl("textarea", { cls: "dendrite-editor" });
-      ta.value = opts.value || "";
-      const fit = () => {
-        ta.style.height = "auto";
-        ta.style.height = ta.scrollHeight + "px";
-      };
-      ta.addEventListener("input", () => {
-        fit();
-        opts.onChange();
-      });
-      ta.addEventListener("blur", () => opts.onBlur());
-      return {
-        kind: "text",
-        el: ta,
-        ta,
-        get value() {
-          return ta.value;
-        },
-        focus(atStart) {
-          fit();
-          ta.focus();
-          const at = atStart ? 0 : ta.value.length;
-          ta.setSelectionRange(at, at);
-        },
-        selection() {
-          return [ta.selectionStart, ta.selectionEnd];
-        },
-        replace(text, at) {
-          ta.value = text;
-          fit();
-          this.focusAt(at);
-        },
-        focusAt(at, to = at) {
-          ta.focus();
-          ta.setSelectionRange(at, to);
-        },
-        caretRect() {
-          return textCaret(ta);
-        },
-        // A text box's text is not in the page's text, so nothing in it
-        // can be painted; find selects its match instead.
-        rangeAt() {
-          return null;
-        },
-        destroy() {
-          ta.remove();
-        }
-      };
-    }
-    function textCaret(ta) {
-      const doc = ta.ownerDocument;
-      const cs = doc.defaultView.getComputedStyle(ta);
-      const copy = doc.createElement("div");
-      for (const p of [
-        "fontFamily",
-        "fontSize",
-        "fontWeight",
-        "lineHeight",
-        "letterSpacing",
-        "tabSize",
-        "boxSizing",
-        "paddingTop",
-        "paddingLeft",
-        "paddingRight",
-        "borderTopWidth",
-        "borderLeftWidth",
-        "borderRightWidth"
-      ]) {
-        copy.style[p] = cs[p];
-      }
-      copy.style.position = "absolute";
-      copy.style.visibility = "hidden";
-      copy.style.whiteSpace = "pre-wrap";
-      copy.style.overflowWrap = "break-word";
-      copy.style.width = ta.offsetWidth + "px";
-      copy.textContent = ta.value.slice(0, ta.selectionEnd);
-      const mark = doc.createElement("span");
-      mark.textContent = "\u200B";
-      copy.appendChild(mark);
-      doc.body.appendChild(copy);
-      const top = ta.getBoundingClientRect().top + mark.offsetTop - ta.scrollTop;
-      const height = mark.offsetHeight;
-      copy.remove();
-      return { top, bottom: top + height };
-    }
-    function cardEditor2(app, parent, opts, useObsidian) {
-      return useObsidian && obsidianEditor(app, parent, opts) || textEditor(opts);
-    }
-    function resetForTests() {
-      EditorClass = null;
-      resolveFailed = false;
-    }
-    module2.exports = { cardEditor: cardEditor2, textEditor, resetForTests };
-  }
-});
-
 // src/docx.js
 var require_docx = __commonJS({
   "src/docx.js"(exports2, module2) {
@@ -1859,610 +1573,6 @@ var require_docx = __commonJS({
       reference,
       keepTables,
       keepDocument
-    };
-  }
-});
-
-// src/pandoc.js
-var require_pandoc = __commonJS({
-  "src/pandoc.js"(exports2, module2) {
-    "use strict";
-    var docx = require_docx();
-    function citekeys(md) {
-      const out = [];
-      const seen = /* @__PURE__ */ new Set();
-      const re = /(?<![\w.@])@([A-Za-z0-9_][\w:.#$%&+?<>~/-]*)/g;
-      let m;
-      while ((m = re.exec(md)) !== null) {
-        const key = m[1].replace(/[.:,;?]+$/, "");
-        if (key && !seen.has(key)) {
-          seen.add(key);
-          out.push(key);
-        }
-      }
-      return out;
-    }
-    function toPandoc(md, resolve) {
-      return md.replace(
-        /!\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]/g,
-        (all, name, alt) => {
-          const path = resolve(name.trim());
-          if (path && /\.(png|jpe?g|gif|svg|webp|pdf)$/i.test(path)) {
-            const width = alt && /^\d+$/.test(alt.trim()) ? `{width=${alt.trim()}px}` : "";
-            return `![](<${path}>)${width}`;
-          }
-          return name.trim();
-        }
-      ).replace(
-        /\[\[([^\]|#]*)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]/g,
-        (all, name, sub, alias) => (alias || sub || name).trim()
-      ).replace(/==([^=\n]+)==/g, "$1");
-    }
-    function pandocCaptions(md) {
-      return md.replace(
-        /^(\*\*Table \d+\.\*\*.*)\n\n(?=\s*\|)/gm,
-        "Table: $1\n\n"
-      ).replace(
-        new RegExp("^!\\[\\]\\(([^)\\n]*)\\)(\\{[^}\\n]*\\})?\\n\\n(\\*\\*Figure \\d+\\.\\*\\*.*)$", "gm"),
-        (all, src, attrs, cap) => `![${cap.replace(/[[\]]/g, "\\$&")}](${src})` + (attrs || "")
-      );
-    }
-    async function fetchBib(keys, port, deps) {
-      const call = async (ks) => {
-        const res = await deps.fetch(
-          `http://127.0.0.1:${port}/better-bibtex/json-rpc`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              jsonrpc: "2.0",
-              method: "item.export",
-              params: [ks, "Better CSL JSON"]
-            })
-          }
-        );
-        return res.json();
-      };
-      const items = (r) => {
-        if (!r || typeof r.result !== "string") return null;
-        try {
-          const a = JSON.parse(r.result);
-          return Array.isArray(a) ? a : null;
-        } catch (err) {
-          return null;
-        }
-      };
-      let first;
-      try {
-        first = await call(keys);
-      } catch (err) {
-        return { down: true };
-      }
-      if (items(first)) return { bib: JSON.stringify(items(first)) };
-      const missing = [];
-      const all = [];
-      for (const k of keys) {
-        let r;
-        try {
-          r = await call([k]);
-        } catch (err) {
-          return { down: true };
-        }
-        if (items(r)) all.push(...items(r));
-        else missing.push(k);
-      }
-      return missing.length ? { missing } : { bib: JSON.stringify(all) };
-    }
-    var ARTICLE_SIZES = [10, 11, 12];
-    function footnoteGap(st) {
-      if (st.footnoteGap) return st.footnoteGap;
-      return `${Math.round(bodyLine(st) * 10) / 10}pt`;
-    }
-    function texEscape(t) {
-      const named = {
-        "\\": "\\textbackslash{}",
-        "^": "\\textasciicircum{}",
-        "~": "\\textasciitilde{}"
-      };
-      return t.replace(/[\\{}$&#%_^~]/g, (c) => named[c] || "\\" + c);
-    }
-    function headerLine(line) {
-      const t = texEscape(line.replace(/\{page\}/g, "").replace(/\{pages\}/g, ""));
-      return t.replace(/\*\*(.+?)\*\*/g, "\\textbf{$1}").replace(/\*(.+?)\*/g, "\\textit{$1}").replace(/\u0001/g, "\\thepage{}").replace(/\u0002/g, "\\pageref*{LastPage}");
-    }
-    function bodyLine(st) {
-      return (st.fontSize || 10) * 1.2 * (st.lineSpacing || 1);
-    }
-    var SLOTS = { left: "L", center: "C", right: "R" };
-    function slotsTex(slots2, cmd) {
-      return Object.entries(SLOTS).map(([k, pos]) => {
-        const text = slots2 && slots2[k] ? slots2[k].split("\n").map(headerLine).join("\\\\") : "";
-        return text ? `\\${cmd}[${pos}]{${text}}` : null;
-      }).filter(Boolean);
-    }
-    var anySlot = (st, re) => [st.header, st.footer].some((h) => h && Object.values(h).some((t) => re.test(t)));
-    var slotLines = (slots2) => Math.max(0, ...Object.values(slots2 || {}).map((t) => t.split("\n").length));
-    function preamble(st) {
-      const out = [`\\setlength{\\skip\\footins}{${footnoteGap(st)} plus 4pt minus 2pt}`];
-      if (st.header || st.footer) {
-        const pages = st.pageNumbers !== false && !anySlot(st, /\{page\}/);
-        const foot = st.footer ? slotsTex(st.footer, "fancyfoot") : [`\\fancyfoot[C]{${pages ? "\\thepage" : ""}}`];
-        if (anySlot(st, /\{pages\}/)) out.push("\\usepackage{lastpage}");
-        const style = [
-          "\\fancyhf{}",
-          ...slotsTex(st.header, "fancyhead"),
-          ...foot,
-          "\\renewcommand{\\headrulewidth}{0pt}"
-        ];
-        out.push(
-          "\\usepackage{fancyhdr}",
-          "\\pagestyle{fancy}",
-          ...style,
-          "\\fancypagestyle{plain}{" + style.join("") + "}"
-        );
-      }
-      out.push(
-        "\\usepackage{caption}",
-        "\\captionsetup{labelformat=empty,labelsep=none,justification=raggedright,singlelinecheck=false}",
-        "\\ifdefined\\LTcapwidth\\setlength{\\LTcapwidth}{\\textwidth}\\fi"
-      );
-      out.push(
-        "\\usepackage{longtable,booktabs,array,calc,etoolbox}",
-        "\\AtBeginEnvironment{longtable}{\\ifdefined\\setstretch\\setstretch{1}\\fi\\renewcommand{\\arraystretch}{1.6}}",
-        "\\newcommand{\\dendriteheadstrut}{\\vrule width0pt height\\arraystretch\\ht\\strutbox\\relax}"
-      );
-      out.push("\\makeatletter\\newcommand{\\dendriteneed}[1]{\\par\\begingroup\\dimen@=1.2\\dimexpr\\f@size pt\\relax\\dimen@=#1\\dimen@\\dimen@ii=\\pagegoal\\advance\\dimen@ii-\\pagetotal\\ifdim\\dimen@>\\dimen@ii\\ifdim\\dimen@ii>\\z@\\vfil\\fi\\break\\fi\\endgroup}\\makeatother");
-      return out.join("\n") + "\n";
-    }
-    var TABLES_LUA = String.raw`local chars = 90
-local KEEP_ROWS = 30
-
-local function cellText(c) return pandoc.utils.stringify(c.contents) end
-
-local function longestWord(s)
-  local m = 0
-  for w in s:gmatch('%S+') do m = math.max(m, utf8.len(w) or #w) end
-  return m
-end
-
-local function rowsOf(t)
-  local all = {}
-  for _, r in ipairs(t.head.rows) do table.insert(all, r) end
-  for _, b in ipairs(t.bodies) do
-    for _, r in ipairs(b.body) do table.insert(all, r) end
-  end
-  for _, r in ipairs(t.foot.rows) do table.insert(all, r) end
-  return all
-end
-
-local function widen(t)
-  local n = #t.colspecs
-  if n == 0 or not t.colspecs[1][2] then return end
-  local word = {}
-  for i = 1, n do word[i] = 1 end
-  for _, r in ipairs(rowsOf(t)) do
-    local i = 1
-    for _, c in ipairs(r.cells) do
-      if word[i] then
-        word[i] = math.max(word[i], longestWord(cellText(c)))
-      end
-      i = i + c.col_span
-    end
-  end
-  -- Widths are fractions of the line less the gaps between columns.
-  local avail = chars - n * 2.5
-  local min, sum = {}, 0
-  for i = 1, n do
-    min[i] = math.min(1, (word[i] * 1.2 + 1) / avail)
-    sum = sum + min[i]
-  end
-  if sum >= 1 then return end
-  local w, give, take = {}, 0, 0
-  for i = 1, n do
-    w[i] = t.colspecs[i][2]
-    if w[i] < min[i] then
-      give = give + min[i] - w[i]
-      w[i] = min[i]
-    else
-      take = take + w[i] - min[i]
-    end
-  end
-  if give == 0 or take == 0 then return end
-  for i = 1, n do
-    if w[i] > min[i] then
-      w[i] = w[i] - give * (w[i] - min[i]) / take
-    end
-    t.colspecs[i] = { t.colspecs[i][1], w[i] }
-  end
-end
-
--- About how many single-spaced lines a table takes: each row its
--- tallest cell's wrapped lines and the space rows are set apart by,
--- with its caption and rules. A table that may break is counted to
--- its first rows only.
-local function tableLines(t)
-  widen(t)
-  local n = #t.colspecs
-  local avail = chars - n * 2.5
-  local function rowLines(r)
-    local most, i = 1, 1
-    for _, c in ipairs(r.cells) do
-      local w = t.colspecs[i] and t.colspecs[i][2]
-      local len = utf8.len(cellText(c)) or 0
-      if w and w > 0 then
-        most = math.max(most, math.ceil(len / (w * avail)))
-      end
-      i = i + c.col_span
-    end
-    return most + 0.6
-  end
-  local rows = {}
-  for _, r in ipairs(t.head.rows) do table.insert(rows, r) end
-  local body = 0
-  for _, b in ipairs(t.bodies) do
-    for _, r in ipairs(b.body) do
-      table.insert(rows, r)
-      body = body + 1
-    end
-  end
-  for _, r in ipairs(t.foot.rows) do table.insert(rows, r) end
-  local count = #rows
-  if body > KEEP_ROWS then count = math.min(count, #t.head.rows + 3) end
-  local lines = 3
-  for k = 1, count do lines = lines + rowLines(rows[k]) end
-  local caption = utf8.len(pandoc.utils.stringify(t.caption.long)) or 0
-  return lines + math.ceil(caption / chars)
-end
-
--- A row of three or more dashes, '| --- | --- |', is a rule across the
--- table. Pandoc reads --- as an em dash, -- as an en dash.
-local function isRule(r)
-  local any = false
-  for _, c in ipairs(r.cells) do
-    local s = cellText(c)
-    if s ~= '' then
-      local d = (s:gsub('\u{2014}', '---'):gsub('\u{2013}', '--'))
-      if not d:match('^:?%-+:?$') then return false end
-      if #(d:gsub(':', '')) >= 3 then any = true end
-    end
-  end
-  return any
-end
-
-local RULE = '\\dendriterule'
-
--- In LaTeX a rule row becomes \midrule; in Word, which draws no rule
--- between rows, one before the last row makes that row the table's
--- total row. A rule under the header or after the last row is dropped,
--- since a rule is drawn there already.
-local function rules(t, latex)
-  for _, b in ipairs(t.bodies) do
-    local out = pandoc.List()
-    local ruled = nil
-    for k, r in ipairs(b.body) do
-      if not isRule(r) then
-        out:insert(r)
-      elseif #out > 0 and k < #b.body then
-        if latex then
-          for n, c in ipairs(r.cells) do
-            c.contents = n == 1 and
-              { pandoc.Plain({ pandoc.RawInline('latex', RULE) }) } or {}
-          end
-          out:insert(r)
-        else
-          ruled = #out
-        end
-      end
-    end
-    if ruled and ruled == #out - 1 and #t.foot.rows == 0 then
-      t.foot.rows:insert(out:remove(#out))
-    end
-    b.body = out
-  end
-end
-
-local HEAD = '\\begin{minipage}%[b%]{\\linewidth}\\%a+\n'
-
-local function write(t)
-  if not pandoc.write then return t end
-  local tex = pandoc.write(pandoc.Pandoc({ t }), 'latex')
-  -- A header cell is set bottom-aligned in a box, so a header of two
-  -- lines rises to the rule above it; its first line is given a row's.
-  tex = tex:gsub(HEAD, '%0\\dendriteheadstrut\n')
-  local rows = 0
-  for _, b in ipairs(t.bodies) do rows = rows + #b.body end
-  if rows <= KEEP_ROWS then tex = tex:gsub(' \\\\\n', ' \\\\*\n') end
-  tex = tex:gsub(RULE:gsub('%p', '%%%0') .. '[^\n]*\n', '\\midrule\n')
-  return pandoc.RawBlock('latex', tex)
-end
-
-return {
-  { Meta = function(m)
-      local c = m['dendrite-chars']
-      if c then chars = tonumber(pandoc.utils.stringify(c)) or chars end
-    end },
-  -- Headings straight before a table are kept with it: before the
-  -- first of them, room is asked for the headings and the table, or for
-  -- its first rows if it may break.
-  { Blocks = function(blocks)
-      if not FORMAT:match('latex') then return nil end
-      local out = pandoc.List()
-      local i = 1
-      while i <= #blocks do
-        local j = i
-        while j <= #blocks and blocks[j].t == 'Header' do j = j + 1 end
-        if j > i and j <= #blocks and blocks[j].t == 'Table' then
-          local need = (j - i) * 3 + tableLines(blocks[j])
-          out:insert(pandoc.RawBlock('latex', string.format(
-            '\\dendriteneed{%.1f}', need)))
-        end
-        for k = i, math.max(i, j - 1) do out:insert(blocks[k]) end
-        i = math.max(i, j - 1) + 1
-      end
-      return out
-    end },
-  { Table = function(t)
-      local latex = FORMAT:match('latex') ~= nil
-      widen(t)
-      rules(t, latex)
-      if latex then return write(t) end
-      return t
-    end },
-}
-`;
-    var PAPER_PT = { letter: 612, a4: 595.3 };
-    var UNIT_PT = { pt: 1, mm: 2.8453, cm: 28.453, in: 72.27 };
-    function lineChars(st) {
-      const width = PAPER_PT[st.paper] || PAPER_PT.letter;
-      return Math.round((width - 2 * marginPt(st)) / ((st.fontSize || 10) / 2));
-    }
-    function restyledReference(buf, style, zlib) {
-      return docx.reference(buf, {
-        font: style.font,
-        fontSize: style.fontSize || 10,
-        lineSpacing: style.lineSpacing,
-        paper: style.paper,
-        marginPt: marginPt(style)
-      }, zlib);
-    }
-    function marginPt(st) {
-      const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec(st.margin || "");
-      return m ? Number(m[1]) * UNIT_PT[m[2]] : 2.5 * UNIT_PT.cm;
-    }
-    function pandocArgs(o) {
-      const st = o.style || {};
-      const args = [
-        o.input,
-        "--from",
-        "markdown",
-        "-o",
-        o.output,
-        "--standalone"
-      ];
-      if (st.defaults) args.unshift(`--defaults=${st.defaults}`);
-      if (o.format === "pdf") {
-        args.push(
-          `--pdf-engine=${o.engine || "xelatex"}`,
-          "-V",
-          `geometry:margin=${st.margin || "2.5cm"}`
-        );
-        if (st.paper) args.push("-V", `papersize=${st.paper}`);
-        if (st.font) args.push("-V", `mainfont=${st.font}`);
-        if (st.fontSize) {
-          if (!ARTICLE_SIZES.includes(st.fontSize)) {
-            args.push("-V", "documentclass=extarticle");
-          }
-          args.push("-V", `fontsize=${st.fontSize}pt`);
-        }
-        if (st.lineSpacing) args.push("-V", `linestretch=${st.lineSpacing}`);
-        const head = slotLines(st.header);
-        const foot = slotLines(st.footer);
-        const inside = !st.headerInMargin;
-        if (head) {
-          if (inside) args.push("-V", "geometry:includehead");
-          args.push(
-            "-V",
-            `geometry:headheight=${Math.ceil(
-              head * bodyLine(st) + 2
-            )}pt`,
-            "-V",
-            "geometry:headsep=12pt"
-          );
-        }
-        if (foot) {
-          if (inside) args.push("-V", "geometry:includefoot");
-          args.push("-V", `geometry:footskip=${Math.ceil(
-            foot * bodyLine(st) + 12
-          )}pt`);
-        }
-        if (!st.header && !st.footer && st.pageNumbers === false) {
-          args.push("-V", "pagestyle=empty");
-        }
-        if (o.header) args.push(`--include-in-header=${o.header}`);
-      }
-      if (o.format === "docx" && st.referenceDocx) {
-        args.push(`--reference-doc=${st.referenceDocx}`);
-      }
-      if (o.bibliography) {
-        args.push("--citeproc", "--bibliography", o.bibliography);
-        if (o.csl) args.push("--csl", o.csl);
-        if (st.referencesTitle !== false) {
-          args.push("-M", "reference-section-title=" + (st.referencesTitle || "References"));
-        }
-      }
-      if (o.resourcePath) args.push("--resource-path", o.resourcePath);
-      if (o.tables) {
-        args.push(
-          `--lua-filter=${o.tables}`,
-          "-M",
-          `dendrite-chars=${lineChars(st)}`
-        );
-      }
-      return args;
-    }
-    var BODY_END = "\n\n```{=latex}\n\\special{pdf:docinfo << /DendriteBodyEnd (\\thepage) >>}\n```\n";
-    function pdfPages(buf, inflate) {
-      const raw = buf.toString("latin1");
-      let all = raw;
-      const re = /stream\r?\n/g;
-      let m;
-      while (m = re.exec(raw)) {
-        const start = m.index + m[0].length;
-        const end = raw.indexOf("endstream", start);
-        if (end < 0) break;
-        try {
-          all += "\n" + inflate(buf.subarray(start, end)).toString("latin1");
-        } catch (err) {
-        }
-        re.lastIndex = end + "endstream".length;
-      }
-      const pages = (all.match(/\/Type\s*\/Page(?![s\w])/g) || []).length;
-      const mark = /\/DendriteBodyEnd\s*\((\d+)\)/.exec(all);
-      return { pages, bodyEnd: mark ? Number(mark[1]) : null };
-    }
-    async function exportDocument(o, deps) {
-      let text = pandocCaptions(toPandoc(o.md, o.resolve || (() => null)));
-      const keys = citekeys(text);
-      const dir = deps.tmpdir();
-      const input = deps.join(dir, `dendrite-${Date.now()}.md`);
-      let bibliography = null;
-      if (keys.length) {
-        const got = await fetchBib(keys, o.port || 23119, deps);
-        if (got.missing) {
-          return { error: "Zotero has no item for " + got.missing.map((k) => "@" + k).join(", ") + ". Nothing was exported." };
-        }
-        if (got.down) {
-          if (!o.fallbackBib) {
-            return { error: `Zotero did not answer on port ${o.port || 23119}: is it open, with Better BibTeX? No fallback .bib is set in Dendrite's settings. Nothing was exported.` };
-          }
-          bibliography = o.fallbackBib;
-        } else {
-          bibliography = deps.join(dir, `dendrite-${Date.now()}.json`);
-          await deps.writeFile(bibliography, got.bib);
-        }
-      }
-      let header = null;
-      let tables = null;
-      if (o.format === "pdf") {
-        text += BODY_END;
-        header = deps.join(dir, `dendrite-${Date.now()}-header.tex`);
-        await deps.writeFile(header, preamble(o.style || {}));
-      }
-      if (o.format === "pdf" || o.format === "docx") {
-        tables = deps.join(dir, `dendrite-${Date.now()}-tables.lua`);
-        await deps.writeFile(tables, TABLES_LUA);
-      }
-      let style = o.style || {};
-      let reference = null;
-      if (o.format === "docx" && !style.referenceDocx && deps.zlib) {
-        reference = deps.join(dir, `dendrite-${Date.now()}-reference.docx`);
-        try {
-          await deps.run(o.pandoc || "pandoc", [
-            "-o",
-            reference,
-            "--print-default-data-file",
-            "reference.docx"
-          ]);
-          await deps.writeFile(reference, restyledReference(
-            await deps.readFile(reference),
-            style,
-            deps.zlib
-          ));
-          style = Object.assign({}, style, { referenceDocx: reference });
-        } catch (err) {
-          deps.remove(reference);
-          reference = null;
-        }
-      }
-      await deps.writeFile(input, text);
-      const args = pandocArgs({
-        input,
-        output: o.output,
-        format: o.format,
-        engine: o.engine,
-        bibliography,
-        csl: o.csl,
-        resourcePath: o.resourcePath,
-        header,
-        tables,
-        style
-      });
-      try {
-        await deps.run(o.pandoc || "pandoc", args);
-        if (o.format === "docx" && deps.zlib) {
-          try {
-            await deps.writeFile(o.output, docx.keepDocument(
-              await deps.readFile(o.output),
-              deps.zlib
-            ));
-          } catch (err) {
-          }
-        }
-      } catch (err) {
-        return { error: pandocError(err, o.pandoc || "pandoc") };
-      } finally {
-        deps.remove(input);
-        if (header) deps.remove(header);
-        if (tables) deps.remove(tables);
-        if (reference) deps.remove(reference);
-        if (bibliography && bibliography !== o.fallbackBib) {
-          deps.remove(bibliography);
-        }
-      }
-      let layout = null;
-      if (o.format === "pdf" && deps.readFile && deps.inflate) {
-        try {
-          layout = pdfPages(await deps.readFile(o.output), deps.inflate);
-        } catch (err) {
-          layout = null;
-        }
-      }
-      return { ok: true, keys, layout };
-    }
-    function measuredRate(words, layout, cited, floatPages = 0) {
-      if (!layout || !words) return null;
-      const end = layout.bodyEnd || (cited ? null : layout.pages);
-      if (!end || end < 2) return null;
-      const text = end - 0.5 - floatPages;
-      return text >= 1 ? Math.round(words / text) : null;
-    }
-    function pandocError(err, cmd) {
-      if (err && err.code === "ENOENT") {
-        return `Pandoc was not found (looked for "${cmd}"). Install it, or set its full path under Pandoc in Dendrite's settings: "which pandoc" in a terminal prints it, "where pandoc" on Windows.`;
-      }
-      const msg = String(err && (err.stderr || err.message) || err).trim().split("\n").slice(-6).join("\n");
-      return `Pandoc failed: ${msg}`;
-    }
-    function searchPath(env, platform, extra) {
-      const out = Object.assign({}, env);
-      const key = Object.keys(out).find((k) => k.toUpperCase() === "PATH") || "PATH";
-      const sep = platform === "win32" ? ";" : ":";
-      const parts = String(out[key] || "").split(sep).filter(Boolean);
-      for (const d of extra) if (!parts.includes(d)) parts.push(d);
-      out[key] = parts.join(sep);
-      return out;
-    }
-    function condaBins(names, home) {
-      return names.filter((n) => /^(ana|mini)conda\d*(-|$)|^(miniforge|mambaforge)\d*(-|$)/.test(n)).map((n) => `${home}/${n}/bin`);
-    }
-    module2.exports = {
-      citekeys,
-      pandocCaptions,
-      pandocError,
-      searchPath,
-      condaBins,
-      toPandoc,
-      TABLES_LUA,
-      lineChars,
-      restyledReference,
-      fetchBib,
-      pandocArgs,
-      exportDocument,
-      pdfPages,
-      measuredRate,
-      footnoteGap,
-      preamble,
-      BODY_END
     };
   }
 });
@@ -3100,7 +2210,50 @@ var require_review = __commonJS({
       const end = e > s ? c.src(e - 1) + 1 : start;
       return { id: c.id, start, end: e > s ? end : start, how };
     }
-    var ITEM = new RegExp("(?:==([^=\\n]+?)==)?%%\\[!(review|suggest)\\]\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)", "g");
+    var SCAN = new RegExp("%%\\{([a-z0-9]+)%%|(?:==([^=\\n]+?)==)?%%(?:\\}([a-z0-9]+)\\s+)?\\[!(review|suggest)\\]\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)", "g");
+    function scan(md) {
+      const opens = /* @__PURE__ */ new Map();
+      const items = [];
+      const syntax = [];
+      SCAN.lastIndex = 0;
+      let m;
+      while (m = SCAN.exec(md)) {
+        const at = m.index;
+        const end = at + m[0].length;
+        if (m[1] !== void 0) {
+          opens.set(m[1], { start: at, end });
+          syntax.push([at, end]);
+          continue;
+        }
+        const [, , old, id, kind, body, replies] = m;
+        const noteStart = old !== void 0 ? at + old.length + 4 : at;
+        if (old !== void 0) syntax.push([at, at + 2]);
+        syntax.push([old !== void 0 ? noteStart - 2 : noteStart, end]);
+        const open = id !== void 0 && opens.get(id) || null;
+        items.push({
+          kind,
+          old,
+          id: open ? id : void 0,
+          open,
+          start: open ? open.start : at,
+          noteStart,
+          end,
+          body,
+          replies
+        });
+      }
+      return { items, syntax };
+    }
+    function without(md, s, e, syntax) {
+      let out = "";
+      let at = s;
+      for (const [a, b] of syntax) {
+        if (b <= at || a >= e) continue;
+        if (a > at) out += md.slice(at, a);
+        at = Math.max(at, b);
+      }
+      return out + md.slice(at, Math.max(at, e));
+    }
     var REPLY = /%%\[!reply\]\s*([\s\S]*?)%%/g;
     var HEAD = /^(.*?),\s*(\d{4}-\d{2}-\d{2}):\s?([\s\S]*)$/;
     function readReplies(chunk) {
@@ -3118,23 +2271,22 @@ var require_review = __commonJS({
       return out;
     }
     function reviewItems(md) {
-      const out = [];
-      ITEM.lastIndex = 0;
-      let m;
-      while (m = ITEM.exec(md)) {
-        const h = HEAD.exec(m[3].replace(/^\s+/, ""));
-        out.push({
-          kind: m[2],
-          passage: m[1] || "",
+      const { items, syntax } = scan(md);
+      return items.map((x) => {
+        const h = HEAD.exec(x.body.replace(/^\s+/, ""));
+        return {
+          kind: x.kind,
+          passage: x.open ? without(md, x.open.end, x.noteStart, syntax) : x.old || "",
           author: h ? h[1] : "",
           date: h ? h[2] : "",
-          text: h ? m[2] === "suggest" ? h[3] : h[3].trim() : m[3].trim(),
-          replies: readReplies(m[4]),
-          start: m.index,
-          end: m.index + m[0].length
-        });
-      }
-      return out;
+          text: h ? x.kind === "suggest" ? h[3] : h[3].trim() : x.body.trim(),
+          replies: readReplies(x.replies),
+          start: x.start,
+          end: x.end,
+          noteStart: x.noteStart,
+          ...x.open ? { id: x.id, open: x.open } : {}
+        };
+      });
     }
     function addReply(md, n, reply) {
       const it = reviewItems(md)[n];
@@ -3145,13 +2297,13 @@ var require_review = __commonJS({
     function removeReply(md, n, k) {
       const it = reviewItems(md)[n];
       if (!it) return md;
-      const whole = md.slice(it.start, it.end);
+      const whole = md.slice(it.noteStart, it.end);
       REPLY.lastIndex = 0;
       let m;
       let i = 0;
       while (m = REPLY.exec(whole)) {
         if (whole.slice(0, m.index).endsWith("%%") && i++ === k) {
-          return md.slice(0, it.start + m.index) + md.slice(it.start + m.index + m[0].length);
+          return md.slice(0, it.noteStart + m.index) + md.slice(it.noteStart + m.index + m[0].length);
         }
       }
       return md;
@@ -3228,45 +2380,130 @@ var require_review = __commonJS({
       const note = `%%[!${kind}] ${clean(author) || "Reviewer"}, ${date}: ${clean(text, kind === "suggest")}%%`;
       return passage ? `==${passage}==${note}` : note;
     }
-    function canHighlight(md, s, e) {
-      const t = md.slice(s, e);
-      if (!t || /\n|==|%%/.test(t)) return false;
+    function addItems(md, adds) {
+      const pending = [...adds].map((a) => ({ ...a })).sort((a, b) => b.end - a.end || b.start - a.start);
+      let out = md;
+      const edit = (pos, del, ins) => {
+        out = out.slice(0, pos) + ins + out.slice(pos + del);
+        const move = (p) => p <= pos ? p : p >= pos + del ? p + ins.length - del : pos + ins.length;
+        for (const a of pending) {
+          a.start = move(a.start);
+          a.end = move(a.end);
+        }
+      };
+      while (pending.length) {
+        const a = pending[0];
+        const point = a.end === a.start;
+        const items = reviewItems(out);
+        const over = items.filter((x) => point ? x.start < a.end && a.end < x.end : a.start < x.end && x.start < a.end);
+        const markable = !point && (a.kind !== "suggest" || balanced(stripReview(out.slice(a.start, a.end))));
+        let text = a.text;
+        let kind = a.kind;
+        if (markable) {
+          for (const x of over.filter((y) => !y.open).sort((p, q) => q.start - p.start)) {
+            const id2 = nextId(out);
+            edit(x.noteStart - 2, 4, `%%}${id2} `);
+            edit(x.start, 2, `%%{${id2}%%`);
+          }
+          snapOut(out, a);
+          const id = nextId(out);
+          edit(a.end, 0, itemText(kind, "", a.author, a.date, text).replace(/^%%/, `%%}${id} `));
+          edit(a.start, 0, `%%{${id}%%`);
+          pending.shift();
+          continue;
+        }
+        const loose = kind === "suggest" && !point;
+        if (loose) {
+          text = looseText(a.quote || out.slice(a.start, a.end), a.text);
+          kind = "review";
+        }
+        const inside = items.filter((x) => x.open ? x.noteStart < a.end && a.end < x.end : x.start < a.end && a.end < x.end);
+        const at = Math.max(a.end, ...inside.map((x) => x.end));
+        edit(at, 0, itemText(kind, "", a.author, a.date, text));
+        pending.shift();
+      }
+      return out;
+    }
+    function oldComments(md) {
+      return scan(md).items.filter((x) => x.old !== void 0).length;
+    }
+    function convertOld(md) {
+      const olds = scan(md).items.filter((x) => x.old !== void 0);
+      const first = Number(nextId(md));
+      let out = md;
+      for (let k = olds.length - 1; k >= 0; k--) {
+        const x = olds[k];
+        const id = String(first + k);
+        out = out.slice(0, x.noteStart - 2) + `%%}${id} ` + out.slice(x.noteStart + 2);
+        out = out.slice(0, x.start) + `%%{${id}%%` + out.slice(x.start + 2);
+      }
+      return out;
+    }
+    function nextId(md) {
+      let n = 0;
+      for (const m of md.matchAll(/%%[{}](\d+)/g)) n = Math.max(n, +m[1]);
+      return String(n + 1);
+    }
+    function balanced(t) {
       const count = (re) => (t.match(re) || []).length;
       return count(/\*\*/g) % 2 === 0 && count(/`/g) % 2 === 0 && count(/\[\[/g) === count(/\]\]/g) && count(/\[/g) === count(/\]/g);
     }
-    function addItems(md, adds) {
-      const sorted = [...adds].sort((a, b) => b.end - a.end || b.start - a.start);
-      let out = md;
-      for (const a of sorted) {
-        const point = a.end === a.start;
-        const over = reviewItems(out).find((x) => point ? x.start < a.end && a.end < x.end : a.start < x.end && x.start < a.end);
-        const lit = !over && a.end > a.start && canHighlight(out, a.start, a.end);
-        const at = over ? Math.max(over.end, a.end) : a.end;
-        const loose = a.kind === "suggest" && a.end > a.start && !lit;
-        let text = a.text;
-        if (loose) {
-          text = looseText(a.quote || out.slice(a.start, a.end), a.text);
-        }
-        const kind = loose ? "review" : a.kind;
-        const piece = itemText(
-          kind,
-          lit ? out.slice(a.start, a.end) : "",
-          a.author,
-          a.date,
-          text
-        );
-        out = lit ? out.slice(0, a.start) + piece + out.slice(a.end) : out.slice(0, at) + piece + out.slice(at);
+    function snapOut(md, a) {
+      const spans = scan(md).syntax.slice();
+      const re = /\[\[[^\]\n]*\]\]|`[^`\n]*`|\^?\[[@^-][^\]\n]*\]|<[^>\n]+>/g;
+      let m;
+      while (m = re.exec(md)) spans.push([m.index, m.index + m[0].length]);
+      for (const [s, e] of spans) {
+        if (s < a.start && a.start < e) a.start = s;
+        if (s < a.end && a.end < e) a.end = e;
       }
-      return out;
     }
     function removeItem(md, n, apply = false) {
       const it = reviewItems(md)[n];
       if (!it) return md;
-      const keep = apply && it.kind === "suggest" ? it.text : it.passage;
-      return md.slice(0, it.start) + keep + md.slice(it.end);
+      const use = apply && it.kind === "suggest";
+      if (!it.open) {
+        return md.slice(0, it.start) + (use ? it.text : it.passage) + md.slice(it.end);
+      }
+      let inner = md.slice(it.open.end, it.noteStart);
+      if (use) {
+        const { syntax } = scan(md);
+        inner = it.text + syntax.filter(([a, b]) => a >= it.open.end && b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join("");
+      }
+      return md.slice(0, it.open.start) + inner + md.slice(it.end);
+    }
+    function editorRanges(md) {
+      const items = reviewItems(md);
+      const hide = items.filter((x) => x.open).map((x) => [x.open.start, x.open.end]).sort((a, b) => a[0] - b[0]);
+      const numbers = /* @__PURE__ */ new Map();
+      let n = 0;
+      const chips = items.map((x) => {
+        const g = googleOf(x);
+        let num = g && numbers.get(g);
+        if (!num) {
+          num = ++n;
+          if (g) numbers.set(g, num);
+        }
+        return {
+          from: x.noteStart,
+          to: x.end,
+          n: num,
+          author: x.author,
+          kind: x.kind,
+          text: x.text
+        };
+      });
+      const marks = items.filter((x) => x.open).map((x) => ({
+        from: x.open.end,
+        to: x.noteStart,
+        author: x.author,
+        kind: x.kind
+      }));
+      const protect = [...hide, ...chips.map((c) => [c.from, c.to])].sort((a, b) => a[0] - b[0]);
+      return { hide, chips, marks, protect };
     }
     function stripReview(md) {
-      return md.replace(ITEM, (m, passage) => passage || "");
+      return without(md, 0, md.length, scan(md).syntax);
     }
     var MONTHS = [
       "Jan",
@@ -3305,8 +2542,20 @@ var require_review = __commonJS({
     function renderMarkdown(md, colourOf = null) {
       let n = 0;
       const numbers = /* @__PURE__ */ new Map();
-      ITEM.lastIndex = 0;
-      return md.replace(ITEM, (m, passage, kind, body) => {
+      const { items } = scan(md);
+      const byId = new Map(items.filter((x) => x.id).map((x) => [x.id, x]));
+      const tintOf = (body) => {
+        const h = HEAD.exec(body.replace(/^\s+/, ""));
+        const c = colourOf && h ? colourOf(h[1]) : null;
+        return c ? ` is-c-${c}` : "";
+      };
+      SCAN.lastIndex = 0;
+      return md.replace(SCAN, (m, openId, passage, id, kind, body) => {
+        if (openId !== void 0) {
+          const it = byId.get(openId);
+          if (!it) return "";
+          return `<span class="dendrite-review-from dendrite-rid-${openId}${it.kind === "suggest" ? " is-suggest" : ""}${tintOf(it.body)}"></span>`;
+        }
         const g = kind === "review" ? googleOf({ kind, text: (HEAD.exec(body.replace(/^\s+/, "")) || [])[3] || body }) : null;
         let num;
         if (g && numbers.has(g)) num = numbers.get(g);
@@ -3316,14 +2565,19 @@ var require_review = __commonJS({
         }
         const h = HEAD.exec(body.replace(/^\s+/, ""));
         const text = h ? h[3] : body.trim();
-        const c = colourOf && h ? colourOf(h[1]) : null;
-        const tint = c ? ` is-c-${c}` : "";
+        const tint = tintOf(body);
+        const marked = id !== void 0 && byId.has(id);
+        const rid = marked ? ` dendrite-rid-${id}` : "";
         const cls = (kind === "suggest" ? " is-suggest" : "") + tint;
-        const sup = `<sup class="dendrite-review-n${cls}">${num}</sup>`;
-        if (kind === "suggest" && !passage) {
+        const sup = `<sup class="dendrite-review-n${cls}${rid}">${num}</sup>`;
+        const upto = marked ? `<span class="dendrite-review-upto${rid}"></span>` : "";
+        if (kind === "suggest" && (marked || !passage)) {
+          if (marked && !text) return upto + sup;
           const lead = /^\s*/.exec(text)[0];
-          return `${lead}<span class="dendrite-review-new${tint}">${text.slice(lead.length)}</span>${sup}`;
+          const gap = lead && marked ? `<span class="dendrite-review-lead">${lead}</span>` : lead;
+          return `${upto}${gap}<span class="dendrite-review-new${tint}${rid}">${text.slice(lead.length)}</span>${sup}`;
         }
+        if (marked) return upto + sup;
         if (!passage) return sup;
         if (kind === "suggest") {
           const added = text ? `<span class="dendrite-review-new${tint}">${text}</span>` : "";
@@ -3331,6 +2585,33 @@ var require_review = __commonJS({
         }
         return `<mark class="dendrite-review-mark${tint}">${passage}</mark>` + sup;
       });
+    }
+    function wrapPassages(root) {
+      const doc = root.ownerDocument;
+      const SHOW_TEXT = 4;
+      for (const from of root.querySelectorAll("span.dendrite-review-from")) {
+        const rid = [...from.classList].find((c) => c.startsWith("dendrite-rid-"));
+        const upto = rid && root.querySelector(
+          `span.dendrite-review-upto.${rid}`
+        );
+        if (!upto) continue;
+        const texts = [];
+        const walk = doc.createTreeWalker(root, SHOW_TEXT);
+        for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+          if (!(from.compareDocumentPosition(t) & 4) || !(upto.compareDocumentPosition(t) & 2)) continue;
+          if (t.parentElement.closest("sup.dendrite-review-n, .dendrite-review-new, .dendrite-review-lead")) continue;
+          if (!t.nodeValue.trim() && t.nodeValue.includes("\n")) continue;
+          texts.push(t);
+        }
+        const suggest = from.classList.contains("is-suggest");
+        const tint = [...from.classList].filter((c) => c.startsWith("is-c-"));
+        for (const t of texts) {
+          const w = doc.createElement(suggest ? "span" : "mark");
+          w.className = [suggest ? "dendrite-review-old" : "dendrite-review-mark", ...tint, rid].join(" ");
+          t.parentNode.insertBefore(w, t);
+          w.appendChild(t);
+        }
+      }
     }
     var REVIEWER_COLOURS = [
       "blue",
@@ -3574,6 +2855,10 @@ var require_review = __commonJS({
       readComments,
       reviewerNames,
       shownAs,
+      wrapPassages,
+      editorRanges,
+      oldComments,
+      convertOld,
       plainMap,
       normalise,
       locate,
@@ -3602,10 +2887,1002 @@ var require_review = __commonJS({
       addItems,
       removeItem,
       stripReview,
-      canHighlight,
       renderMarkdown,
       decorate,
       shortDate
+    };
+  }
+});
+
+// src/cmreview.js
+var require_cmreview = __commonJS({
+  "src/cmreview.js"(exports2, module2) {
+    "use strict";
+    var review2 = require_review();
+    function reviewExtension(colourOf = () => null, nameOf = (x) => x) {
+      const { Decoration, EditorView, WidgetType } = require("@codemirror/view");
+      const { StateField, EditorState } = require("@codemirror/state");
+      class Chip extends WidgetType {
+        constructor(c) {
+          super();
+          this.c = c;
+        }
+        eq(other) {
+          const a = this.c;
+          const b = other.c;
+          return a.n === b.n && a.author === b.author && a.kind === b.kind && a.text === b.text;
+        }
+        toDOM(view) {
+          const c = this.c;
+          const el = view.dom.ownerDocument.createElement("sup");
+          const tint = colourOf(c.author);
+          el.className = "dendrite-review-n dendrite-cm-chip" + (c.kind === "suggest" ? " is-suggest" : "") + (tint ? ` is-c-${tint}` : "");
+          el.textContent = String(c.n);
+          const said = c.kind === "suggest" ? c.text.trim() ? `suggests: ${c.text.trim()}` : "suggests deleting this" : c.text;
+          el.title = `${nameOf(c.author) || "Reviewer"}: ${said}`;
+          return el;
+        }
+        ignoreEvent() {
+          return false;
+        }
+      }
+      const build = (state) => {
+        const r = review2.editorRanges(state.doc.toString());
+        const atomic = [];
+        const all = [];
+        for (const [from, to] of r.hide) {
+          atomic.push(Decoration.replace({}).range(from, to));
+        }
+        for (const c of r.chips) {
+          atomic.push(Decoration.replace({ widget: new Chip(c) }).range(c.from, c.to));
+        }
+        for (const m of r.marks) {
+          if (m.to <= m.from) continue;
+          const tint = colourOf(m.author);
+          all.push(Decoration.mark({ class: "dendrite-cm-passage" + (m.kind === "suggest" ? " is-suggest" : "") + (tint ? ` is-c-${tint}` : "") }).range(m.from, m.to));
+        }
+        const hidden = Decoration.set(atomic, true);
+        return {
+          hidden,
+          all: Decoration.set([...atomic, ...all], true),
+          protect: r.protect
+        };
+      };
+      const field = StateField.define({
+        create: build,
+        update: (value, tr) => tr.docChanged ? build(tr.state) : value,
+        provide: (f) => [
+          EditorView.decorations.from(f, (v) => v.all),
+          EditorView.atomicRanges.of((view) => view.state.field(f).hidden)
+        ]
+      });
+      const user = (tr) => ["input", "delete", "move"].some((e) => tr.isUserEvent(e));
+      const step = EditorState.transactionFilter.of((tr) => {
+        const sel = tr.startState.selection.main;
+        if (!tr.isUserEvent("delete") || !sel.empty) return tr;
+        const { protect } = tr.startState.field(field);
+        let to = null;
+        tr.changes.iterChangedRanges((from, end) => {
+          for (const [s, e] of protect) {
+            if (to === null && s < end && from < e) {
+              to = from < sel.head ? s : e;
+            }
+          }
+        });
+        return to === null ? tr : { selection: { anchor: to } };
+      });
+      const keep = EditorState.changeFilter.of((tr) => {
+        if (!user(tr)) return true;
+        const { protect } = tr.startState.field(field);
+        return protect.length ? protect.flat() : true;
+      });
+      return [field, step, keep];
+    }
+    module2.exports = { reviewExtension };
+  }
+});
+
+// src/editor.js
+var require_editor = __commonJS({
+  "src/editor.js"(exports2, module2) {
+    "use strict";
+    var { Scope: Scope2 } = require("obsidian");
+    var { reviewExtension } = require_cmreview();
+    var EditorClass = null;
+    var resolveFailed = false;
+    function markdownEditorClass(app) {
+      if (EditorClass || resolveFailed) return EditorClass;
+      try {
+        const embed = app.embedRegistry.embedByExtension.md(
+          { app, containerEl: createDiv(), state: {} },
+          null,
+          ""
+        );
+        embed.editable = true;
+        embed.showEditor();
+        const proto = Object.getPrototypeOf(
+          Object.getPrototypeOf(embed.editMode)
+        );
+        embed.unload();
+        EditorClass = proto && proto.constructor;
+        if (typeof EditorClass !== "function") throw new Error("no class");
+      } catch (err) {
+        resolveFailed = true;
+        EditorClass = null;
+        console.warn("Dendrite: Obsidian's editor is unavailable; cards use the text box.", err);
+      }
+      return EditorClass;
+    }
+    function obsidianEditor(app, parent, opts) {
+      const Base = markdownEditorClass(app);
+      if (!Base) return null;
+      class CardEditor extends Base {
+        constructor(container) {
+          super(app, container, {
+            app,
+            onMarkdownScroll: () => {
+            },
+            getMode: () => "source"
+          });
+          this.cardOpts = opts;
+          this.scope = new Scope2(app.scope);
+          this.scope.register([], "Escape", () => {
+            opts.onEscape();
+            return false;
+          });
+          if (opts.onUndo) {
+            this.scope.register(["Mod"], "z", () => !opts.onUndo());
+          }
+          if (opts.onRedo) {
+            for (const [mods, key] of [
+              [["Mod", "Shift"], "z"],
+              [["Mod"], "y"]
+            ]) {
+              this.scope.register(mods, key, () => !opts.onRedo());
+            }
+          }
+          if (opts.onFind) {
+            this.scope.register(["Mod"], "f", () => {
+              opts.onFind();
+              return false;
+            });
+          }
+          this.owner.editMode = this;
+          this.owner.editor = this.editor;
+          this.owner.file = opts.file;
+          this.set(opts.value || "", false);
+          const content = this.editor.cm.contentDOM;
+          content.addEventListener("focusin", () => {
+            app.keymap.pushScope(this.scope);
+            app.workspace.activeEditor = this.owner;
+          });
+          content.addEventListener("blur", () => {
+            app.keymap.popScope(this.scope);
+            if (this._loaded) opts.onBlur();
+          });
+          const ws = app.workspace;
+          const original = ws.setActiveLeaf;
+          const self = this;
+          const hasFocus = () => {
+            const cm = self.editor && self.editor.cm;
+            if (!cm) return false;
+            const dom = cm.contentDOM;
+            return !!cm.hasFocus || !!dom && dom.contains(dom.ownerDocument.activeElement);
+          };
+          const patched = function(...args) {
+            if (hasFocus()) return void 0;
+            return original.apply(this, args);
+          };
+          ws.setActiveLeaf = patched;
+          this.register(() => {
+            if (ws.setActiveLeaf === patched) ws.setActiveLeaf = original;
+          });
+        }
+        // Review comments drawn in place of their syntax; the editor as
+        // Obsidian makes it should that fail.
+        buildLocalExtensions() {
+          const base = super.buildLocalExtensions();
+          try {
+            return [...base, reviewExtension(
+              opts.colourOf,
+              opts.nameOf
+            )];
+          } catch (err) {
+            console.warn("Dendrite: review comments are shown as text in the editor.", err);
+            return base;
+          }
+        }
+        onUpdate(update, changed) {
+          super.onUpdate(update, changed);
+          if (changed) this.cardOpts.onChange();
+          if (this.cardOpts.onRedraw) this.cardOpts.onRedraw();
+        }
+        onunload() {
+          super.onunload();
+          app.keymap.popScope(this.scope);
+          if (app.workspace.activeEditor === this.owner) {
+            app.workspace.activeEditor = null;
+          }
+        }
+      }
+      const el = createDiv({ cls: "dendrite-cm" });
+      let ed;
+      try {
+        ed = new CardEditor(el);
+        parent.addChild(ed);
+        if (!ed.editor || !ed.editor.cm) throw new Error("no CodeMirror");
+      } catch (err) {
+        console.warn("Dendrite: Obsidian's editor failed to start; using the text box.", err);
+        if (ed) {
+          try {
+            parent.removeChild(ed);
+          } catch (e) {
+          }
+        }
+        return null;
+      }
+      return {
+        kind: "obsidian",
+        el,
+        get value() {
+          return ed.editor.cm.state.doc.toString();
+        },
+        focus(atStart) {
+          const editor = ed.editor;
+          editor.focus();
+          if (atStart) {
+            editor.setCursor({ line: 0, ch: 0 });
+          } else {
+            const last = editor.lastLine();
+            editor.setCursor({
+              line: last,
+              ch: editor.getLine(last).length
+            });
+          }
+        },
+        selection() {
+          const editor = ed.editor;
+          return [
+            editor.posToOffset(editor.getCursor("from")),
+            editor.posToOffset(editor.getCursor("to"))
+          ];
+        },
+        replace(text, at) {
+          ed.editor.setValue(text);
+          this.focusAt(at);
+        },
+        focusAt(at, to = at) {
+          const editor = ed.editor;
+          editor.focus();
+          editor.setSelection(
+            editor.offsetToPos(at),
+            editor.offsetToPos(to)
+          );
+        },
+        caretRect() {
+          const cm = ed.editor.cm;
+          const r = cm.coordsAtPos(cm.state.selection.main.head);
+          return r ? { top: r.top, bottom: r.bottom } : null;
+        },
+        rangeAt(start, end) {
+          const cm = ed.editor.cm;
+          const vp = cm.viewport;
+          if (!cm.domAtPos || vp && (start < vp.from || end > vp.to)) {
+            return null;
+          }
+          try {
+            const a = cm.domAtPos(start);
+            const b = cm.domAtPos(end);
+            const r = el.ownerDocument.createRange();
+            r.setStart(a.node, a.offset);
+            r.setEnd(b.node, b.offset);
+            return r;
+          } catch (err) {
+            return null;
+          }
+        },
+        destroy() {
+          parent.removeChild(ed);
+        }
+      };
+    }
+    function textEditor(opts) {
+      const ta = createEl("textarea", { cls: "dendrite-editor" });
+      ta.value = opts.value || "";
+      const fit = () => {
+        ta.style.height = "auto";
+        ta.style.height = ta.scrollHeight + "px";
+      };
+      ta.addEventListener("input", () => {
+        fit();
+        opts.onChange();
+      });
+      ta.addEventListener("blur", () => opts.onBlur());
+      return {
+        kind: "text",
+        el: ta,
+        ta,
+        get value() {
+          return ta.value;
+        },
+        focus(atStart) {
+          fit();
+          ta.focus();
+          const at = atStart ? 0 : ta.value.length;
+          ta.setSelectionRange(at, at);
+        },
+        selection() {
+          return [ta.selectionStart, ta.selectionEnd];
+        },
+        replace(text, at) {
+          ta.value = text;
+          fit();
+          this.focusAt(at);
+        },
+        focusAt(at, to = at) {
+          ta.focus();
+          ta.setSelectionRange(at, to);
+        },
+        caretRect() {
+          return textCaret(ta);
+        },
+        // A text box's text is not in the page's text, so nothing in it
+        // can be painted; find selects its match instead.
+        rangeAt() {
+          return null;
+        },
+        destroy() {
+          ta.remove();
+        }
+      };
+    }
+    function textCaret(ta) {
+      const doc = ta.ownerDocument;
+      const cs = doc.defaultView.getComputedStyle(ta);
+      const copy = doc.createElement("div");
+      for (const p of [
+        "fontFamily",
+        "fontSize",
+        "fontWeight",
+        "lineHeight",
+        "letterSpacing",
+        "tabSize",
+        "boxSizing",
+        "paddingTop",
+        "paddingLeft",
+        "paddingRight",
+        "borderTopWidth",
+        "borderLeftWidth",
+        "borderRightWidth"
+      ]) {
+        copy.style[p] = cs[p];
+      }
+      copy.style.position = "absolute";
+      copy.style.visibility = "hidden";
+      copy.style.whiteSpace = "pre-wrap";
+      copy.style.overflowWrap = "break-word";
+      copy.style.width = ta.offsetWidth + "px";
+      copy.textContent = ta.value.slice(0, ta.selectionEnd);
+      const mark = doc.createElement("span");
+      mark.textContent = "\u200B";
+      copy.appendChild(mark);
+      doc.body.appendChild(copy);
+      const top = ta.getBoundingClientRect().top + mark.offsetTop - ta.scrollTop;
+      const height = mark.offsetHeight;
+      copy.remove();
+      return { top, bottom: top + height };
+    }
+    function cardEditor2(app, parent, opts, useObsidian) {
+      return useObsidian && obsidianEditor(app, parent, opts) || textEditor(opts);
+    }
+    function resetForTests() {
+      EditorClass = null;
+      resolveFailed = false;
+    }
+    module2.exports = { cardEditor: cardEditor2, textEditor, resetForTests };
+  }
+});
+
+// src/pandoc.js
+var require_pandoc = __commonJS({
+  "src/pandoc.js"(exports2, module2) {
+    "use strict";
+    var docx = require_docx();
+    function citekeys(md) {
+      const out = [];
+      const seen = /* @__PURE__ */ new Set();
+      const re = /(?<![\w.@])@([A-Za-z0-9_][\w:.#$%&+?<>~/-]*)/g;
+      let m;
+      while ((m = re.exec(md)) !== null) {
+        const key = m[1].replace(/[.:,;?]+$/, "");
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          out.push(key);
+        }
+      }
+      return out;
+    }
+    function toPandoc(md, resolve) {
+      return md.replace(
+        /!\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]/g,
+        (all, name, alt) => {
+          const path = resolve(name.trim());
+          if (path && /\.(png|jpe?g|gif|svg|webp|pdf)$/i.test(path)) {
+            const width = alt && /^\d+$/.test(alt.trim()) ? `{width=${alt.trim()}px}` : "";
+            return `![](<${path}>)${width}`;
+          }
+          return name.trim();
+        }
+      ).replace(
+        /\[\[([^\]|#]*)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]/g,
+        (all, name, sub, alias) => (alias || sub || name).trim()
+      ).replace(/==([^=\n]+)==/g, "$1");
+    }
+    function pandocCaptions(md) {
+      return md.replace(
+        /^(\*\*Table \d+\.\*\*.*)\n\n(?=\s*\|)/gm,
+        "Table: $1\n\n"
+      ).replace(
+        new RegExp("^!\\[\\]\\(([^)\\n]*)\\)(\\{[^}\\n]*\\})?\\n\\n(\\*\\*Figure \\d+\\.\\*\\*.*)$", "gm"),
+        (all, src, attrs, cap) => `![${cap.replace(/[[\]]/g, "\\$&")}](${src})` + (attrs || "")
+      );
+    }
+    async function fetchBib(keys, port, deps) {
+      const call = async (ks) => {
+        const res = await deps.fetch(
+          `http://127.0.0.1:${port}/better-bibtex/json-rpc`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              method: "item.export",
+              params: [ks, "Better CSL JSON"]
+            })
+          }
+        );
+        return res.json();
+      };
+      const items = (r) => {
+        if (!r || typeof r.result !== "string") return null;
+        try {
+          const a = JSON.parse(r.result);
+          return Array.isArray(a) ? a : null;
+        } catch (err) {
+          return null;
+        }
+      };
+      let first;
+      try {
+        first = await call(keys);
+      } catch (err) {
+        return { down: true };
+      }
+      if (items(first)) return { bib: JSON.stringify(items(first)) };
+      const missing = [];
+      const all = [];
+      for (const k of keys) {
+        let r;
+        try {
+          r = await call([k]);
+        } catch (err) {
+          return { down: true };
+        }
+        if (items(r)) all.push(...items(r));
+        else missing.push(k);
+      }
+      return missing.length ? { missing } : { bib: JSON.stringify(all) };
+    }
+    var ARTICLE_SIZES = [10, 11, 12];
+    function footnoteGap(st) {
+      if (st.footnoteGap) return st.footnoteGap;
+      return `${Math.round(bodyLine(st) * 10) / 10}pt`;
+    }
+    function texEscape(t) {
+      const named = {
+        "\\": "\\textbackslash{}",
+        "^": "\\textasciicircum{}",
+        "~": "\\textasciitilde{}"
+      };
+      return t.replace(/[\\{}$&#%_^~]/g, (c) => named[c] || "\\" + c);
+    }
+    function headerLine(line) {
+      const t = texEscape(line.replace(/\{page\}/g, "").replace(/\{pages\}/g, ""));
+      return t.replace(/\*\*(.+?)\*\*/g, "\\textbf{$1}").replace(/\*(.+?)\*/g, "\\textit{$1}").replace(/\u0001/g, "\\thepage{}").replace(/\u0002/g, "\\pageref*{LastPage}");
+    }
+    function bodyLine(st) {
+      return (st.fontSize || 10) * 1.2 * (st.lineSpacing || 1);
+    }
+    var SLOTS = { left: "L", center: "C", right: "R" };
+    function slotsTex(slots2, cmd) {
+      return Object.entries(SLOTS).map(([k, pos]) => {
+        const text = slots2 && slots2[k] ? slots2[k].split("\n").map(headerLine).join("\\\\") : "";
+        return text ? `\\${cmd}[${pos}]{${text}}` : null;
+      }).filter(Boolean);
+    }
+    var anySlot = (st, re) => [st.header, st.footer].some((h) => h && Object.values(h).some((t) => re.test(t)));
+    var slotLines = (slots2) => Math.max(0, ...Object.values(slots2 || {}).map((t) => t.split("\n").length));
+    function preamble(st) {
+      const out = [`\\setlength{\\skip\\footins}{${footnoteGap(st)} plus 4pt minus 2pt}`];
+      if (st.header || st.footer) {
+        const pages = st.pageNumbers !== false && !anySlot(st, /\{page\}/);
+        const foot = st.footer ? slotsTex(st.footer, "fancyfoot") : [`\\fancyfoot[C]{${pages ? "\\thepage" : ""}}`];
+        if (anySlot(st, /\{pages\}/)) out.push("\\usepackage{lastpage}");
+        const style = [
+          "\\fancyhf{}",
+          ...slotsTex(st.header, "fancyhead"),
+          ...foot,
+          "\\renewcommand{\\headrulewidth}{0pt}"
+        ];
+        out.push(
+          "\\usepackage{fancyhdr}",
+          "\\pagestyle{fancy}",
+          ...style,
+          "\\fancypagestyle{plain}{" + style.join("") + "}"
+        );
+      }
+      out.push(
+        "\\usepackage{caption}",
+        "\\captionsetup{labelformat=empty,labelsep=none,justification=raggedright,singlelinecheck=false}",
+        "\\ifdefined\\LTcapwidth\\setlength{\\LTcapwidth}{\\textwidth}\\fi"
+      );
+      out.push(
+        "\\usepackage{longtable,booktabs,array,calc,etoolbox}",
+        "\\AtBeginEnvironment{longtable}{\\ifdefined\\setstretch\\setstretch{1}\\fi\\renewcommand{\\arraystretch}{1.6}}",
+        "\\newcommand{\\dendriteheadstrut}{\\vrule width0pt height\\arraystretch\\ht\\strutbox\\relax}"
+      );
+      out.push("\\makeatletter\\newcommand{\\dendriteneed}[1]{\\par\\begingroup\\dimen@=1.2\\dimexpr\\f@size pt\\relax\\dimen@=#1\\dimen@\\dimen@ii=\\pagegoal\\advance\\dimen@ii-\\pagetotal\\ifdim\\dimen@>\\dimen@ii\\ifdim\\dimen@ii>\\z@\\vfil\\fi\\break\\fi\\endgroup}\\makeatother");
+      return out.join("\n") + "\n";
+    }
+    var TABLES_LUA = String.raw`local chars = 90
+local KEEP_ROWS = 30
+
+local function cellText(c) return pandoc.utils.stringify(c.contents) end
+
+local function longestWord(s)
+  local m = 0
+  for w in s:gmatch('%S+') do m = math.max(m, utf8.len(w) or #w) end
+  return m
+end
+
+local function rowsOf(t)
+  local all = {}
+  for _, r in ipairs(t.head.rows) do table.insert(all, r) end
+  for _, b in ipairs(t.bodies) do
+    for _, r in ipairs(b.body) do table.insert(all, r) end
+  end
+  for _, r in ipairs(t.foot.rows) do table.insert(all, r) end
+  return all
+end
+
+local function widen(t)
+  local n = #t.colspecs
+  if n == 0 or not t.colspecs[1][2] then return end
+  local word = {}
+  for i = 1, n do word[i] = 1 end
+  for _, r in ipairs(rowsOf(t)) do
+    local i = 1
+    for _, c in ipairs(r.cells) do
+      if word[i] then
+        word[i] = math.max(word[i], longestWord(cellText(c)))
+      end
+      i = i + c.col_span
+    end
+  end
+  -- Widths are fractions of the line less the gaps between columns.
+  local avail = chars - n * 2.5
+  local min, sum = {}, 0
+  for i = 1, n do
+    min[i] = math.min(1, (word[i] * 1.2 + 1) / avail)
+    sum = sum + min[i]
+  end
+  if sum >= 1 then return end
+  local w, give, take = {}, 0, 0
+  for i = 1, n do
+    w[i] = t.colspecs[i][2]
+    if w[i] < min[i] then
+      give = give + min[i] - w[i]
+      w[i] = min[i]
+    else
+      take = take + w[i] - min[i]
+    end
+  end
+  if give == 0 or take == 0 then return end
+  for i = 1, n do
+    if w[i] > min[i] then
+      w[i] = w[i] - give * (w[i] - min[i]) / take
+    end
+    t.colspecs[i] = { t.colspecs[i][1], w[i] }
+  end
+end
+
+-- About how many single-spaced lines a table takes: each row its
+-- tallest cell's wrapped lines and the space rows are set apart by,
+-- with its caption and rules. A table that may break is counted to
+-- its first rows only.
+local function tableLines(t)
+  widen(t)
+  local n = #t.colspecs
+  local avail = chars - n * 2.5
+  local function rowLines(r)
+    local most, i = 1, 1
+    for _, c in ipairs(r.cells) do
+      local w = t.colspecs[i] and t.colspecs[i][2]
+      local len = utf8.len(cellText(c)) or 0
+      if w and w > 0 then
+        most = math.max(most, math.ceil(len / (w * avail)))
+      end
+      i = i + c.col_span
+    end
+    return most + 0.6
+  end
+  local rows = {}
+  for _, r in ipairs(t.head.rows) do table.insert(rows, r) end
+  local body = 0
+  for _, b in ipairs(t.bodies) do
+    for _, r in ipairs(b.body) do
+      table.insert(rows, r)
+      body = body + 1
+    end
+  end
+  for _, r in ipairs(t.foot.rows) do table.insert(rows, r) end
+  local count = #rows
+  if body > KEEP_ROWS then count = math.min(count, #t.head.rows + 3) end
+  local lines = 3
+  for k = 1, count do lines = lines + rowLines(rows[k]) end
+  local caption = utf8.len(pandoc.utils.stringify(t.caption.long)) or 0
+  return lines + math.ceil(caption / chars)
+end
+
+-- A row of three or more dashes, '| --- | --- |', is a rule across the
+-- table. Pandoc reads --- as an em dash, -- as an en dash.
+local function isRule(r)
+  local any = false
+  for _, c in ipairs(r.cells) do
+    local s = cellText(c)
+    if s ~= '' then
+      local d = (s:gsub('\u{2014}', '---'):gsub('\u{2013}', '--'))
+      if not d:match('^:?%-+:?$') then return false end
+      if #(d:gsub(':', '')) >= 3 then any = true end
+    end
+  end
+  return any
+end
+
+local RULE = '\\dendriterule'
+
+-- In LaTeX a rule row becomes \midrule; in Word, which draws no rule
+-- between rows, one before the last row makes that row the table's
+-- total row. A rule under the header or after the last row is dropped,
+-- since a rule is drawn there already.
+local function rules(t, latex)
+  for _, b in ipairs(t.bodies) do
+    local out = pandoc.List()
+    local ruled = nil
+    for k, r in ipairs(b.body) do
+      if not isRule(r) then
+        out:insert(r)
+      elseif #out > 0 and k < #b.body then
+        if latex then
+          for n, c in ipairs(r.cells) do
+            c.contents = n == 1 and
+              { pandoc.Plain({ pandoc.RawInline('latex', RULE) }) } or {}
+          end
+          out:insert(r)
+        else
+          ruled = #out
+        end
+      end
+    end
+    if ruled and ruled == #out - 1 and #t.foot.rows == 0 then
+      t.foot.rows:insert(out:remove(#out))
+    end
+    b.body = out
+  end
+end
+
+local HEAD = '\\begin{minipage}%[b%]{\\linewidth}\\%a+\n'
+
+local function write(t)
+  if not pandoc.write then return t end
+  local tex = pandoc.write(pandoc.Pandoc({ t }), 'latex')
+  -- A header cell is set bottom-aligned in a box, so a header of two
+  -- lines rises to the rule above it; its first line is given a row's.
+  tex = tex:gsub(HEAD, '%0\\dendriteheadstrut\n')
+  local rows = 0
+  for _, b in ipairs(t.bodies) do rows = rows + #b.body end
+  if rows <= KEEP_ROWS then tex = tex:gsub(' \\\\\n', ' \\\\*\n') end
+  tex = tex:gsub(RULE:gsub('%p', '%%%0') .. '[^\n]*\n', '\\midrule\n')
+  return pandoc.RawBlock('latex', tex)
+end
+
+return {
+  { Meta = function(m)
+      local c = m['dendrite-chars']
+      if c then chars = tonumber(pandoc.utils.stringify(c)) or chars end
+    end },
+  -- Headings straight before a table are kept with it: before the
+  -- first of them, room is asked for the headings and the table, or for
+  -- its first rows if it may break.
+  { Blocks = function(blocks)
+      if not FORMAT:match('latex') then return nil end
+      local out = pandoc.List()
+      local i = 1
+      while i <= #blocks do
+        local j = i
+        while j <= #blocks and blocks[j].t == 'Header' do j = j + 1 end
+        if j > i and j <= #blocks and blocks[j].t == 'Table' then
+          local need = (j - i) * 3 + tableLines(blocks[j])
+          out:insert(pandoc.RawBlock('latex', string.format(
+            '\\dendriteneed{%.1f}', need)))
+        end
+        for k = i, math.max(i, j - 1) do out:insert(blocks[k]) end
+        i = math.max(i, j - 1) + 1
+      end
+      return out
+    end },
+  { Table = function(t)
+      local latex = FORMAT:match('latex') ~= nil
+      widen(t)
+      rules(t, latex)
+      if latex then return write(t) end
+      return t
+    end },
+}
+`;
+    var PAPER_PT = { letter: 612, a4: 595.3 };
+    var UNIT_PT = { pt: 1, mm: 2.8453, cm: 28.453, in: 72.27 };
+    function lineChars(st) {
+      const width = PAPER_PT[st.paper] || PAPER_PT.letter;
+      return Math.round((width - 2 * marginPt(st)) / ((st.fontSize || 10) / 2));
+    }
+    function restyledReference(buf, style, zlib) {
+      return docx.reference(buf, {
+        font: style.font,
+        fontSize: style.fontSize || 10,
+        lineSpacing: style.lineSpacing,
+        paper: style.paper,
+        marginPt: marginPt(style)
+      }, zlib);
+    }
+    function marginPt(st) {
+      const m = /^\s*([\d.]+)\s*(pt|mm|cm|in)\s*$/.exec(st.margin || "");
+      return m ? Number(m[1]) * UNIT_PT[m[2]] : 2.5 * UNIT_PT.cm;
+    }
+    function pandocArgs(o) {
+      const st = o.style || {};
+      const args = [
+        o.input,
+        "--from",
+        "markdown",
+        "-o",
+        o.output,
+        "--standalone"
+      ];
+      if (st.defaults) args.unshift(`--defaults=${st.defaults}`);
+      if (o.format === "pdf") {
+        args.push(
+          `--pdf-engine=${o.engine || "xelatex"}`,
+          "-V",
+          `geometry:margin=${st.margin || "2.5cm"}`
+        );
+        if (st.paper) args.push("-V", `papersize=${st.paper}`);
+        if (st.font) args.push("-V", `mainfont=${st.font}`);
+        if (st.fontSize) {
+          if (!ARTICLE_SIZES.includes(st.fontSize)) {
+            args.push("-V", "documentclass=extarticle");
+          }
+          args.push("-V", `fontsize=${st.fontSize}pt`);
+        }
+        if (st.lineSpacing) args.push("-V", `linestretch=${st.lineSpacing}`);
+        const head = slotLines(st.header);
+        const foot = slotLines(st.footer);
+        const inside = !st.headerInMargin;
+        if (head) {
+          if (inside) args.push("-V", "geometry:includehead");
+          args.push(
+            "-V",
+            `geometry:headheight=${Math.ceil(
+              head * bodyLine(st) + 2
+            )}pt`,
+            "-V",
+            "geometry:headsep=12pt"
+          );
+        }
+        if (foot) {
+          if (inside) args.push("-V", "geometry:includefoot");
+          args.push("-V", `geometry:footskip=${Math.ceil(
+            foot * bodyLine(st) + 12
+          )}pt`);
+        }
+        if (!st.header && !st.footer && st.pageNumbers === false) {
+          args.push("-V", "pagestyle=empty");
+        }
+        if (o.header) args.push(`--include-in-header=${o.header}`);
+      }
+      if (o.format === "docx" && st.referenceDocx) {
+        args.push(`--reference-doc=${st.referenceDocx}`);
+      }
+      if (o.bibliography) {
+        args.push("--citeproc", "--bibliography", o.bibliography);
+        if (o.csl) args.push("--csl", o.csl);
+        if (st.referencesTitle !== false) {
+          args.push("-M", "reference-section-title=" + (st.referencesTitle || "References"));
+        }
+      }
+      if (o.resourcePath) args.push("--resource-path", o.resourcePath);
+      if (o.tables) {
+        args.push(
+          `--lua-filter=${o.tables}`,
+          "-M",
+          `dendrite-chars=${lineChars(st)}`
+        );
+      }
+      return args;
+    }
+    var BODY_END = "\n\n```{=latex}\n\\special{pdf:docinfo << /DendriteBodyEnd (\\thepage) >>}\n```\n";
+    function pdfPages(buf, inflate) {
+      const raw = buf.toString("latin1");
+      let all = raw;
+      const re = /stream\r?\n/g;
+      let m;
+      while (m = re.exec(raw)) {
+        const start = m.index + m[0].length;
+        const end = raw.indexOf("endstream", start);
+        if (end < 0) break;
+        try {
+          all += "\n" + inflate(buf.subarray(start, end)).toString("latin1");
+        } catch (err) {
+        }
+        re.lastIndex = end + "endstream".length;
+      }
+      const pages = (all.match(/\/Type\s*\/Page(?![s\w])/g) || []).length;
+      const mark = /\/DendriteBodyEnd\s*\((\d+)\)/.exec(all);
+      return { pages, bodyEnd: mark ? Number(mark[1]) : null };
+    }
+    async function exportDocument(o, deps) {
+      let text = pandocCaptions(toPandoc(o.md, o.resolve || (() => null)));
+      const keys = citekeys(text);
+      const dir = deps.tmpdir();
+      const input = deps.join(dir, `dendrite-${Date.now()}.md`);
+      let bibliography = null;
+      if (keys.length) {
+        const got = await fetchBib(keys, o.port || 23119, deps);
+        if (got.missing) {
+          return { error: "Zotero has no item for " + got.missing.map((k) => "@" + k).join(", ") + ". Nothing was exported." };
+        }
+        if (got.down) {
+          if (!o.fallbackBib) {
+            return { error: `Zotero did not answer on port ${o.port || 23119}: is it open, with Better BibTeX? No fallback .bib is set in Dendrite's settings. Nothing was exported.` };
+          }
+          bibliography = o.fallbackBib;
+        } else {
+          bibliography = deps.join(dir, `dendrite-${Date.now()}.json`);
+          await deps.writeFile(bibliography, got.bib);
+        }
+      }
+      let header = null;
+      let tables = null;
+      if (o.format === "pdf") {
+        text += BODY_END;
+        header = deps.join(dir, `dendrite-${Date.now()}-header.tex`);
+        await deps.writeFile(header, preamble(o.style || {}));
+      }
+      if (o.format === "pdf" || o.format === "docx") {
+        tables = deps.join(dir, `dendrite-${Date.now()}-tables.lua`);
+        await deps.writeFile(tables, TABLES_LUA);
+      }
+      let style = o.style || {};
+      let reference = null;
+      if (o.format === "docx" && !style.referenceDocx && deps.zlib) {
+        reference = deps.join(dir, `dendrite-${Date.now()}-reference.docx`);
+        try {
+          await deps.run(o.pandoc || "pandoc", [
+            "-o",
+            reference,
+            "--print-default-data-file",
+            "reference.docx"
+          ]);
+          await deps.writeFile(reference, restyledReference(
+            await deps.readFile(reference),
+            style,
+            deps.zlib
+          ));
+          style = Object.assign({}, style, { referenceDocx: reference });
+        } catch (err) {
+          deps.remove(reference);
+          reference = null;
+        }
+      }
+      await deps.writeFile(input, text);
+      const args = pandocArgs({
+        input,
+        output: o.output,
+        format: o.format,
+        engine: o.engine,
+        bibliography,
+        csl: o.csl,
+        resourcePath: o.resourcePath,
+        header,
+        tables,
+        style
+      });
+      try {
+        await deps.run(o.pandoc || "pandoc", args);
+        if (o.format === "docx" && deps.zlib) {
+          try {
+            await deps.writeFile(o.output, docx.keepDocument(
+              await deps.readFile(o.output),
+              deps.zlib
+            ));
+          } catch (err) {
+          }
+        }
+      } catch (err) {
+        return { error: pandocError(err, o.pandoc || "pandoc") };
+      } finally {
+        deps.remove(input);
+        if (header) deps.remove(header);
+        if (tables) deps.remove(tables);
+        if (reference) deps.remove(reference);
+        if (bibliography && bibliography !== o.fallbackBib) {
+          deps.remove(bibliography);
+        }
+      }
+      let layout = null;
+      if (o.format === "pdf" && deps.readFile && deps.inflate) {
+        try {
+          layout = pdfPages(await deps.readFile(o.output), deps.inflate);
+        } catch (err) {
+          layout = null;
+        }
+      }
+      return { ok: true, keys, layout };
+    }
+    function measuredRate(words, layout, cited, floatPages = 0) {
+      if (!layout || !words) return null;
+      const end = layout.bodyEnd || (cited ? null : layout.pages);
+      if (!end || end < 2) return null;
+      const text = end - 0.5 - floatPages;
+      return text >= 1 ? Math.round(words / text) : null;
+    }
+    function pandocError(err, cmd) {
+      if (err && err.code === "ENOENT") {
+        return `Pandoc was not found (looked for "${cmd}"). Install it, or set its full path under Pandoc in Dendrite's settings: "which pandoc" in a terminal prints it, "where pandoc" on Windows.`;
+      }
+      const msg = String(err && (err.stderr || err.message) || err).trim().split("\n").slice(-6).join("\n");
+      return `Pandoc failed: ${msg}`;
+    }
+    function searchPath(env, platform, extra) {
+      const out = Object.assign({}, env);
+      const key = Object.keys(out).find((k) => k.toUpperCase() === "PATH") || "PATH";
+      const sep = platform === "win32" ? ";" : ":";
+      const parts = String(out[key] || "").split(sep).filter(Boolean);
+      for (const d of extra) if (!parts.includes(d)) parts.push(d);
+      out[key] = parts.join(sep);
+      return out;
+    }
+    function condaBins(names, home) {
+      return names.filter((n) => /^(ana|mini)conda\d*(-|$)|^(miniforge|mambaforge)\d*(-|$)/.test(n)).map((n) => `${home}/${n}/bin`);
+    }
+    module2.exports = {
+      citekeys,
+      pandocCaptions,
+      pandocError,
+      searchPath,
+      condaBins,
+      toPandoc,
+      TABLES_LUA,
+      lineChars,
+      restyledReference,
+      fetchBib,
+      pandocArgs,
+      exportDocument,
+      pdfPages,
+      measuredRate,
+      footnoteGap,
+      preamble,
+      BODY_END
     };
   }
 });
@@ -5624,7 +5901,9 @@ var DendriteView = class extends ItemView {
     board.addEventListener("pointerdown", (e) => {
       if (e.target === board) this.scrolledByHand = true;
     });
-    this.renderOrphans(stage);
+    const pinned = stage.createDiv({ cls: "dendrite-pinned" });
+    this.renderOrphans(pinned);
+    this.renderOldComments(pinned);
     if (this.resizer) this.resizer.observe(board);
     board.toggleClass("is-print-only", this.printOnly);
     this.shown = this.shownTree();
@@ -5768,6 +6047,72 @@ var DendriteView = class extends ItemView {
       b.onclick = () => this.trashOrphans(empty);
     }
   }
+  /**
+   * Review comments still in the old form, ==passage== then its note,
+   * offered a one-way conversion to markers, the form Dendrite now
+   * writes, in a panel over the board.
+   */
+  async renderOldComments(pinned) {
+    const bodies = await this.loadBodies();
+    let n = 0;
+    let cards = 0;
+    for (const body of bodies.values()) {
+      const k = review.oldComments(body);
+      n += k;
+      if (k) cards++;
+    }
+    if (!n || !this.contentEl.contains(pinned)) return;
+    const panel = pinned.createDiv({
+      cls: "dendrite-orphans dendrite-old-comments"
+    });
+    panel.createDiv({
+      cls: "dendrite-orphans-head",
+      text: `${n} review comment${n === 1 ? "" : "s"} in ${cards} card${cards === 1 ? "" : "s"} are in the old style`
+    });
+    panel.createDiv({
+      cls: "dendrite-old-comments-desc",
+      text: "Converting holds each passage between markers, which lets comments overlap and draws them alike everywhere. It is one way: a device still on an older Dendrite shows converted comments without their passages. The text itself does not change, and Undo takes it back."
+    });
+    const foot = panel.createDiv({ cls: "dendrite-orphans-foot" });
+    const go = foot.createEl("button", {
+      cls: "mod-cta",
+      text: "Convert"
+    });
+    go.onclick = () => this.convertOldComments();
+  }
+  /** Every card's old-form comments converted to markers, one undo. */
+  async convertOldComments() {
+    if (this.editing) await this.endEdit();
+    const restores = [];
+    let n = 0;
+    for (const node of core.allNodes(this.root)) {
+      const f = this.cardFile(node.id);
+      if (!f) continue;
+      const data = await this.app.vault.read(f);
+      const { body } = core.splitFrontmatter(data);
+      const k = review.oldComments(body);
+      if (!k) continue;
+      const next = review.convertOld(body);
+      const out = await this.writeCard(f, (d) => core.splitFrontmatter(d).fm + next);
+      restores.push({
+        path: f.path,
+        text: data,
+        ifBody: core.splitFrontmatter(out).body
+      });
+      n += k;
+      this.invalidate(node.id);
+    }
+    if (restores.length) {
+      this.pushUndo({
+        active: this.active,
+        files: [],
+        text: true,
+        restores
+      });
+    }
+    new Notice(`Dendrite: converted ${n} review comment${n === 1 ? "" : "s"} to the new style.`);
+    this.render();
+  }
   async trashOrphans(files) {
     for (const f of files) await this.app.fileManager.trashFile(f);
     this.render();
@@ -5882,6 +6227,7 @@ var DendriteView = class extends ItemView {
         comp
       );
       if (notes.length) {
+        review.wrapPassages(out);
         review.decorate(
           out,
           notes,
@@ -7325,10 +7671,14 @@ var DendriteView = class extends ItemView {
   }
   /** A card's editor: Obsidian's, unless the settings say not. */
   newEditor(handlers) {
+    const colours = this.colourOf();
     return cardEditor(
       this.app,
       this,
-      handlers,
+      Object.assign({
+        colourOf: (who) => colours(who || "Reviewer"),
+        nameOf: this.nameOf()
+      }, handlers),
       this.plugin.settings.obsidianEditor !== false
     );
   }
@@ -8305,6 +8655,7 @@ var DendriteView = class extends ItemView {
       comp
     );
     if (notes.length) {
+      review.wrapPassages(out);
       review.decorate(
         out,
         notes,
@@ -9915,9 +10266,6 @@ var DendriteView = class extends ItemView {
       (id) => open.get(id) || 0
     );
     this.statusInfo = report.cards;
-    const revise = this.plugin.statusColour && this.plugin.statusColour("revise");
-    if (revise) this.board.style.setProperty("--dendrite-revise", revise);
-    else this.board.style.removeProperty("--dendrite-revise");
     for (const [id, card] of this.cardEls) {
       const old = card.querySelector(":scope > .dendrite-status");
       if (old) old.remove();
@@ -11363,6 +11711,10 @@ var DendritePreview = class extends ItemView {
   passageOf(el, n) {
     const sup = [...el.querySelectorAll("sup.dendrite-review-n")].find((x) => x.textContent === String(n + 1));
     if (!sup) return [];
+    const rid = [...sup.classList].find((c) => c.startsWith("dendrite-rid-"));
+    if (rid) {
+      return [...el.querySelectorAll(`.${rid}`)].filter((x) => !/\bdendrite-review-(from|upto)\b/.test(x.className));
+    }
     const out = [sup];
     for (let p = sup.previousElementSibling; p && /\bdendrite-review-(mark|old|new)\b/.test(p.className); p = p.previousElementSibling) out.unshift(p);
     return out;
@@ -11738,6 +12090,7 @@ var DendritePreview = class extends ItemView {
         path,
         b.comp
       );
+      review.wrapPassages(b.el);
       b.el.toggleClass("is-notes-gathered", this.notesAt !== "card");
       if (this.notesAt !== "card") renumberRefs(b.el, s.refs || []);
     }
@@ -12701,7 +13054,7 @@ var ReviewersModal = class extends Modal {
       });
       if (e.note) {
         const as = block.createDiv({ cls: "dendrite-reviewer-names" });
-        as.createSpan({ text: "written as:" });
+        as.createSpan({ text: "includes:" });
         for (const x of names) {
           const chip = as.createSpan({
             cls: "dendrite-reviewer-alias"
@@ -14134,8 +14487,8 @@ module.exports = class DendritePlugin extends Plugin {
   /**
    * A status's colour, from Pretty Properties' colour for that value of
    * dendrite_status, so the Properties panel, Bases and the board agree.
-   * Revise and unsplit fall back to orange; other values stay plain
-   * unless coloured there.
+   * Unset, null: a flag is drawn in the neutral --dendrite-flag, and
+   * other values stay plain.
    */
   statusColour(status) {
     const pp = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins["pretty-properties"];
@@ -14147,7 +14500,7 @@ module.exports = class DendritePlugin extends Plugin {
     if (pill && typeof pill === "string" && pill !== "default" && pill !== "none") {
       return pill.startsWith("#") ? pill : `var(--color-${pill})`;
     }
-    return core.isFlag(status) ? "var(--color-orange)" : null;
+    return null;
   }
   previewStatuses(file) {
     for (const l of this.app.workspace.getLeavesOfType(PREVIEW)) {

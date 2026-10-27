@@ -173,8 +173,8 @@ test('a change in a table cell or before a paragraph\'s first word is ' +
         ['T', 'exact', 'DOGMA-seq | [18]']]);
 });
 
-test('comments are written after their passage, highlighted where the ' +
-     'markdown allows, and read back', () => {
+test('comments are written with their passage between markers, and ' +
+     'read back', () => {
     const md = 'The cohort is composed of **longitudinally paired** ' +
         'samples.\nSamples were collected between 2014 and 2023.';
     const s1 = md.indexOf('composed');
@@ -187,11 +187,11 @@ test('comments are written after their passage, highlighted where the ' +
           'patients.' },
         { kind: 'suggest', start: s2, end: e2, author: 'Aly Karsan',
           date: '2026-10-23', text: 'from 2014 to 2023' }]);
-    assert.equal(out, 'The cohort is ==composed of **longitudinally ' +
-        'paired** samples==%%[!review] Aly Karsan, 2026-10-23: Say how ' +
+    assert.equal(out, 'The cohort is %%{2%%composed of **longitudinally ' +
+        'paired** samples%%}2 [!review] Aly Karsan, 2026-10-23: Say how ' +
         'many % samples, not only patients.%%.\nSamples were collected ' +
-        '==between 2014 and 2023==%%[!suggest] Aly Karsan, 2026-10-23: ' +
-        'from 2014 to 2023%%.');
+        '%%{1%%between 2014 and 2023%%}1 [!suggest] Aly Karsan, ' +
+        '2026-10-23: from 2014 to 2023%%.');
     const items = r.reviewItems(out);
     assert.deepEqual(items.map((x) => [x.kind, x.passage, x.author,
                                        x.date, x.text]), [
@@ -202,10 +202,10 @@ test('comments are written after their passage, highlighted where the ' +
          'from 2014 to 2023']]);
     assert.equal(r.stripReview(out), md.replace('%%', '%'),
                  'export prints the text as it was');
-    assert.equal(r.removeItem(out, 1, true), 'The cohort is ==composed ' +
-        'of **longitudinally paired** samples==%%[!review] Aly Karsan, ' +
-        '2026-10-23: Say how many % samples, not only patients.%%.\n' +
-        'Samples were collected from 2014 to 2023.', 'applied');
+    assert.equal(r.removeItem(out, 1, true), 'The cohort is %%{2%%' +
+        'composed of **longitudinally paired** samples%%}2 [!review] Aly ' +
+        'Karsan, 2026-10-23: Say how many % samples, not only patients.' +
+        '%%.\nSamples were collected from 2014 to 2023.', 'applied');
     assert.equal(r.removeItem(r.removeItem(out, 1), 0), md,
                  'resolved, the text is as it was');
 });
@@ -223,33 +223,87 @@ test('a passage that cannot be highlighted as it is gets its comment ' +
 });
 
 test('a comment on a passage that overlaps or sits inside one already ' +
-     'in the card goes after that one, leaving it whole', () => {
+     'in the card is held between markers, the one it overlaps too, so ' +
+     'both keep their own text', () => {
     const had = '==of which 155 have paired RNA==%%[!review] Claude, ' +
         '2026-10-23: Hm.%%';
     const md = `Samples from 175 patients, ${had}. More.`;
     const by = { author: 'Aly Karsan 2', date: '2026-10-23' };
+    const claude = '%%}1 [!review] Claude, 2026-10-23: Hm.%%';
     // Overlapping its start, as ", of which 155 have p".
     const over = r.addItems(md, [{ kind: 'suggest', ...by,
-        start: md.indexOf(', of'), end: md.indexOf('aired'),
+        start: md.indexOf(', ==of'), end: md.indexOf('aired'),
         text: ' and p', quote: ', of which 155 have p' }]);
-    assert.equal(over, `Samples from 175 patients, ${had}%%[!review] ` +
-        'Aly Karsan 2, 2026-10-23: replace ", of which 155 have p" with ' +
-        '"and p"%%. More.');
+    assert.equal(over, 'Samples from 175 patients%%{2%%, %%{1%%of which ' +
+        '155 have p%%}2 [!suggest] Aly Karsan 2, 2026-10-23:  and p%%' +
+        `aired RNA${claude}. More.`);
+    assert.deepEqual(r.reviewItems(over).map((x) => [x.author, x.passage]),
+        [['Aly Karsan 2', ', of which 155 have p'],
+         ['Claude', 'of which 155 have paired RNA']]);
+    assert.equal(r.stripReview(over), r.stripReview(md));
+    // Brought in again: known as already in.
+    assert.ok(r.alreadyIn(over, { kind: 'change', ...by,
+        quote: ', of which 155 have p', insert: ' and p' }));
     // Wholly inside its passage.
     const s = md.indexOf('155');
     const inside = r.addItems(md, [{ kind: 'review', ...by, start: s,
         end: s + 3, text: 'Check.' }]);
-    assert.equal(inside, `Samples from 175 patients, ${had}%%[!review] ` +
-        'Aly Karsan 2, 2026-10-23: Check.%%. More.');
-    // Brought in again: known as already in, though written as a comment.
-    assert.ok(r.alreadyIn(over, { kind: 'change', ...by,
-        quote: ', of which 155 have p', insert: ' and p' }));
-    for (const out of [over, inside]) {
-        assert.deepEqual(r.reviewItems(out).map((x) =>
-            [x.author, x.passage]), [
-            ['Claude', 'of which 155 have paired RNA'],
-            ['Aly Karsan 2', '']]);
-    }
+    assert.equal(inside, 'Samples from 175 patients, %%{1%%of which ' +
+        '%%{2%%155%%}2 [!review] Aly Karsan 2, 2026-10-23: Check.%% have ' +
+        `paired RNA${claude}. More.`);
+    // A point inside a highlighted passage goes after its comment.
+    const point = r.addItems(md, [{ kind: 'review', ...by, start: s,
+        end: s, text: 'Here.' }]);
+    assert.equal(point, `Samples from 175 patients, ${had}%%[!review] ` +
+        'Aly Karsan 2, 2026-10-23: Here.%%. More.');
+});
+
+test('a comment on a passage across a line or half of some bold is held ' +
+     'between markers, kept out of a link', () => {
+    const md = 'Half **bold text** here,\nsee [[Note|the note]] too.';
+    const by = { author: 'R', date: '2026-10-24' };
+    const out = r.addItems(md, [{ kind: 'review', ...by,
+        start: md.indexOf('text'), end: md.indexOf('the note') + 3,
+        text: 'Why?' }]);
+    assert.equal(out, 'Half **bold %%{1%%text** here,\nsee [[Note|the ' +
+        'note]]%%}1 [!review] R, 2026-10-24: Why?%% too.');
+    assert.equal(r.reviewItems(out)[0].passage,
+                 'text** here,\nsee [[Note|the note]]');
+});
+
+test('comments written with start and end markers may overlap: each is ' +
+     'read with its passage, export keeps the text, and taking one out ' +
+     'leaves the other whole', () => {
+    const md = 'Samples, %%{1%%of which %%{2%%155 have p' +
+        '%%}2 [!suggest] Aly Karsan 2, 2026-10-23:  and p%%' +
+        'aired RNA%%}1 [!review] Claude, 2026-10-23: Hm.%%' +
+        '%%[!reply] Me, 2026-10-24: Yes.%%. More ==text==' +
+        '%%[!review] Joshua Bridgers, 2026-10-24: Old form.%%.';
+    const items = r.reviewItems(md);
+    assert.deepEqual(items.map((x) => [x.kind, x.author, x.passage,
+                                       x.text, x.replies.length]), [
+        ['suggest', 'Aly Karsan 2', '155 have p', ' and p', 0],
+        ['review', 'Claude', 'of which 155 have paired RNA', 'Hm.', 1],
+        ['review', 'Joshua Bridgers', 'text', 'Old form.', 0]]);
+    assert.equal(r.stripReview(md),
+                 'Samples, of which 155 have paired RNA. More text.');
+    // Claude's taken out: Aly's markers stay, around the same text.
+    const noClaude = r.removeItem(md, 1);
+    assert.deepEqual(r.reviewItems(noClaude).map((x) => x.passage),
+                     ['155 have p', 'text']);
+    assert.equal(r.stripReview(noClaude), r.stripReview(md));
+    // Aly's applied: her text in, Claude's comment around the result.
+    const applied = r.removeItem(md, 0, true);
+    assert.equal(r.stripReview(applied),
+                 'Samples, of which  and paired RNA. More text.');
+    assert.deepEqual(r.reviewItems(applied).map((x) => x.passage),
+                     ['of which  and paired RNA', 'text']);
+    // A reply goes after Claude's own note, not into Aly's.
+    const replied = r.addReply(md, 1, { author: 'Me', date: '2026-10-25',
+                                        text: 'Again.' });
+    assert.deepEqual(r.reviewItems(replied)[1].replies.map((x) => x.text),
+                     ['Yes.', 'Again.']);
+    assert.equal(r.removeReply(replied, 1, 0).includes('Yes.'), false);
 });
 
 test('export prints a commented passage without its highlight, and ' +
@@ -299,6 +353,80 @@ test('on the board a comment\'s passage is marked and numbered, with a ' +
     root.querySelectorAll('.dendrite-review-note')[2].dispatchEvent(
         new doc.defaultView.MouseEvent('contextmenu', { bubbles: true }));
     assert.deepEqual(menus, [2]);
+});
+
+test('overlapping comments are drawn as marks over their own text, ' +
+     'nested where they overlap, and numbered at their notes', () => {
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div id="root"></div>').window.document;
+    const md = 'Samples, %%{1%%of which **%%{2%%155** have p' +
+        '%%}2 [!suggest] Aly, 2026-10-23:  and p%%' +
+        'aired RNA%%}1 [!review] Claude, 2026-10-23: Hm.%%. End.';
+    const colours = new Map([['Aly', 'green'], ['Claude', 'pink']]);
+    const html = r.renderMarkdown(md, (who) => colours.get(who));
+    // As Obsidian would render it.
+    const root = doc.getElementById('root');
+    root.innerHTML = '<p>' + html.replace(/\*\*(.*?)\*\*/,
+                                          '<strong>$1</strong>') + '</p>';
+    r.wrapPassages(root);
+    const marked = (sel) => [...root.querySelectorAll(sel)]
+        .map((x) => x.textContent).join('|');
+    assert.equal(marked('mark.dendrite-review-mark.dendrite-rid-1'),
+                 'of which |155| have p|aired RNA');
+    assert.equal(marked('.dendrite-review-old.dendrite-rid-2'),
+                 '155| have p');
+    assert.ok(root.querySelector('mark.is-c-pink .dendrite-review-old' +
+                                 '.is-c-green'), 'nested where they overlap');
+    assert.equal(marked('.dendrite-review-new'), 'and p');
+    assert.deepEqual([...root.querySelectorAll('sup.dendrite-review-n')]
+        .map((x) => x.textContent), ['1', '2']);
+    assert.equal(root.textContent, 'Samples, of which 155 have p and p1' +
+                 'aired RNA2. End.');
+    r.decorate(root, r.reviewItems(md), () => {});
+    assert.equal(root.querySelectorAll('.dendrite-review-note').length, 2);
+});
+
+test('comments in the old highlighted form are converted to markers, ' +
+     'once and one way, the text and the comments unchanged', () => {
+    const md = 'A ==first==%%[!review] R, 2026-10-23: One.%%%%[!reply] ' +
+        'Me, 2026-10-24: Ok.%% and %%{1%%x%%}1 [!review] S, 2026-10-23: ' +
+        'Two.%% then ==old==%%[!suggest] R, 2026-10-24: new%%, and a ' +
+        'point.%%[!review] R, 2026-10-24: Three.%%';
+    assert.equal(r.oldComments(md), 2);
+    const out = r.convertOld(md);
+    assert.equal(out, 'A %%{2%%first%%}2 [!review] R, 2026-10-23: One.%%' +
+        '%%[!reply] Me, 2026-10-24: Ok.%% and %%{1%%x%%}1 [!review] S, ' +
+        '2026-10-23: Two.%% then %%{3%%old%%}3 [!suggest] R, 2026-10-24: ' +
+        'new%%, and a point.%%[!review] R, 2026-10-24: Three.%%');
+    assert.equal(r.oldComments(out), 0);
+    assert.equal(r.stripReview(out), r.stripReview(md));
+    const strip = (x) => ({ ...x, start: 0, end: 0, noteStart: 0,
+                            open: undefined, id: undefined });
+    assert.deepEqual(r.reviewItems(out).map(strip),
+                     r.reviewItems(md).map(strip));
+    assert.equal(r.convertOld(out), out, 'nothing left to convert');
+});
+
+test('in the card editor a comment\'s syntax is hidden: its start marker ' +
+     'gone, its note and replies a numbered chip, its passage tinted, and ' +
+     'typing kept out of them', () => {
+    const md = 'A %%{1%%of %%{2%%155%%}2 [!suggest] Aly, 2026-10-23: 200%%' +
+        ' have%%}1 [!review] Claude, 2026-10-23: Hm.%%%%[!reply] Me, ' +
+        '2026-10-24: Yes.%% and ==old==%%[!review] Josh, 2026-10-24: Ok.%%.';
+    const e = r.editorRanges(md);
+    const show = ([a, b]) => md.slice(a, b);
+    assert.deepEqual(e.hide.map(show), ['%%{1%%', '%%{2%%']);
+    assert.deepEqual(e.chips.map((c) => [c.n, c.author, c.kind, show(
+        [c.from, c.to])]), [
+        [1, 'Aly', 'suggest', '%%}2 [!suggest] Aly, 2026-10-23: 200%%'],
+        [2, 'Claude', 'review', '%%}1 [!review] Claude, 2026-10-23: Hm.%%' +
+            '%%[!reply] Me, 2026-10-24: Yes.%%'],
+        [3, 'Josh', 'review', '%%[!review] Josh, 2026-10-24: Ok.%%']]);
+    assert.deepEqual(e.marks.map((m) => [m.author, show([m.from, m.to])]),
+        [['Aly', '155'], ['Claude', 'of %%{2%%155%%}2 [!suggest] Aly, ' +
+            '2026-10-23: 200%% have']]);
+    assert.deepEqual(e.protect.map(show), [...e.hide, ...e.chips.map(
+        (c) => [c.from, c.to])].sort((a, b) => a[0] - b[0]).map(show));
 });
 
 test('a suggested insertion keeps its spaces, and applying it puts it ' +

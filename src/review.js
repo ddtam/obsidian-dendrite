@@ -730,9 +730,59 @@ function place(c, s, e, how) {
 // ---- Review comments in a card's text ----------------------------------
 
 // A comment or suggested change, its passage, and the replies to it,
-// each written straight after it: %%[!reply] Author, date: text%%.
-const ITEM = new RegExp('(?:==([^=\\n]+?)==)?%%\\[!(review|suggest)\\]' +
-    '\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)', 'g');
+// each written straight after it: %%[!reply] Author, date: text%%. The
+// passage is highlighted, ==passage==%%[!review] …%%, or, where it
+// cannot be, as where it overlaps another's, held between a start marker
+// and its note, matched by id so they may interleave:
+// %%{1%%passage%%}1 [!review] …%%.
+const SCAN = new RegExp('%%\\{([a-z0-9]+)%%|' +
+    '(?:==([^=\\n]+?)==)?%%(?:\\}([a-z0-9]+)\\s+)?' +
+    '\\[!(review|suggest)\\]\\s*([\\s\\S]*?)%%' +
+    '((?:%%\\[!reply\\][\\s\\S]*?%%)*)', 'g');
+
+/**
+ * A card's comments as found, in order, with the ranges of their syntax
+ * (markers, highlight marks, notes and replies) for leaving out: an item
+ * is { kind, old (a highlighted passage), id, open (its start marker's
+ * range), start, noteStart, end, body, replies }.
+ */
+function scan(md) {
+    const opens = new Map();
+    const items = [];
+    const syntax = [];
+    SCAN.lastIndex = 0;
+    let m;
+    while ((m = SCAN.exec(md))) {
+        const at = m.index;
+        const end = at + m[0].length;
+        if (m[1] !== undefined) {
+            opens.set(m[1], { start: at, end });
+            syntax.push([at, end]);
+            continue;
+        }
+        const [, , old, id, kind, body, replies] = m;
+        const noteStart = old !== undefined ? at + old.length + 4 : at;
+        if (old !== undefined) syntax.push([at, at + 2]);
+        syntax.push([old !== undefined ? noteStart - 2 : noteStart, end]);
+        const open = id !== undefined && opens.get(id) || null;
+        items.push({ kind, old, id: open ? id : undefined, open,
+                     start: open ? open.start : at, noteStart, end, body,
+                     replies });
+    }
+    return { items, syntax };
+}
+
+/** The text of md from `s` to `e`, the ranges in `syntax` left out. */
+function without(md, s, e, syntax) {
+    let out = '';
+    let at = s;
+    for (const [a, b] of syntax) {
+        if (b <= at || a >= e) continue;
+        if (a > at) out += md.slice(at, a);
+        at = Math.max(at, b);
+    }
+    return out + md.slice(at, Math.max(at, e));
+}
 const REPLY = /%%\[!reply\]\s*([\s\S]*?)%%/g;
 const HEAD = /^(.*?),\s*(\d{4}-\d{2}-\d{2}):\s?([\s\S]*)$/;
 
@@ -755,19 +805,20 @@ function readReplies(chunk) {
  * the offsets of the whole of it, highlight and replies included.
  */
 function reviewItems(md) {
-    const out = [];
-    ITEM.lastIndex = 0;
-    let m;
-    while ((m = ITEM.exec(md))) {
-        const h = HEAD.exec(m[3].replace(/^\s+/, ''));
-        out.push({ kind: m[2], passage: m[1] || '',
-                   author: h ? h[1] : '', date: h ? h[2] : '',
-                   text: h ? (m[2] === 'suggest' ? h[3] : h[3].trim()) :
-                       m[3].trim(),
-                   replies: readReplies(m[4]),
-                   start: m.index, end: m.index + m[0].length });
-    }
-    return out;
+    const { items, syntax } = scan(md);
+    return items.map((x) => {
+        const h = HEAD.exec(x.body.replace(/^\s+/, ''));
+        return { kind: x.kind,
+                 passage: x.open ?
+                     without(md, x.open.end, x.noteStart, syntax) :
+                     x.old || '',
+                 author: h ? h[1] : '', date: h ? h[2] : '',
+                 text: h ? (x.kind === 'suggest' ? h[3] : h[3].trim()) :
+                     x.body.trim(),
+                 replies: readReplies(x.replies),
+                 start: x.start, end: x.end, noteStart: x.noteStart,
+                 ...(x.open ? { id: x.id, open: x.open } : {}) };
+    });
 }
 
 /**
@@ -786,14 +837,14 @@ function addReply(md, n, reply) {
 function removeReply(md, n, k) {
     const it = reviewItems(md)[n];
     if (!it) return md;
-    const whole = md.slice(it.start, it.end);
+    const whole = md.slice(it.noteStart, it.end);
     REPLY.lastIndex = 0;
     let m;
     let i = 0;
     while ((m = REPLY.exec(whole))) {
         if (whole.slice(0, m.index).endsWith('%%') && i++ === k) {
-            return md.slice(0, it.start + m.index) +
-                md.slice(it.start + m.index + m[0].length);
+            return md.slice(0, it.noteStart + m.index) +
+                md.slice(it.noteStart + m.index + m[0].length);
         }
     }
     return md;
@@ -921,52 +972,126 @@ function itemText(kind, passage, author, date, text) {
 }
 
 /**
- * Whether markdown between two offsets can be highlighted as it is: on
- * one line, with no highlight, comment or unbalanced markup in it.
+ * A card's markdown with comments added: `adds` is [{ kind, start, end,
+ * author, date, text }] at offsets in `md`. A passage is held between
+ * markers, its ends moved out of a link or another comment's syntax, and
+ * a comment in the old form that it overlaps is converted too; a
+ * suggestion whose passage would leave half of some markup behind is
+ * kept as a comment after it, quoting what it would replace.
  */
-function canHighlight(md, s, e) {
-    const t = md.slice(s, e);
-    if (!t || /\n|==|%%/.test(t)) return false;
+function addItems(md, adds) {
+    const pending = [...adds].map((a) => ({ ...a }))
+        .sort((a, b) => b.end - a.end || b.start - a.start);
+    let out = md;
+    // One change to the text, every offset still to use moved with it.
+    const edit = (pos, del, ins) => {
+        out = out.slice(0, pos) + ins + out.slice(pos + del);
+        const move = (p) => (p <= pos ? p : p >= pos + del ?
+            p + ins.length - del : pos + ins.length);
+        for (const a of pending) {
+            a.start = move(a.start);
+            a.end = move(a.end);
+        }
+    };
+    while (pending.length) {
+        const a = pending[0];
+        const point = a.end === a.start;
+        const items = reviewItems(out);
+        // A comment the passage overlaps, or that a point falls inside.
+        const over = items.filter((x) => (point ?
+            x.start < a.end && a.end < x.end :
+            a.start < x.end && x.start < a.end));
+        const markable = !point && (a.kind !== 'suggest' ||
+            balanced(stripReview(out.slice(a.start, a.end))));
+        let text = a.text;
+        let kind = a.kind;
+        if (markable) {
+            // The comments it overlaps held between markers as well, so
+            // each keeps its own text.
+            for (const x of over.filter((y) => !y.open)
+                .sort((p, q) => q.start - p.start)) {
+                const id = nextId(out);
+                edit(x.noteStart - 2, 4, `%%}${id} `);
+                edit(x.start, 2, `%%{${id}%%`);
+            }
+            snapOut(out, a);
+            const id = nextId(out);
+            edit(a.end, 0, itemText(kind, '', a.author, a.date, text)
+                .replace(/^%%/, `%%}${id} `));
+            edit(a.start, 0, `%%{${id}%%`);
+            pending.shift();
+            continue;
+        }
+        // A suggestion that cannot be marked, as on half of some bold,
+        // can no longer be applied safely, so it is kept as a comment
+        // saying what it was; an insertion needs no mark.
+        const loose = kind === 'suggest' && !point;
+        if (loose) {
+            text = looseText(a.quote || out.slice(a.start, a.end), a.text);
+            kind = 'review';
+        }
+        // Not inside another comment: after it.
+        const inside = items.filter((x) => (x.open ?
+            x.noteStart < a.end && a.end < x.end :
+            x.start < a.end && a.end < x.end));
+        const at = Math.max(a.end, ...inside.map((x) => x.end));
+        edit(at, 0, itemText(kind, '', a.author, a.date, text));
+        pending.shift();
+    }
+    return out;
+}
+
+/** How many of a card's comments are in the old, highlighted form. */
+function oldComments(md) {
+    return scan(md).items.filter((x) => x.old !== undefined).length;
+}
+
+/**
+ * A card's markdown with each comment in the old form, ==passage== then
+ * its note, held between markers instead; the text is unchanged.
+ */
+function convertOld(md) {
+    const olds = scan(md).items.filter((x) => x.old !== undefined);
+    const first = Number(nextId(md));
+    let out = md;
+    for (let k = olds.length - 1; k >= 0; k--) {
+        const x = olds[k];
+        const id = String(first + k);
+        out = out.slice(0, x.noteStart - 2) + `%%}${id} ` +
+            out.slice(x.noteStart + 2);
+        out = out.slice(0, x.start) + `%%{${id}%%` + out.slice(x.start + 2);
+    }
+    return out;
+}
+
+/** The next free marker id in a card's markdown. */
+function nextId(md) {
+    let n = 0;
+    for (const m of md.matchAll(/%%[{}](\d+)/g)) n = Math.max(n, +m[1]);
+    return String(n + 1);
+}
+
+/** Whether a passage's own markup opens and closes within it. */
+function balanced(t) {
     const count = (re) => (t.match(re) || []).length;
     return count(/\*\*/g) % 2 === 0 && count(/`/g) % 2 === 0 &&
         count(/\[\[/g) === count(/\]\]/g) && count(/\[/g) === count(/\]/g);
 }
 
 /**
- * A card's markdown with comments added: `adds` is [{ kind, start, end,
- * author, date, text }] at offsets in `md`. Where the passage cannot be
- * highlighted as it is, the comment goes after it with no highlight, and
- * a suggestion quotes the passage it was on.
+ * A passage's ends moved out of anything a marker would break, a link,
+ * code, a citation or footnote, a tag, or a comment's own syntax: its
+ * start to before it, its end to after.
  */
-function addItems(md, adds) {
-    const sorted = [...adds].sort((a, b) => b.end - a.end ||
-                                            b.start - a.start);
-    let out = md;
-    for (const a of sorted) {
-        // A comment already here that the passage overlaps, or that its
-        // end falls inside: the new one goes after it, not into it.
-        const point = a.end === a.start;
-        const over = reviewItems(out).find((x) => (point ?
-            x.start < a.end && a.end < x.end :
-            a.start < x.end && x.start < a.end));
-        const lit = !over && a.end > a.start &&
-            canHighlight(out, a.start, a.end);
-        const at = over ? Math.max(over.end, a.end) : a.end;
-        // A suggestion on a passage that cannot be marked can no longer
-        // be applied safely, so it is kept as a comment saying what it
-        // was; one at a point, an insertion, needs no mark.
-        const loose = a.kind === 'suggest' && a.end > a.start && !lit;
-        let text = a.text;
-        if (loose) {
-            text = looseText(a.quote || out.slice(a.start, a.end), a.text);
-        }
-        const kind = loose ? 'review' : a.kind;
-        const piece = itemText(kind, lit ? out.slice(a.start, a.end) : '',
-                               a.author, a.date, text);
-        out = lit ? out.slice(0, a.start) + piece + out.slice(a.end) :
-            out.slice(0, at) + piece + out.slice(at);
+function snapOut(md, a) {
+    const spans = scan(md).syntax.slice();
+    const re = /\[\[[^\]\n]*\]\]|`[^`\n]*`|\^?\[[@^-][^\]\n]*\]|<[^>\n]+>/g;
+    let m;
+    while ((m = re.exec(md))) spans.push([m.index, m.index + m[0].length]);
+    for (const [s, e] of spans) {
+        if (s < a.start && a.start < e) a.start = s;
+        if (s < a.end && a.end < e) a.end = e;
     }
-    return out;
 }
 
 /**
@@ -977,13 +1102,56 @@ function addItems(md, adds) {
 function removeItem(md, n, apply = false) {
     const it = reviewItems(md)[n];
     if (!it) return md;
-    const keep = apply && it.kind === 'suggest' ? it.text : it.passage;
-    return md.slice(0, it.start) + keep + md.slice(it.end);
+    const use = apply && it.kind === 'suggest';
+    if (!it.open) {
+        return md.slice(0, it.start) + (use ? it.text : it.passage) +
+            md.slice(it.end);
+    }
+    // Between its markers: other comments' markers and notes are kept,
+    // after its new text where it is applied.
+    let inner = md.slice(it.open.end, it.noteStart);
+    if (use) {
+        const { syntax } = scan(md);
+        inner = it.text + syntax.filter(([a, b]) => a >= it.open.end &&
+            b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join('');
+    }
+    return md.slice(0, it.open.start) + inner + md.slice(it.end);
+}
+
+/**
+ * What the card editor draws in place of a card's comment syntax, as
+ * offsets: `hide` each start marker, `chips` each note with its replies
+ * ({ from, to, n, author, kind, text }, numbered as on the board),
+ * `marks` each passage held between markers ({ from, to, author, kind }),
+ * and `protect`, every range typing must not change.
+ */
+function editorRanges(md) {
+    const items = reviewItems(md);
+    const hide = items.filter((x) => x.open)
+        .map((x) => [x.open.start, x.open.end]).sort((a, b) => a[0] - b[0]);
+    const numbers = new Map();
+    let n = 0;
+    const chips = items.map((x) => {
+        const g = googleOf(x);
+        let num = g && numbers.get(g);
+        if (!num) {
+            num = ++n;
+            if (g) numbers.set(g, num);
+        }
+        return { from: x.noteStart, to: x.end, n: num, author: x.author,
+                 kind: x.kind, text: x.text };
+    });
+    const marks = items.filter((x) => x.open).map((x) => ({
+        from: x.open.end, to: x.noteStart, author: x.author,
+        kind: x.kind }));
+    const protect = [...hide, ...chips.map((c) => [c.from, c.to])]
+        .sort((a, b) => a[0] - b[0]);
+    return { hide, chips, marks, protect };
 }
 
 /** Markdown for export: review comments out, their passages kept. */
 function stripReview(md) {
-    return md.replace(ITEM, (m, passage) => passage || '');
+    return without(md, 0, md.length, scan(md).syntax);
 }
 
 // ---- Drawing them on a card -------------------------------------------
@@ -1032,8 +1200,23 @@ function renderMarkdown(md, colourOf = null) {
     let n = 0;
     // A Google comment on several passages keeps one number for them.
     const numbers = new Map();
-    ITEM.lastIndex = 0;
-    return md.replace(ITEM, (m, passage, kind, body) => {
+    const { items } = scan(md);
+    // A start marker is drawn knowing whose comment it opens.
+    const byId = new Map(items.filter((x) => x.id).map((x) => [x.id, x]));
+    const tintOf = (body) => {
+        const h = HEAD.exec(body.replace(/^\s+/, ''));
+        const c = colourOf && h ? colourOf(h[1]) : null;
+        return c ? ` is-c-${c}` : '';
+    };
+    SCAN.lastIndex = 0;
+    return md.replace(SCAN, (m, openId, passage, id, kind, body) => {
+        if (openId !== undefined) {
+            const it = byId.get(openId);
+            if (!it) return '';
+            return '<span class="dendrite-review-from dendrite-rid-' +
+                `${openId}${it.kind === 'suggest' ? ' is-suggest' : ''}` +
+                `${tintOf(it.body)}"></span>`;
+        }
         const g = kind === 'review' ? googleOf({ kind, text:
             (HEAD.exec(body.replace(/^\s+/, '')) || [])[3] || body }) : null;
         let num;
@@ -1045,16 +1228,27 @@ function renderMarkdown(md, colourOf = null) {
         const h = HEAD.exec(body.replace(/^\s+/, ''));
         const text = h ? h[3] : body.trim();
         // The reviewer's colour, where the manuscript gives them one.
-        const c = colourOf && h ? colourOf(h[1]) : null;
-        const tint = c ? ` is-c-${c}` : '';
+        const tint = tintOf(body);
+        const marked = id !== undefined && byId.has(id);
+        const rid = marked ? ` dendrite-rid-${id}` : '';
         const cls = (kind === 'suggest' ? ' is-suggest' : '') + tint;
-        const sup = `<sup class="dendrite-review-n${cls}">${num}</sup>`;
-        if (kind === 'suggest' && !passage) {
+        const sup = `<sup class="dendrite-review-n${cls}${rid}">${num}</sup>`;
+        // Between markers: the end of its passage, which is marked once
+        // drawn (wrapPassages), then what it adds and its number.
+        const upto = marked ?
+            `<span class="dendrite-review-upto${rid}"></span>` : '';
+        if (kind === 'suggest' && (marked || !passage)) {
+            if (marked && !text) return upto + sup;
             // An insertion's leading space is the text's, not the mark's.
             const lead = /^\s*/.exec(text)[0];
-            return `${lead}<span class="dendrite-review-new${tint}">` +
-                `${text.slice(lead.length)}</span>${sup}`;
+            // Within another's passage, the space is held apart so it is
+            // not marked as that passage's text.
+            const gap = lead && marked ?
+                `<span class="dendrite-review-lead">${lead}</span>` : lead;
+            return `${upto}${gap}<span class="dendrite-review-new` +
+                `${tint}${rid}">${text.slice(lead.length)}</span>${sup}`;
         }
+        if (marked) return upto + sup;
         if (!passage) return sup;
         if (kind === 'suggest') {
             const added = text ?
@@ -1065,6 +1259,45 @@ function renderMarkdown(md, colourOf = null) {
         return `<mark class="dendrite-review-mark${tint}">${passage}</mark>` +
             sup;
     });
+}
+
+/**
+ * Mark each passage held between markers, once its card is rendered:
+ * every piece of text from its start marker to its end, in its
+ * reviewer's colour, so it may run through bold or a link and nest
+ * inside another comment's where the two overlap.
+ */
+function wrapPassages(root) {
+    const doc = root.ownerDocument;
+    const SHOW_TEXT = 4;
+    for (const from of root.querySelectorAll('span.dendrite-review-from')) {
+        const rid = [...from.classList].find((c) =>
+            c.startsWith('dendrite-rid-'));
+        const upto = rid && root.querySelector(
+            `span.dendrite-review-upto.${rid}`);
+        if (!upto) continue;
+        const texts = [];
+        const walk = doc.createTreeWalker(root, SHOW_TEXT);
+        for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+            if (!(from.compareDocumentPosition(t) & 4) ||
+                !(upto.compareDocumentPosition(t) & 2)) continue;
+            // Not another comment's number or added text, nor the space
+            // between blocks.
+            if (t.parentElement.closest('sup.dendrite-review-n, ' +
+                '.dendrite-review-new, .dendrite-review-lead')) continue;
+            if (!t.nodeValue.trim() && t.nodeValue.includes('\n')) continue;
+            texts.push(t);
+        }
+        const suggest = from.classList.contains('is-suggest');
+        const tint = [...from.classList].filter((c) => c.startsWith('is-c-'));
+        for (const t of texts) {
+            const w = doc.createElement(suggest ? 'span' : 'mark');
+            w.className = [suggest ? 'dendrite-review-old' :
+                'dendrite-review-mark', ...tint, rid].join(' ');
+            t.parentNode.insertBefore(w, t);
+            w.appendChild(t);
+        }
+    }
 }
 
 // ---- a colour per reviewer -------------------------------------------
@@ -1389,8 +1622,10 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
 }
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
-                   reviewerNames, shownAs, plainMap, normalise, locate,
-                   reviewItems, alreadyIn,
+                   reviewerNames, shownAs, wrapPassages, editorRanges,
+                   oldComments, convertOld,
+                   plainMap,
+                   normalise, locate, reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
                    commentActions, commentMenu, googleData, googleOf,
                    REVIEWER_COLOURS, reviewerColours, colourList,
@@ -1399,5 +1634,5 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    firstOfComment, countComments,
                    itemText,
                    addItems, removeItem,
-                   stripReview, canHighlight, renderMarkdown, decorate,
+                   stripReview, renderMarkdown, decorate,
                    shortDate };

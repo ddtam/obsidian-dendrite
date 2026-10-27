@@ -103,12 +103,27 @@
 }
 
 /* Floats over the board's top right, below the bar. */
-.dendrite-orphans {
+/* Notices waiting on a choice, one under another at the top right. */
+.dendrite-pinned {
     position: absolute;
     top: 12px;
     right: 12px;
     z-index: 3;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     max-width: 320px;
+    pointer-events: none;
+}
+.dendrite-pinned > * {
+    pointer-events: auto;
+}
+.dendrite-old-comments-desc {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+.dendrite-orphans {
     padding: 8px 10px;
     background: var(--background-primary);
     border: 1px solid var(--background-modifier-border);
@@ -755,10 +770,19 @@
 .dendrite-preview-doc {
     flex: 1 1 auto;
     overflow-y: auto;
-    padding: 16px 28px 40vh;
+    padding: 16px 28px 0;
     max-width: var(--file-line-width, 700px);
     margin: 0 auto;
     width: 100%;
+}
+
+/* Room after the last line, so it can be scrolled up to the middle of
+   the pane. A spacer rather than bottom padding, which some engines
+   leave out of what a scroll can reach. */
+.dendrite-preview-doc::after {
+    content: '';
+    display: block;
+    height: 50vh;
 }
 
 /* No vertical padding, so the margins of the paragraphs and headings
@@ -839,9 +863,13 @@
     font-style: inherit;
 }
 
-/* Card status: a chip in the footer. Only flags (revise, unsplit) are
-   coloured by default; done is quiet; draft shows nothing. A colour set
-   for the value in Pretty Properties arrives as --dendrite-chip. */
+/* Card status: a chip in the footer. Flags (revise, unsplit) are a
+   neutral grey by default, so they are not read as one more reviewer's
+   colour; done is quiet; draft shows nothing. A colour set for the value
+   in Pretty Properties arrives as --dendrite-chip. */
+body {
+    --dendrite-flag: var(--text-muted);
+}
 .dendrite-status {
     display: flex;
     gap: 4px;
@@ -859,9 +887,9 @@
 
 .dendrite-status-chip.is-revise,
 .dendrite-status-chip.is-unsplit {
-    color: var(--dendrite-chip, var(--color-orange));
+    color: var(--dendrite-chip, var(--dendrite-flag));
     background: color-mix(in srgb,
-                          var(--dendrite-chip, var(--color-orange)) 14%,
+                          var(--dendrite-chip, var(--dendrite-flag)) 14%,
                           transparent);
 }
 
@@ -1042,10 +1070,21 @@
     font-variant-numeric: tabular-nums;
 }
 
-/* In the preview, a flagged card's part has a faint bar at its left. */
+/* In the preview, a flagged card's part has a faint line in the margin
+   at its left, set apart from the text. */
 .dendrite-pblock.is-flagged {
-    box-shadow: inset 3px 0 0 color-mix(in srgb,
-        var(--dendrite-chip, var(--color-orange)) 55%, transparent);
+    position: relative;
+}
+.dendrite-pblock.is-flagged::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: -6px;
+    width: 2px;
+    border-radius: 1px;
+    background: color-mix(in srgb,
+        var(--dendrite-chip, var(--dendrite-flag)) 35%, transparent);
 }
 
 /* Dragging a card: a small label follows the pointer, the card being
@@ -1294,12 +1333,12 @@
    paragraph; a suggested change strikes the text it would take out and
    underlines its new text, with no tint. Each is in its reviewer's colour
    (is-c-<colour>, kept per manuscript), or, for a reviewer without one,
-   the accent for a comment and the revise colour for a change. */
+   the accent, a change told from a comment by its dashed edge. */
 .dendrite-board,
 .dendrite-preview,
 .modal {
     --dendrite-review: var(--interactive-accent);
-    --dendrite-suggest: var(--dendrite-revise, var(--color-orange));
+    --dendrite-suggest: var(--interactive-accent);
 }
 .dendrite-md mark.dendrite-review-mark,
 .dendrite-preview-doc mark.dendrite-review-mark {
@@ -1324,6 +1363,7 @@
     margin-left: 3px;
 }
 .dendrite-md sup.dendrite-review-n,
+.dendrite-cm sup.dendrite-review-n,
 .dendrite-preview-doc sup.dendrite-review-n {
     font-size: 0.65em;
     margin-left: 2px;
@@ -1331,8 +1371,24 @@
     color: var(--dendrite-review);
 }
 .dendrite-md sup.dendrite-review-n.is-suggest,
+.dendrite-cm sup.dendrite-review-n.is-suggest,
 .dendrite-preview-doc sup.dendrite-review-n.is-suggest {
     color: var(--dendrite-suggest);
+}
+/* In the card editor: a comment's number where its note is, which shows
+   the comment on hover, and its passage tinted, a suggestion's dotted
+   under as well; tints add up where comments overlap. */
+.dendrite-cm .dendrite-cm-chip {
+    cursor: default;
+}
+.dendrite-cm .dendrite-cm-passage {
+    background: color-mix(in srgb, var(--dendrite-review) 18%,
+                          transparent);
+}
+.dendrite-cm .dendrite-cm-passage.is-suggest {
+    background: color-mix(in srgb, var(--dendrite-suggest) 12%,
+                          transparent);
+    text-decoration: underline dotted var(--dendrite-suggest);
 }
 .dendrite-review-notes {
     display: flex;
@@ -1804,11 +1860,11 @@ button.dendrite-review-btn:hover {
 }
 
 /* Open comments on a card's old versions, while folded: its stack's
-   edges take the revise colour, so they are not left unresolved under
+   edges take the comments' colour, so they are not left unresolved under
    the card. */
 .dendrite-card.has-stack-open::before,
 .dendrite-card.has-stack-open::after {
-    border-color: var(--dendrite-revise, var(--color-orange));
+    border-color: var(--dendrite-review, var(--interactive-accent));
 }
 
 /* Fanned out, a card's old versions are beside it: none drawn behind. */
