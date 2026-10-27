@@ -3009,6 +3009,9 @@ var require_review = __commonJS({
               onMenu(i, e);
             });
           }
+          const bar = doc.createElement("span");
+          bar.className = "dendrite-review-acts";
+          main.prepend(bar);
           for (const [what, label, tip] of buttons) {
             const btn = doc.createElement("button");
             btn.className = "dendrite-review-btn";
@@ -3019,7 +3022,7 @@ var require_review = __commonJS({
               if (what === "reply") replyBox(main, (t) => act(i, "reply", t), typing);
               else act(i, what);
             });
-            note.append(btn);
+            bar.append(btn);
           }
           box.append(note);
           noteOf2.set(i, note);
