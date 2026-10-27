@@ -1411,6 +1411,15 @@ body {
     text-underline-offset: 2px;
     margin-left: 3px;
 }
+/* An inline footnote in the card editor: a small chip, its first author
+   and year or its number, opened by the cursor to be edited. */
+.dendrite-cm sup.dendrite-cm-footnote {
+    font-size: 0.7em;
+    color: var(--text-accent);
+    white-space: nowrap;
+    padding: 0 1px;
+    cursor: text;
+}
 .dendrite-cm .dendrite-cm-notes {
     margin: 2px 0 8px;
     white-space: normal;

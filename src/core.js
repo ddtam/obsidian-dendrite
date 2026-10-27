@@ -738,37 +738,33 @@ function footnoteBlock(notes) {
 }
 
 /**
- * Inline footnotes, ^[text], made into numbered ones, so they are
- * numbered in reading order with the rest and can be gathered with them.
- * The note runs to the bracket that closes it, so ^[[@key]] is one note.
- * Code is left alone. Used by the preview only; export leaves inline
- * footnotes to Pandoc.
+ * Each inline footnote, ^[text], as { from, to, note }: offsets of the
+ * whole footnote in `text`, and what it says. A note runs to the bracket
+ * that closes it, so ^[[@key]] is one note. Inline code and fenced code
+ * are left alone.
  */
-function inlineToReferences(text) {
+function inlineFootnotes(text) {
+    const out = [];
     let fence = null;
-    let k = 0;
-    const defs = [];
-    const lines = (text || '').split('\n').map((line) => {
+    let at = 0;
+    for (const line of (text || '').split('\n')) {
+        const start = at;
+        at += line.length + 1;
         const f = /^\s*(`{3,}|~{3,})/.exec(line);
         if (fence) {
             if (f && f[1][0] === fence[0] &&
                 f[1].length >= fence.length) fence = null;
-            return line;
+            continue;
         }
         if (f) {
             fence = f[1];
-            return line;
+            continue;
         }
-        let out = '';
         let i = 0;
         while (i < line.length) {
             if (line[i] === '`') {
                 const end = line.indexOf('`', i + 1);
-                if (end < 0) {
-                    out += line.slice(i);
-                    break;
-                }
-                out += line.slice(i, end + 1);
+                if (end < 0) break;
                 i = end + 1;
                 continue;
             }
@@ -780,19 +776,56 @@ function inlineToReferences(text) {
                     else if (line[j] === ']' && --depth === 0) break;
                 }
                 if (j < line.length) {
-                    const label = `dendrite-inline-${++k}`;
-                    defs.push(`[^${label}]: ${line.slice(i + 2, j)}`);
-                    out += `[^${label}]`;
+                    out.push({ from: start + i, to: start + j + 1,
+                               note: line.slice(i + 2, j) });
                     i = j + 1;
                     continue;
                 }
             }
-            out += line[i++];
+            i++;
         }
-        return out;
+    }
+    return out;
+}
+
+/**
+ * Inline footnotes, ^[text], made into numbered ones, so they are
+ * numbered in reading order with the rest and can be gathered with them.
+ * Used by the preview only; export leaves inline footnotes to Pandoc.
+ */
+function inlineToReferences(text) {
+    const notes = inlineFootnotes(text);
+    if (!notes.length) return text || '';
+    let out = '';
+    let at = 0;
+    const defs = notes.map((n, k) => {
+        const label = `dendrite-inline-${k + 1}`;
+        out += text.slice(at, n.from) + `[^${label}]`;
+        at = n.to;
+        return `[^${label}]: ${n.note}`;
     });
-    return defs.length ? lines.join('\n') + '\n\n' + defs.join('\n') :
-        lines.join('\n');
+    return out + text.slice(at) + '\n\n' + defs.join('\n');
+}
+
+/**
+ * A footnote that is only citations, [@key] or [@a; @b], labelled by each
+ * key's first author and year, as Better BibTeX writes keys, authorTitle
+ * then year: "Sollier 2023; Hao 2024", or the first and how many more
+ * past two. Null for a footnote with anything else in it.
+ */
+function footnoteLabel(note) {
+    const t = (note || '').trim();
+    if (!/^(\[[^\]]*@[^\]]*\]\s*)+$/.test(t)) return null;
+    const keys = [...t.matchAll(/@([\w:.#$%&+?<>~/-]+)/g)].map((m) => m[1]);
+    if (!keys.length) return null;
+    const name = (k) => {
+        const who = (/^[a-z]+/.exec(k) || /^[^\d]+/.exec(k) || [k])[0];
+        const year = (/(\d{4})[a-z]?$/.exec(k) || [])[1];
+        const shown = who.charAt(0).toUpperCase() + who.slice(1);
+        return year ? `${shown} ${year}` : shown;
+    };
+    return keys.length > 2 ? `${name(keys[0])} +${keys.length - 1}` :
+        keys.map(name).join('; ');
 }
 
 /**
@@ -1728,7 +1761,7 @@ module.exports = {
     withKinds, floatLabels, countManuscript,
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,
-    inlineToReferences, gatherFootnotes,
+    inlineToReferences, inlineFootnotes, footnoteLabel, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
     lineDiff, charDiff, printedOnly,
     deriveLabel, stripComments, validPrefix, newId, withPrefix,

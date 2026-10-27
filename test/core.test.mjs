@@ -1003,3 +1003,31 @@ test('heights are fitted against lines from the text drawn, for the text ' +
                      { a: 52, b: 24 });
 });
 
+test('inline footnotes are found to the bracket that closes them, not in ' +
+     'code', () => {
+    const md = 'COMPASS^[[@sollierCOMPASSJointCopy2023]] and `^[not]`.\n' +
+        '```\n^[nor this]\n```\nA note ^[with [brackets] inside] ends.';
+    const got = c.inlineFootnotes(md).map((n) => [md.slice(n.from, n.to),
+                                                  n.note]);
+    assert.deepEqual(got, [
+        ['^[[@sollierCOMPASSJointCopy2023]]', '[@sollierCOMPASSJointCopy2023]'],
+        ['^[with [brackets] inside]', 'with [brackets] inside']]);
+    // The preview's conversion is unchanged by sharing it.
+    assert.equal(c.inlineToReferences('A^[b] c^[[@k2020]].'),
+                 'A[^dendrite-inline-1] c[^dendrite-inline-2].\n\n' +
+                 '[^dendrite-inline-1]: b\n[^dendrite-inline-2]: [@k2020]');
+});
+
+test('a footnote of citations only is labelled by first author and ' +
+     'year', () => {
+    assert.equal(c.footnoteLabel('[@sollierCOMPASSJointCopy2023]'),
+                 'Sollier 2023');
+    assert.equal(c.footnoteLabel('[@sollierCOMPASSJointCopy2023; ' +
+        '@haoDictionaryLearningIntegrative2024]'), 'Sollier 2023; Hao 2024');
+    assert.equal(c.footnoteLabel('[@a2020] [@b2021] [@c2022]'),
+                 'A 2020 +2');
+    assert.equal(c.footnoteLabel('See [@sollier2023] for more.'), null,
+                 'other text: numbered instead');
+    assert.equal(c.footnoteLabel('Plain words.'), null);
+});
+

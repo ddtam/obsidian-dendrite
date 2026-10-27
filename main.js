@@ -540,30 +540,27 @@ var require_core = __commonJS({
     function footnoteBlock(notes) {
       return notes.map((x) => `[^${x.n}]: ${x.text}`).join("\n");
     }
-    function inlineToReferences(text) {
+    function inlineFootnotes(text) {
+      const out = [];
       let fence = null;
-      let k = 0;
-      const defs = [];
-      const lines = (text || "").split("\n").map((line) => {
+      let at = 0;
+      for (const line of (text || "").split("\n")) {
+        const start = at;
+        at += line.length + 1;
         const f = /^\s*(`{3,}|~{3,})/.exec(line);
         if (fence) {
           if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = null;
-          return line;
+          continue;
         }
         if (f) {
           fence = f[1];
-          return line;
+          continue;
         }
-        let out = "";
         let i = 0;
         while (i < line.length) {
           if (line[i] === "`") {
             const end = line.indexOf("`", i + 1);
-            if (end < 0) {
-              out += line.slice(i);
-              break;
-            }
-            out += line.slice(i, end + 1);
+            if (end < 0) break;
             i = end + 1;
             continue;
           }
@@ -575,18 +572,45 @@ var require_core = __commonJS({
               else if (line[j] === "]" && --depth === 0) break;
             }
             if (j < line.length) {
-              const label = `dendrite-inline-${++k}`;
-              defs.push(`[^${label}]: ${line.slice(i + 2, j)}`);
-              out += `[^${label}]`;
+              out.push({
+                from: start + i,
+                to: start + j + 1,
+                note: line.slice(i + 2, j)
+              });
               i = j + 1;
               continue;
             }
           }
-          out += line[i++];
+          i++;
         }
-        return out;
+      }
+      return out;
+    }
+    function inlineToReferences(text) {
+      const notes = inlineFootnotes(text);
+      if (!notes.length) return text || "";
+      let out = "";
+      let at = 0;
+      const defs = notes.map((n, k) => {
+        const label = `dendrite-inline-${k + 1}`;
+        out += text.slice(at, n.from) + `[^${label}]`;
+        at = n.to;
+        return `[^${label}]: ${n.note}`;
       });
-      return defs.length ? lines.join("\n") + "\n\n" + defs.join("\n") : lines.join("\n");
+      return out + text.slice(at) + "\n\n" + defs.join("\n");
+    }
+    function footnoteLabel(note) {
+      const t = (note || "").trim();
+      if (!/^(\[[^\]]*@[^\]]*\]\s*)+$/.test(t)) return null;
+      const keys = [...t.matchAll(/@([\w:.#$%&+?<>~/-]+)/g)].map((m) => m[1]);
+      if (!keys.length) return null;
+      const name = (k) => {
+        const who = (/^[a-z]+/.exec(k) || /^[^\d]+/.exec(k) || [k])[0];
+        const year = (/(\d{4})[a-z]?$/.exec(k) || [])[1];
+        const shown = who.charAt(0).toUpperCase() + who.slice(1);
+        return year ? `${shown} ${year}` : shown;
+      };
+      return keys.length > 2 ? `${name(keys[0])} +${keys.length - 1}` : keys.map(name).join("; ");
     }
     function gatherFootnotes(segments, where) {
       if (where !== "section" && where !== "end") return segments;
@@ -1262,6 +1286,8 @@ var require_core = __commonJS({
       renumberFootnotes,
       footnoteBlock,
       inlineToReferences,
+      inlineFootnotes,
+      footnoteLabel,
       gatherFootnotes,
       INDENT,
       splitFrontmatter,
@@ -3073,12 +3099,67 @@ var require_cmreview = __commonJS({
   }
 });
 
+// src/cmfootnotes.js
+var require_cmfootnotes = __commonJS({
+  "src/cmfootnotes.js"(exports2, module2) {
+    "use strict";
+    var core2 = require_core();
+    var review2 = require_review();
+    function footnoteExtension() {
+      const { Decoration, EditorView, WidgetType } = require("@codemirror/view");
+      const { StateField } = require("@codemirror/state");
+      class Chip extends WidgetType {
+        constructor(label, note) {
+          super();
+          this.label = label;
+          this.note = note;
+        }
+        eq(other) {
+          return this.label === other.label && this.note === other.note;
+        }
+        toDOM(view) {
+          const el = view.dom.ownerDocument.createElement("sup");
+          el.className = "dendrite-cm-footnote";
+          el.textContent = this.label;
+          el.title = this.note;
+          return el;
+        }
+        // A click goes through, so the cursor lands at the footnote and
+        // opens it.
+        ignoreEvent() {
+          return false;
+        }
+      }
+      const build = (state) => {
+        const md = state.doc.toString();
+        const held = review2.editorRanges(md).protect;
+        const sel = state.selection.ranges;
+        const out = [];
+        core2.inlineFootnotes(md).forEach((n, k) => {
+          if (held.some(([a, b]) => a < n.to && n.from < b)) return;
+          if (sel.some((r) => r.from <= n.to && n.from <= r.to)) return;
+          const label = core2.footnoteLabel(n.note) || String(k + 1);
+          out.push(Decoration.replace({ widget: new Chip(label, n.note) }).range(n.from, n.to));
+        });
+        return Decoration.set(out);
+      };
+      return StateField.define({
+        create: build,
+        update: (value, tr) => tr.docChanged || tr.selection ? build(tr.state) : value,
+        provide: (f) => EditorView.decorations.from(f)
+      });
+    }
+    module2.exports = { footnoteExtension };
+  }
+});
+
 // src/editor.js
 var require_editor = __commonJS({
   "src/editor.js"(exports2, module2) {
     "use strict";
     var { Scope: Scope2 } = require("obsidian");
     var { reviewExtension } = require_cmreview();
+    var { footnoteExtension } = require_cmfootnotes();
     var EditorClass = null;
     var resolveFailed = false;
     function markdownEditorClass(app) {
@@ -3169,17 +3250,21 @@ var require_editor = __commonJS({
             if (ws.setActiveLeaf === patched) ws.setActiveLeaf = original;
           });
         }
-        // Review comments drawn in place of their syntax; the editor as
-        // Obsidian makes it should that fail.
+        // Review comments and inline footnotes drawn in place of their
+        // syntax; the editor as Obsidian makes it should that fail.
         buildLocalExtensions() {
           const base = super.buildLocalExtensions();
           try {
-            return [...base, reviewExtension(
-              opts.colourOf,
-              opts.nameOf
-            )];
+            return [
+              ...base,
+              reviewExtension(
+                opts.colourOf,
+                opts.nameOf
+              ),
+              footnoteExtension()
+            ];
           } catch (err) {
-            console.warn("Dendrite: review comments are shown as text in the editor.", err);
+            console.warn("Dendrite: review comments and footnotes are shown as text in the editor.", err);
             return base;
           }
         }

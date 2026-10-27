@@ -21,6 +21,7 @@
  */
 const { Scope } = require('obsidian');
 const { reviewExtension } = require('./cmreview.js');
+const { footnoteExtension } = require('./cmfootnotes.js');
 
 let EditorClass = null;
 let resolveFailed = false;
@@ -128,16 +129,17 @@ function obsidianEditor(app, parent, opts) {
             });
         }
 
-        // Review comments drawn in place of their syntax; the editor as
-        // Obsidian makes it should that fail.
+        // Review comments and inline footnotes drawn in place of their
+        // syntax; the editor as Obsidian makes it should that fail.
         buildLocalExtensions() {
             const base = super.buildLocalExtensions();
             try {
                 return [...base, reviewExtension(opts.colourOf,
-                                                 opts.nameOf)];
+                                                 opts.nameOf),
+                        footnoteExtension()];
             } catch (err) {
-                console.warn('Dendrite: review comments are shown as ' +
-                             'text in the editor.', err);
+                console.warn('Dendrite: review comments and footnotes ' +
+                             'are shown as text in the editor.', err);
                 return base;
             }
         }
