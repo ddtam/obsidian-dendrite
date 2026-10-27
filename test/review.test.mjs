@@ -602,7 +602,9 @@ test('a comment\'s Google Docs link rides at the end of its text, and a ' +
     const sug = r.reviewItems(r.addItems('was large.', [{ kind: 'suggest',
         start: 4, end: 9, author: 'A', date: '2026-10-24', text: 'big',
         quote: 'large' }]))[0];
-    assert.deepEqual(r.reviewKeys(sug), r.reviewKeys(change));
+    // The same suggestion, in a card or as sent: one key; as sent it is
+    // known too as the comment it would go in as.
+    assert.equal(r.reviewKeys(sug)[0], r.reviewKeys(change)[0]);
     assert.notDeepEqual(r.reviewKeys({ ...change, insert: 'huge' }),
                         r.reviewKeys(change));
 });
@@ -949,5 +951,42 @@ test('a deletion that took a space with it takes the same space, so ' +
     const note = r.locate({ kind: 'review', quote: '175 ',
         before: 'samples from ', after: 'patients' }, cards);
     assert.equal(text.slice(note.start, note.end), '175');
+});
+
+test('a suggestion that went in as a comment is known again as that ' +
+     'suggestion, so once resolved it is not offered ticked', () => {
+    const add = { kind: 'change', quote: '', author: 'Aly Karsan 2',
+        insert: 'Acute myeloid leukemia (AML) is a deadly cancer. ' };
+    const swap = { kind: 'change', quote: '175 ', insert: '200+ ',
+        author: 'Aly Karsan 2' };
+    for (const it of [add, swap]) {
+        const asComment = { kind: 'review', author: it.author,
+                            text: r.changeAsComment(it) };
+        const s = r.reviewKeys(it).find((k) => k.startsWith('s:'));
+        const c = r.reviewKeys(asComment).find((k) => k.startsWith('c:'));
+        assert.ok(r.reviewKeys(asComment).includes(s),
+                  'the comment knows the suggestion');
+        assert.ok(r.reviewKeys(it).includes(c),
+                  'the suggestion knows the comment, resolved before');
+    }
+    assert.equal(r.changeAsComment(add), 'Suggested adding “Acute ' +
+        'myeloid leukemia (AML) is a deadly cancer.”. The text has ' +
+        'changed here since it was sent.');
+    // Kept as "replace … with …", where it could not go in as a change.
+    const kept = { kind: 'review', author: 'Aly Karsan 2',
+                   text: 'replace "175" with "200+"' };
+    assert.ok(r.reviewKeys(kept).includes(r.reviewKeys(swap)[0]));
+});
+
+test('grey can be chosen for a reviewer, as for one\'s own comments, ' +
+     'but is never given out', () => {
+    assert.equal(r.REVIEWER_COLOURS[r.REVIEWER_COLOURS.length - 1], 'grey');
+    assert.equal(r.reviewerColours(['Me: grey']).get('Me'), 'grey');
+    assert.equal(r.colourCss('grey'), 'var(--text-muted)');
+    assert.equal(r.colourCss('blue'), 'var(--color-blue)');
+    // More reviewers than colours: given out round again, never grey.
+    const names = Array.from({ length: 12 }, (_, k) => `R${k}`);
+    const { map } = r.assignColours(new Map(), names);
+    assert.ok(![...map.values()].includes('grey'));
 });
 

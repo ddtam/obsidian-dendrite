@@ -456,7 +456,7 @@ function colourTitle(c) {
     const frag = doc.createDocumentFragment();
     const chip = frag.appendChild(doc.createElement('span'));
     chip.className = 'dendrite-colour-chip';
-    chip.style.setProperty('--dendrite-chip', `var(--color-${c})`);
+    chip.style.setProperty('--dendrite-chip', review.colourCss(c));
     frag.append(c[0].toUpperCase() + c.slice(1));
     return frag;
 }
@@ -5670,15 +5670,17 @@ class DendriteView extends ItemView {
             if (item.kind === 'comment') {
                 add = { kind: 'review', text: quoted + item.text +
                         (item.link ? ` ${item.link}` : '') };
-            } else if (at.how === 'exact') {
+            } else if (at.how === 'exact' ||
+                       (!item.quote && at.how === 'close')) {
+                // An addition takes nothing away, so one found only by
+                // most of the words around it still goes in to apply,
+                // checked in the Apply dialog; a replacement there may
+                // no longer have its text, and goes in as a comment.
                 add = { kind: 'suggest', text: item.insert,
                         quote: item.quote };
             } else {
-                add = { kind: 'review', text: quoted + (item.quote ?
-                    `Suggested replacing “${item.quote}” with ` +
-                    `“${item.insert.trim()}”` :
-                    `Suggested adding “${item.insert.trim()}”`) +
-                    '. The text has changed here since it was sent.' };
+                add = { kind: 'review',
+                        text: quoted + review.changeAsComment(item) };
             }
             Object.assign(add, { start: at.how === 'none' ||
                                      at.how === 'old' ? at.end : at.start,
@@ -8899,7 +8901,7 @@ class SuggestModal extends VersionModal {
         // or the accent's, as their suggestions are drawn on the board.
         this.modalEl.style.setProperty('--dendrite-now', 'var(--text-muted)');
         this.modalEl.style.setProperty('--dendrite-before', this.tint ?
-            `var(--color-${this.tint})` : 'var(--interactive-accent)');
+            review.colourCss(this.tint) : 'var(--interactive-accent)');
         const node = view.byId.get(id);
         this.titleEl.setText(`Apply the suggested change to card ` +
             `${core.shortId(id)}` + (node && node.label ?
@@ -9011,18 +9013,21 @@ class ReviewImportModal extends Modal {
                     openExternal(it.link);
                 };
             }
+            // Red only for one that cannot be placed; amber for one placed
+            // that should be checked; grey for one already dealt with.
             if (row.done) {
-                where.addClass('is-missing');
+                where.addClass('is-known');
                 where.setText('Resolved here before: left unticked.');
             } else if (row.dup && row.relink) {
                 where.setText(`Already in the card, ` +
                     `${core.shortId(row.at.id)}: gets its Google Docs link.`);
             } else if (row.dup) {
-                where.addClass('is-missing');
+                where.addClass('is-known');
                 where.setText(`Already in the card, ` +
                     `${core.shortId(row.at.id)}: left unticked.`);
             } else if (row.at && row.at.how === 'old') {
                 const node = view.byId.get(row.at.id);
+                where.addClass('is-close');
                 where.setText(`→ card ${core.shortId(row.at.id)}` +
                     (node && node.label ? ` (${node.label})` : '') +
                     ', found in an earlier version of it, card ' +
@@ -9030,6 +9035,7 @@ class ReviewImportModal extends Modal {
                     'current one, with the passage quoted.');
             } else if (row.at) {
                 const node = view.byId.get(row.at.id);
+                if (row.at.how === 'close') where.addClass('is-close');
                 where.setText(`→ card ${core.shortId(row.at.id)}` +
                     (node && node.label ? ` (${node.label})` : '') +
                     (row.at.how === 'close' ? ', found by most of its ' +
@@ -9305,7 +9311,7 @@ class ReviewersModal extends Modal {
         const block = this.list.createDiv({ cls });
         const who = block.createDiv({ cls: 'dendrite-reviewer-who' });
         const dot = who.createSpan({ cls: 'dendrite-reviewer-dot' });
-        dot.style.background = `var(--color-${colour})`;
+        dot.style.background = review.colourCss(colour);
         who.createSpan({ cls: 'dendrite-reviewer-name', text: name });
         const mid = block.createDiv({ cls: 'dendrite-reviewer-mid' });
         const btn = block.createEl('button', {

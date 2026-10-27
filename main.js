@@ -2384,22 +2384,39 @@ var require_review = __commonJS({
       const author = clean(it.author) || "Reviewer";
       const keys = [];
       const hash = (s) => docx.crc32(Buffer.from(s, "utf8")).toString(16);
+      const change = (out, put) => "s:" + hash(`${author}\0${flat(out)}\0${flat(put)}`);
+      const comment = (text2) => "c:" + hash(`${author}\0${flat(text2).replace(/^On “[^”]*”(?:, in an earlier version)?: /, "")}`);
       if (it.kind === "change" || it.kind === "suggest") {
         const out = it.kind === "change" ? it.quote : it.passage;
         const put = it.kind === "change" ? it.insert : it.text;
-        keys.push("s:" + hash(`${author}\0${flat(out)}\0${flat(put)}`));
+        keys.push(change(out, put));
+        if (it.kind === "change") keys.push(comment(changeAsComment(it)));
         return keys;
       }
       const { text, url } = noteLink(it.text);
       const gid = it.gid || (/[?&]disco=([\w.-]+)/.exec(url || it.link || "") || [])[1];
       if (gid) keys.push(`g:${gid}`);
+      keys.push(comment(text));
       const bare = flat(text).replace(
         /^On “[^”]*”(?:, in an earlier version)?: /,
         ""
       );
-      keys.push("c:" + hash(`${author}\0${bare}`));
+      const was = WENT_IN.map((re) => re.exec(bare)).find(Boolean);
+      if (was) keys.push(change(
+        was[2] === void 0 ? "" : was[1],
+        was[2] === void 0 ? was[1] : was[2]
+      ));
       return keys;
     }
+    function changeAsComment(it) {
+      return (it.quote ? `Suggested replacing \u201C${it.quote}\u201D with \u201C${String(it.insert || "").trim()}\u201D` : `Suggested adding \u201C${String(it.insert || "").trim()}\u201D`) + ". The text has changed here since it was sent.";
+    }
+    var CHANGED = "\\. The text has changed here since it was sent\\.$";
+    var WENT_IN = [
+      new RegExp(`^Suggested adding \u201C(.*)\u201D${CHANGED}`),
+      new RegExp(`^Suggested replacing \u201C(.*)\u201D with \u201C(.*)\u201D${CHANGED}`),
+      /^replace "(.*)" with "(.*)"$/
+    ];
     function linkless(md, item) {
       if (!item.link || item.kind === "change") return null;
       const author = clean(item.author) || "Reviewer";
@@ -2703,8 +2720,13 @@ var require_review = __commonJS({
       "cyan",
       "pink",
       "yellow",
-      "red"
+      "red",
+      "grey"
     ];
+    var GIVEN_COLOURS = REVIEWER_COLOURS.filter((c) => c !== "grey");
+    function colourCss(c) {
+      return c === "grey" ? "var(--text-muted)" : `var(--color-${c})`;
+    }
     function reviewerColours(list) {
       const out = /* @__PURE__ */ new Map();
       for (const [name, , c] of colourEntries(list)) {
@@ -2752,7 +2774,7 @@ var require_review = __commonJS({
       for (const name of names) {
         if (!name || out.has(name)) continue;
         const taken = new Set(out.values());
-        out.set(name, REVIEWER_COLOURS.find((c) => !taken.has(c)) || REVIEWER_COLOURS[out.size % REVIEWER_COLOURS.length]);
+        out.set(name, GIVEN_COLOURS.find((c) => !taken.has(c)) || GIVEN_COLOURS[out.size % GIVEN_COLOURS.length]);
         added = true;
       }
       return { map: out, added };
@@ -2941,6 +2963,7 @@ var require_review = __commonJS({
       wrapPassages,
       editorRanges,
       passagesLost,
+      changeAsComment,
       oldComments,
       convertOld,
       plainMap,
@@ -2957,6 +2980,7 @@ var require_review = __commonJS({
       googleData,
       googleOf,
       REVIEWER_COLOURS,
+      colourCss,
       reviewerColours,
       colourList,
       assignColours,
@@ -5680,7 +5704,7 @@ function colourTitle(c) {
   const frag = doc.createDocumentFragment();
   const chip = frag.appendChild(doc.createElement("span"));
   chip.className = "dendrite-colour-chip";
-  chip.style.setProperty("--dendrite-chip", `var(--color-${c})`);
+  chip.style.setProperty("--dendrite-chip", review.colourCss(c));
   frag.append(c[0].toUpperCase() + c.slice(1));
   return frag;
 }
@@ -10502,14 +10526,17 @@ var DendriteView = class extends ItemView {
       const quoted = !item.quote ? "" : at.how === "none" ? `On \u201C${item.quote}\u201D: ` : at.how === "old" ? `On \u201C${item.quote}\u201D, in an earlier version: ` : "";
       if (item.kind === "comment") {
         add = { kind: "review", text: quoted + item.text + (item.link ? ` ${item.link}` : "") };
-      } else if (at.how === "exact") {
+      } else if (at.how === "exact" || !item.quote && at.how === "close") {
         add = {
           kind: "suggest",
           text: item.insert,
           quote: item.quote
         };
       } else {
-        add = { kind: "review", text: quoted + (item.quote ? `Suggested replacing \u201C${item.quote}\u201D with \u201C${item.insert.trim()}\u201D` : `Suggested adding \u201C${item.insert.trim()}\u201D`) + ". The text has changed here since it was sent." };
+        add = {
+          kind: "review",
+          text: quoted + review.changeAsComment(item)
+        };
       }
       Object.assign(add, {
         start: at.how === "none" || at.how === "old" ? at.end : at.start,
@@ -13529,7 +13556,7 @@ var SuggestModal = class extends VersionModal {
   async onOpen() {
     const { contentEl, view, id } = this;
     this.modalEl.style.setProperty("--dendrite-now", "var(--text-muted)");
-    this.modalEl.style.setProperty("--dendrite-before", this.tint ? `var(--color-${this.tint})` : "var(--interactive-accent)");
+    this.modalEl.style.setProperty("--dendrite-before", this.tint ? review.colourCss(this.tint) : "var(--interactive-accent)");
     const node = view.byId.get(id);
     this.titleEl.setText(`Apply the suggested change to card ${core.shortId(id)}` + (node && node.label ? ` (${node.label})` : ""));
     contentEl.createEl("p", { text: "The passage it was made on is still in the card as the reviewer was sent it. Nothing has been written yet." });
@@ -13617,18 +13644,20 @@ var ReviewImportModal = class extends Modal {
         };
       }
       if (row.done) {
-        where.addClass("is-missing");
+        where.addClass("is-known");
         where.setText("Resolved here before: left unticked.");
       } else if (row.dup && row.relink) {
         where.setText(`Already in the card, ${core.shortId(row.at.id)}: gets its Google Docs link.`);
       } else if (row.dup) {
-        where.addClass("is-missing");
+        where.addClass("is-known");
         where.setText(`Already in the card, ${core.shortId(row.at.id)}: left unticked.`);
       } else if (row.at && row.at.how === "old") {
         const node = view.byId.get(row.at.id);
+        where.addClass("is-close");
         where.setText(`\u2192 card ${core.shortId(row.at.id)}` + (node && node.label ? ` (${node.label})` : "") + `, found in an earlier version of it, card ${core.shortId(row.at.from)}: goes at the end of the current one, with the passage quoted.`);
       } else if (row.at) {
         const node = view.byId.get(row.at.id);
+        if (row.at.how === "close") where.addClass("is-close");
         where.setText(`\u2192 card ${core.shortId(row.at.id)}` + (node && node.label ? ` (${node.label})` : "") + (row.at.how === "close" ? ", found by most of its words: check it" : ""));
       } else {
         where.addClass("is-missing");
@@ -13868,7 +13897,7 @@ var ReviewersModal = class extends Modal {
     const block = this.list.createDiv({ cls });
     const who = block.createDiv({ cls: "dendrite-reviewer-who" });
     const dot = who.createSpan({ cls: "dendrite-reviewer-dot" });
-    dot.style.background = `var(--color-${colour})`;
+    dot.style.background = review.colourCss(colour);
     who.createSpan({ cls: "dendrite-reviewer-name", text: name });
     const mid = block.createDiv({ cls: "dendrite-reviewer-mid" });
     const btn = block.createEl("button", {

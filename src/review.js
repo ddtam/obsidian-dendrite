@@ -910,22 +910,57 @@ function reviewKeys(it) {
     const author = clean(it.author) || 'Reviewer';
     const keys = [];
     const hash = (s) => docx.crc32(Buffer.from(s, 'utf8')).toString(16);
+    const change = (out, put) => 's:' + hash(`${author}\u0000${flat(out)}` +
+                                             `\u0000${flat(put)}`);
+    const comment = (text) => 'c:' + hash(`${author}\u0000${flat(text)
+        .replace(/^On “[^”]*”(?:, in an earlier version)?: /, '')}`);
     if (it.kind === 'change' || it.kind === 'suggest') {
         const out = it.kind === 'change' ? it.quote : it.passage;
         const put = it.kind === 'change' ? it.insert : it.text;
-        keys.push('s:' + hash(`${author}\u0000${flat(out)}\u0000` +
-                              `${flat(put)}`));
+        keys.push(change(out, put));
+        // Known too as the comment it goes in as where its text has
+        // changed, which may have been resolved as that.
+        if (it.kind === 'change') keys.push(comment(changeAsComment(it)));
         return keys;
     }
     const { text, url } = noteLink(it.text);
     const gid = it.gid || (/[?&]disco=([\w.-]+)/.exec(url || it.link || '') ||
                            [])[1];
     if (gid) keys.push(`g:${gid}`);
+    keys.push(comment(text));
+    // A suggestion that went in as a comment is known as that suggestion
+    // too, so resolving the comment resolves the suggestion.
     const bare = flat(text).replace(/^On “[^”]*”(?:, in an earlier version)?: /,
                                     '');
-    keys.push('c:' + hash(`${author}\u0000${bare}`));
+    const was = WENT_IN.map((re) => re.exec(bare)).find(Boolean);
+    if (was) keys.push(change(was[2] === undefined ? '' : was[1],
+                              was[2] === undefined ? was[1] : was[2]));
     return keys;
 }
+
+/**
+ * The comment a suggested change goes in as where the text it was made
+ * on has changed since, so it cannot be applied: what it suggested, said.
+ */
+function changeAsComment(it) {
+    return (it.quote ? `Suggested replacing “${it.quote}” with ` +
+        `“${String(it.insert || '').trim()}”` :
+        `Suggested adding “${String(it.insert || '').trim()}”`) +
+        '. The text has changed here since it was sent.';
+}
+
+/**
+ * The texts of comments that a suggested change went in as: one whose
+ * text had changed (changeAsComment), and one that could not be held
+ * between markers (looseText). The first group is what it would replace,
+ * or for an addition what it adds; the second, when there, what it adds.
+ */
+const CHANGED = '\\. The text has changed here since it was sent\\.$';
+const WENT_IN = [
+    new RegExp(`^Suggested adding “(.*)”${CHANGED}`),
+    new RegExp(`^Suggested replacing “(.*)” with “(.*)”${CHANGED}`),
+    /^replace "(.*)" with "(.*)"$/,
+];
 
 /**
  * The note in a card's markdown that an imported comment is, when it has
@@ -1358,7 +1393,18 @@ function wrapPassages(root) {
  * out; Obsidian's --color-<name>.
  */
 const REVIEWER_COLOURS = ['blue', 'green', 'purple', 'orange', 'cyan',
-                          'pink', 'yellow', 'red'];
+                          'pink', 'yellow', 'red', 'grey'];
+
+/**
+ * The colours given out to reviewers not yet given one: all but grey,
+ * which is there to choose, as for your own comments, to quieten them.
+ */
+const GIVEN_COLOURS = REVIEWER_COLOURS.filter((c) => c !== 'grey');
+
+/** A reviewer colour as CSS: the theme's colour, or its muted text. */
+function colourCss(c) {
+    return c === 'grey' ? 'var(--text-muted)' : `var(--color-${c})`;
+}
 
 /**
  * A manuscript's reviewer colours from its property, a list of
@@ -1446,8 +1492,8 @@ function assignColours(map, names) {
     for (const name of names) {
         if (!name || out.has(name)) continue;
         const taken = new Set(out.values());
-        out.set(name, REVIEWER_COLOURS.find((c) => !taken.has(c)) ||
-            REVIEWER_COLOURS[out.size % REVIEWER_COLOURS.length]);
+        out.set(name, GIVEN_COLOURS.find((c) => !taken.has(c)) ||
+            GIVEN_COLOURS[out.size % GIVEN_COLOURS.length]);
         added = true;
     }
     return { map: out, added };
@@ -1677,13 +1723,13 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
                    reviewerNames, shownAs, wrapPassages, editorRanges,
-                   passagesLost,
+                   passagesLost, changeAsComment,
                    oldComments, convertOld,
                    plainMap,
                    normalise, locate, reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
                    commentActions, commentMenu, googleData, googleOf,
-                   REVIEWER_COLOURS, reviewerColours, colourList,
+                   REVIEWER_COLOURS, colourCss, reviewerColours, colourList,
                    assignColours, reviewerEntries, entryList,
                    addReply, removeReply, replyBox,
                    firstOfComment, countComments,

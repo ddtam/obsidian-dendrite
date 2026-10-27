@@ -1478,8 +1478,17 @@ body {
     color: var(--text-faint);
     font-size: var(--font-ui-smaller);
 }
+/* Where an imported comment goes: red only for one that cannot be
+   placed, amber for one placed that should be checked, muted for one
+   already dealt with, which is no fault. */
 .dendrite-review-where.is-missing {
     color: var(--text-error);
+}
+.dendrite-review-where.is-close {
+    color: var(--text-warning);
+}
+.dendrite-review-where.is-known {
+    color: var(--text-muted);
 }
 button.dendrite-review-btn {
     font-size: var(--font-ui-smaller);
@@ -2090,6 +2099,9 @@ button.dendrite-review-btn:hover {
              --dendrite-suggest: var(--color-blue); }
 .is-c-purple { --dendrite-review: var(--color-purple);
                --dendrite-suggest: var(--color-purple); }
+/* Grey, to quieten a reviewer's comments, as your own. */
+.is-c-grey { --dendrite-review: var(--text-muted);
+             --dendrite-suggest: var(--text-muted); }
 .is-c-pink { --dendrite-review: var(--color-pink);
              --dendrite-suggest: var(--color-pink); }
 

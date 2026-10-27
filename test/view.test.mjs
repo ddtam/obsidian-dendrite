@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 const h = require('./harness.cjs');
 const { DendriteView } = require('../src/main.js');
 const core = require('../src/core.js');
+const r = require('../src/review.js');
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 // A menu's item by title, looked for in its submenus too.
@@ -5224,6 +5225,57 @@ test('your replies are drawn in your colour and under the name you are ' +
     assert.equal(reply().querySelector('.dendrite-review-meta b')
         .textContent, 'Derek Tam', 'shown as, the card still says Me');
     assert.match(app.vault.text.get(cardPath('G-aaaaa')), /\[!reply\] Me,/);
+});
+
+test('the import marks where each goes by how sure it is: red only for ' +
+     'one that cannot be placed, amber for one to check, grey for one ' +
+     'already dealt with', async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n',
+        { 'G-aaaaa': 'The cohort is composed of paired samples taken ' +
+            'before and after treatment from patients.' });
+    const it = (quote, text, extra = {}) => Object.assign({ kind: 'comment',
+        quote, text, author: 'Aly', date: '2026-10-23' }, extra);
+    const items = [
+        it('paired samples', 'Exact.'),
+        it('paired samples gathered before and after the treatment', 'Close.',
+           { before: 'The cohort is composed of ', after: ' from patients' }),
+        it('nowhere at all in this text', 'Missing.'),
+        it('before and after', 'Done before.')];
+    const done = r.reviewKeys(items[3]);
+    view.reviewDone = () => done;
+    const modal = await view.reviewModal('Test', items);
+    const where = [...modal.contentEl.querySelectorAll(
+        '.dendrite-review-where')].map((el) => [...el.classList]
+        .filter((c) => c.startsWith('is-')).join(' '));
+    assert.deepEqual(where, ['', 'is-close', 'is-missing', 'is-known']);
+});
+
+test('an addition found only by most of its words still goes in as a ' +
+     'change to apply; a replacement there goes in as a comment', async () => {
+    const A = 'Modern sequencing-based assays generate an immense volume of ' +
+        'data. Multiple such assays are often used in tandem.';
+    const { view, text } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', { 'G-aaaaa': A });
+    // Sent before a reword: the text after it no longer quite matches.
+    const add = { kind: 'change', quote: '', author: 'Aly Karsan 2',
+        date: '2026-10-23', insert: 'AML is a deadly cancer. ',
+        before: '', after: 'Modern sequencing based assays produce a ' +
+            'huge volume of data. Multiple such assays are often used' };
+    const swap = { kind: 'change', quote: 'often used in tandem', insert:
+        'used together', author: 'Aly Karsan 2', date: '2026-10-23',
+        before: 'Multiple such assays are ', after: '.' };
+    const cards = await view.reviewCards();
+    assert.equal(r.locate(add, cards).how, 'close', 'found by most words');
+    // Its own words reworded since: found only by most of them.
+    const moved = Object.assign({}, swap, { quote: 'often employed in ' +
+        'tandem' });
+    await view.addReview([{ item: add }, { item: moved }], null);
+    const out = text(cardPath('G-aaaaa'));
+    const items = r.reviewItems(out);
+    assert.deepEqual(items.map((x) => x.kind), ['suggest', 'review'],
+                     'the addition to apply, the replacement a comment');
+    assert.equal(items[0].text, 'AML is a deadly cancer. ');
 });
 
 test('names linked to the same note are one person: one colour for all ' +
