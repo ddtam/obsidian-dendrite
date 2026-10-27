@@ -121,6 +121,58 @@ test('each passage is found in its card, exactly or by most of its ' +
                             before: '', after: '' }, cards), null);
 });
 
+/** A table row of Word cells, `marks` cell index to a tracked change. */
+function row(cells, marks = {}) {
+    const by = 'w:author="Aly Karsan" w:date="2026-10-25T10:00:00Z"';
+    return '<w:tr>' + cells.map((c, k) => '<w:tc><w:p>' + (marks[k] ?
+        `<w:del w:id="${k}" ${by}><w:r><w:delText>${c}</w:delText>` +
+        `</w:r></w:del><w:ins w:id="${k + 50}" ${by}>` +
+        run(marks[k]) + '</w:ins>' : run(c)) +
+        '</w:p></w:tc>').join('') + '</w:tr>';
+}
+
+test('a change in a table cell or before a paragraph\'s first word is ' +
+     'found from the text around it, a short one exactly', () => {
+    const by = 'w:author="Aly Karsan" w:date="2026-10-25T10:00:00Z"';
+    const body =
+        `<w:p><w:ins w:id="1" ${by}>` + run('AML is deadly. ') +
+        '</w:ins>' + run('Single-cell assays produce much data.') +
+        '</w:p><w:tbl>' +
+        row(['Data', 'Patients', 'Libraries']) +
+        row(['WGS CRAMs', '175', '534 (175 normal)'], { 1: '200' }) +
+        row(['RNA CRAMs', '156', '318 (156 pre-)'], { 1: '200' }) +
+        row(['DOGMA-seq', '18', '36'], { 1: '51' }) +
+        row(['Extra DOGMA-seq', '18', '20']) + '</w:tbl>';
+    const buf = d.writeZip([{ name: 'word/document.xml',
+        data: Buffer.from(`<w:document ${W}><w:body>${body}` +
+                          '</w:body></w:document>') }], zlib);
+    const cards = [
+        { id: 'P', text: 'Some text before.\n\nSingle-cell assays ' +
+          'produce much data.' },
+        { id: 'T', text: '| Data | Patients | Libraries |\n' +
+          '| --- | ---: | --- |\n' +
+          '| WGS CRAMs | 175 | 534 (175 normal) |\n' +
+          '| RNA CRAMs | 156 | 318 (156 pre-) |\n' +
+          '| DOGMA-seq | 18 | 36 |\n' +
+          '| Extra DOGMA-seq | 18 | 20 |\n' }];
+    const items = r.readReview(buf, zlib);
+    assert.deepEqual(items.map((x) => [x.quote, x.insert]),
+                     [['', 'AML is deadly. '], ['175', '200'],
+                      ['156', '200'], ['18', '51']]);
+    const where = items.map((x) => {
+        const at = r.locate(x, cards);
+        if (!at) return null;
+        const t = cards.find((c) => c.id === at.id).text;
+        return [at.id, at.how, t.slice(at.start - 12, at.start) + '[' +
+                t.slice(at.start, at.end) + ']'];
+    });
+    assert.deepEqual(where, [
+        ['P', 'exact', 'xt before.\n\n[]'],
+        ['T', 'exact', 'WGS CRAMs | [175]'],
+        ['T', 'exact', 'RNA CRAMs | [156]'],
+        ['T', 'exact', 'DOGMA-seq | [18]']]);
+});
+
 test('comments are written after their passage, highlighted where the ' +
      'markdown allows, and read back', () => {
     const md = 'The cohort is composed of **longitudinally paired** ' +
@@ -168,6 +220,36 @@ test('a passage that cannot be highlighted as it is gets its comment ' +
           quote: 'bold text' }]);
     assert.equal(out, 'Half **bold text**%%[!review] R, 2026-10-24: ' +
         'replace "bold text" with "strong words"%% here.');
+});
+
+test('a comment on a passage that overlaps or sits inside one already ' +
+     'in the card goes after that one, leaving it whole', () => {
+    const had = '==of which 155 have paired RNA==%%[!review] Claude, ' +
+        '2026-10-23: Hm.%%';
+    const md = `Samples from 175 patients, ${had}. More.`;
+    const by = { author: 'Aly Karsan 2', date: '2026-10-23' };
+    // Overlapping its start, as ", of which 155 have p".
+    const over = r.addItems(md, [{ kind: 'suggest', ...by,
+        start: md.indexOf(', of'), end: md.indexOf('aired'),
+        text: ' and p', quote: ', of which 155 have p' }]);
+    assert.equal(over, `Samples from 175 patients, ${had}%%[!review] ` +
+        'Aly Karsan 2, 2026-10-23: replace ", of which 155 have p" with ' +
+        '"and p"%%. More.');
+    // Wholly inside its passage.
+    const s = md.indexOf('155');
+    const inside = r.addItems(md, [{ kind: 'review', ...by, start: s,
+        end: s + 3, text: 'Check.' }]);
+    assert.equal(inside, `Samples from 175 patients, ${had}%%[!review] ` +
+        'Aly Karsan 2, 2026-10-23: Check.%%. More.');
+    // Brought in again: known as already in, though written as a comment.
+    assert.ok(r.alreadyIn(over, { kind: 'change', ...by,
+        quote: ', of which 155 have p', insert: ' and p' }));
+    for (const out of [over, inside]) {
+        assert.deepEqual(r.reviewItems(out).map((x) =>
+            [x.author, x.passage]), [
+            ['Claude', 'of which 155 have paired RNA'],
+            ['Aly Karsan 2', '']]);
+    }
 });
 
 test('export prints a commented passage without its highlight, and ' +

@@ -2510,6 +2510,7 @@ var require_review = __commonJS({
       let ins = null;
       let del = null;
       let inText = false;
+      let cells = 0;
       const pos = () => ({ p: paras.length, o: para ? para.text.length : 0 });
       const addText = (t) => {
         if (!para) return;
@@ -2574,8 +2575,10 @@ var require_review = __commonJS({
             if (para) paras.push(para);
             para = null;
           } else if (!empty) {
-            para = { text: "", changes: [] };
+            para = { text: "", changes: [], ...cells ? { cell: true } : {} };
           }
+        } else if (name === "w:tc" && !empty) {
+          cells += close ? -1 : 1;
         } else if (name === "w:pStyle" && para) {
           if (/^(heading\s*\d|title)$/i.test(attr(attrs, "w:val"))) {
             para.heading = true;
@@ -2670,6 +2673,20 @@ var require_review = __commonJS({
       if (!body) throw new Error("not a Word document");
       const { paras, ranges } = readBody(body);
       const notes = readComments(files.get("word/comments.xml"));
+      const around = (p, s, q, e) => {
+        let before = paras[p].text.slice(0, s);
+        let after = paras[q].text.slice(e);
+        for (let k = p - 1; paras[p].cell && k >= 0 && paras[k].cell && before.length < CONTEXT; k--) {
+          before = `${paras[k].text} ${before}`;
+        }
+        for (let k = q + 1; paras[q].cell && k < paras.length && paras[k].cell && after.length < CONTEXT; k++) {
+          after = `${after} ${paras[k].text}`;
+        }
+        return {
+          before: tail(before, CONTEXT),
+          after: after.slice(0, CONTEXT)
+        };
+      };
       const items = [];
       for (const [id, note] of notes) {
         const r = ranges.get(id);
@@ -2686,8 +2703,6 @@ var require_review = __commonJS({
           parts.push(paras[end.p].text.slice(0, end.o));
           quote = parts.join("\n");
         }
-        const sp = paras[r.start.p].text;
-        const ep = paras[end.p].text;
         items.push({
           kind: "comment",
           author: note.author,
@@ -2695,11 +2710,7 @@ var require_review = __commonJS({
           when: note.when,
           text: note.text,
           quote,
-          before: sp.slice(
-            Math.max(0, r.start.o - CONTEXT),
-            r.start.o
-          ),
-          after: ep.slice(end.o, end.o + CONTEXT),
+          ...around(r.start.p, r.start.o, end.p, end.o),
           at: [r.start.p, r.start.o],
           ...paras[r.start.p].heading ? { heading: true } : {}
         });
@@ -2712,11 +2723,7 @@ var require_review = __commonJS({
             date: c.date,
             quote: p.text.slice(c.start, c.end),
             insert: c.insert,
-            before: p.text.slice(
-              Math.max(0, c.start - CONTEXT),
-              c.start
-            ),
-            after: p.text.slice(c.end, c.end + CONTEXT),
+            ...around(k, c.start, k, c.end),
             at: [k, c.start]
           });
         }
@@ -3026,12 +3033,14 @@ var require_review = __commonJS({
       const before = normalise(item.before || "").text;
       const after = normalise(item.after || "").text;
       const found = [];
-      const probe = quote || tail(before, 30);
-      if (probe.length >= 3) {
+      const head = !quote && !before ? after.slice(0, 30) : "";
+      const probe = quote || head || tail(before, 30);
+      const least = probe.length >= 3 ? 0 : 8;
+      if (probe.length >= 3 || quote && (before || after)) {
         for (const c of prepared) {
           let k = c.norm.text.indexOf(probe);
           while (k >= 0) {
-            const s = quote ? k : k + probe.length;
+            const s = quote || head ? k : k + probe.length;
             const e = quote ? k + probe.length : s;
             let score = 0;
             const pre2 = c.norm.text.slice(0, s);
@@ -3041,7 +3050,9 @@ var require_review = __commonJS({
             while (score < b.length && pre2.trimEnd()[pre2.trimEnd().length - 1 - score] === b[b.length - 1 - score]) score++;
             let sa = 0;
             while (sa < a.length && post.trimStart()[sa] === a[sa]) sa++;
-            found.push({ c, s, e, score: score + sa });
+            if (score + sa >= least) {
+              found.push({ c, s, e, score: score + sa });
+            }
             k = c.norm.text.indexOf(probe, k + 1);
           }
         }
@@ -3075,7 +3086,12 @@ var require_review = __commonJS({
         return place(best.c, first.at, last.at + last.w.length, "close");
       }
       const pre = best.r.match.slice(0, bw.length).filter((j) => j >= 0);
-      if (!pre.length) return null;
+      if (!pre.length) {
+        const post = best.r.match.slice(bw.length + qw.length).filter((j) => j >= 0);
+        if (!post.length || bw.length) return null;
+        const w2 = best.cw[post[0]];
+        return place(best.c, w2.at, w2.at, "close");
+      }
       const w = best.cw[pre[pre.length - 1]];
       return place(best.c, w.at + w.w.length, w.at + w.w.length, "close");
     }
@@ -3144,6 +3160,7 @@ var require_review = __commonJS({
       const t = String(s || "").replace(/%%/g, "%").replace(/\s*\n\s*/g, " ");
       return edges ? t : t.trim();
     };
+    var looseText = (passage, text) => `replace "${clean(passage)}" with "${clean(text)}"`;
     var LINK = /\s+(https:\/\/docs\.google\.com\/\S+)$/;
     function noteLink(text) {
       const m = LINK.exec(String(text || ""));
@@ -3200,7 +3217,7 @@ var require_review = __commonJS({
         }
         if (x.author !== author) return false;
         if (item.kind === "change") {
-          return x.kind === "suggest" && x.text === clean(item.insert, true);
+          return x.kind === "suggest" ? x.text === clean(item.insert, true) : x.text === looseText(item.quote, item.insert);
         }
         const text = flat(item.text);
         const had = flat(noteLink(x.text).text);
@@ -3221,11 +3238,14 @@ var require_review = __commonJS({
       const sorted = [...adds].sort((a, b) => b.end - a.end || b.start - a.start);
       let out = md;
       for (const a of sorted) {
-        const lit = a.end > a.start && canHighlight(out, a.start, a.end);
+        const point = a.end === a.start;
+        const over = reviewItems(out).find((x) => point ? x.start < a.end && a.end < x.end : a.start < x.end && x.start < a.end);
+        const lit = !over && a.end > a.start && canHighlight(out, a.start, a.end);
+        const at = over ? Math.max(over.end, a.end) : a.end;
         const loose = a.kind === "suggest" && a.end > a.start && !lit;
         let text = a.text;
         if (loose) {
-          text = `replace "${clean(a.quote || out.slice(a.start, a.end))}" with "${clean(a.text)}"`;
+          text = looseText(a.quote || out.slice(a.start, a.end), a.text);
         }
         const kind = loose ? "review" : a.kind;
         const piece = itemText(
@@ -3235,7 +3255,7 @@ var require_review = __commonJS({
           a.date,
           text
         );
-        out = lit ? out.slice(0, a.start) + piece + out.slice(a.end) : out.slice(0, a.end) + piece + out.slice(a.end);
+        out = lit ? out.slice(0, a.start) + piece + out.slice(a.end) : out.slice(0, at) + piece + out.slice(at);
       }
       return out;
     }
@@ -3342,6 +3362,13 @@ var require_review = __commonJS({
       }
       return out;
     }
+    function reviewerNames(list) {
+      const out = /* @__PURE__ */ new Map();
+      for (const [name, , , note] of colourEntries(list)) {
+        if (note) out.set(name, note.split("/").pop());
+      }
+      return out;
+    }
     function reviewerEntries(list) {
       return colourEntries(list).filter(([, , c]) => REVIEWER_COLOURS.includes(c)).map(([name, , colour, note]) => ({ name, note, colour }));
     }
@@ -3429,7 +3456,12 @@ var require_review = __commonJS({
       box.focus();
       return form;
     }
-    function decorate(root, items, act, onMenu = null, colourOf = null, typing = null) {
+    function shownAs(el, name, nameOf) {
+      const shown = nameOf && nameOf(name) || name;
+      el.textContent = shown;
+      if (shown !== name) el.title = `As written: ${name}`;
+    }
+    function decorate(root, items, act, onMenu = null, colourOf = null, typing = null, nameOf = null) {
       const nums = [...root.querySelectorAll("sup.dendrite-review-n")];
       const doc = root.ownerDocument;
       const blocks = /* @__PURE__ */ new Map();
@@ -3465,7 +3497,7 @@ var require_review = __commonJS({
           const meta = doc.createElement("div");
           meta.className = "dendrite-review-meta";
           const who = doc.createElement("b");
-          who.textContent = it.author || "Reviewer";
+          shownAs(who, it.author || "Reviewer", nameOf);
           meta.append(who, ` \xB7 ${shortDate(it.date)}`);
           if (passages(i) > 1) meta.append(` \xB7 ${passages(i)} passages`);
           const text = doc.createElement("div");
@@ -3540,6 +3572,8 @@ var require_review = __commonJS({
       readReviewJson,
       readBody,
       readComments,
+      reviewerNames,
+      shownAs,
       plainMap,
       normalise,
       locate,
@@ -4927,6 +4961,9 @@ var DEFAULTS = {
   // The name a reply to a review comment is signed with.
   replyName: "",
   recordTimings: false,
+  // A notice for each time the board is moved sideways other than by
+  // hand, naming what moved it.
+  showBoardMoves: false,
   // Reviews submitted, pending until added or ignored on the board,
   // and the latest ones decided, so a submitter can ask.
   reviewQueue: [],
@@ -5583,6 +5620,7 @@ var DendriteView = class extends ItemView {
         this.scrolledByHand = true;
       }, { passive: true });
     }
+    this.watchBoardMoves(board);
     board.addEventListener("pointerdown", (e) => {
       if (e.target === board) this.scrolledByHand = true;
     });
@@ -5850,7 +5888,8 @@ var DendriteView = class extends ItemView {
           (n, what, arg) => this.reviewAction(id, n, what, arg),
           (n, e, k) => this.commentMenu(id, n, e, k),
           this.colourOf(),
-          (el) => ownKeys(this.app, el)
+          (el) => ownKeys(this.app, el),
+          this.nameOf()
         );
         externalLinks(out);
       }
@@ -6038,8 +6077,52 @@ var DendriteView = class extends ItemView {
     const col = cols[node.depth];
     if (col) {
       const left = col.offsetLeft - (this.board.clientWidth - col.offsetWidth) / 2;
+      this.tellCentred(left);
       this.board.scrollTo({ left, behavior });
     }
+  }
+  /** With Say what moves the board on, a centring that moves it. */
+  tellCentred(left) {
+    this.centredAt = Date.now();
+    if (!this.plugin.settings.showBoardMoves) return;
+    const max = this.board.scrollWidth - this.board.clientWidth;
+    const to = Math.max(0, Math.min(max, left));
+    const by = Math.round(to - this.board.scrollLeft);
+    if (Math.abs(by) < 20) return;
+    new Notice(`Dendrite centred the board, ${by} px: ` + callers(new Error().stack).join(" \u2190 "), 1e4);
+  }
+  /**
+   * With Say what moves the board on, the board moved sideways with no
+   * touch, wheel or centring in the last moments.
+   */
+  watchBoardMoves(board) {
+    let rest = board.scrollLeft;
+    const handAt = () => {
+      this.handAt = Date.now();
+    };
+    for (const t of [
+      "touchstart",
+      "touchmove",
+      "touchend",
+      "wheel",
+      "pointerdown"
+    ]) {
+      board.addEventListener(t, handAt, { passive: true });
+    }
+    board.addEventListener("scroll", (e) => {
+      if (e.target !== board) return;
+      const now = Date.now();
+      const quiet = now - (this.handAt || 0) > 3e3 && now - (this.centredAt || 0) > 1500;
+      if (!quiet) {
+        rest = board.scrollLeft;
+        return;
+      }
+      const by = Math.round(board.scrollLeft - rest);
+      if (Math.abs(by) < 20) return;
+      rest = board.scrollLeft;
+      if (!this.plugin.settings.showBoardMoves) return;
+      new Notice(`Dendrite: the board moved ${by} px sideways with no touch and no centring.`, 1e4);
+    });
   }
   /**
    * Where the active card's own column goes, or null to centre the card.
@@ -8228,7 +8311,8 @@ var DendriteView = class extends ItemView {
         (n, what, arg) => this.reviewAction(id, n, what, arg),
         (n, e, k) => this.commentMenu(id, n, e, k),
         this.colourOf(),
-        (el2) => ownKeys(this.app, el2)
+        (el2) => ownKeys(this.app, el2),
+        this.nameOf()
       );
       externalLinks(out);
     }
@@ -9494,7 +9578,7 @@ var DendriteView = class extends ItemView {
         event,
         (what) => this.reviewAction(id, n, what),
         {
-          author: who,
+          author: this.nameOf()(who),
           current: this.colourOf()(who),
           pick: (c) => this.setReviewerColour(who, c)
         }
@@ -9515,6 +9599,14 @@ var DendriteView = class extends ItemView {
   colourOf() {
     const map = this.reviewers();
     return (who) => map.get(who) || null;
+  }
+  /** A reviewer name as the person it is linked to, or as it is. */
+  nameOf() {
+    const fm = this.file && this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+    const names = review.reviewerNames(
+      fm && fm.dendrite_reviewer_colours
+    );
+    return (who) => names.get(who) || who;
   }
   /**
    * The reviewers of a card's comments, noted as it is drawn; one not
@@ -11118,6 +11210,7 @@ var DendritePreview = class extends ItemView {
     const root = core.parseIndex(core.splitFrontmatter(text).body).root;
     const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter || {};
     this.colours = review.reviewerColours(fm.dendrite_reviewer_colours);
+    this.names = review.reviewerNames(fm.dendrite_reviewer_colours);
     const colourOf = (who) => this.colours.get(who) || null;
     const top = Number(fm.dendrite_heading_top);
     const headingTop = top >= 1 && top <= 6 ? top : this.plugin.settings.headingTop;
@@ -11352,7 +11445,11 @@ var DendritePreview = class extends ItemView {
         this.goComment();
       });
       const meta = el.createDiv({ cls: "dendrite-review-meta" });
-      meta.createEl("b", { text: it.author || "Reviewer" });
+      review.shownAs(
+        meta.createEl("b"),
+        it.author || "Reviewer",
+        (who) => this.names.get(who)
+      );
       meta.appendText(` \xB7 ${review.shortDate(it.date)}`);
       if (entry.parts.length > 1) {
         meta.appendText(` \xB7 ${entry.parts.length} passages`);
@@ -11389,7 +11486,7 @@ var DendritePreview = class extends ItemView {
             this.plugin.reviewFromPreview(this.file, id, n, what);
           }
         }, this.plugin.reviewerColourFor ? {
-          author: who,
+          author: this.names.get(who) || who,
           current: c,
           pick: (to) => this.plugin.reviewerColourFor(
             this.file,
@@ -12355,7 +12452,11 @@ var ReviewImportModal = class extends Modal {
       };
       const main = el.createDiv({ cls: "dendrite-review-main" });
       const meta = main.createDiv({ cls: "dendrite-review-meta" });
-      meta.createEl("b", { text: it.author || "Reviewer" });
+      review.shownAs(
+        meta.createEl("b"),
+        it.author || "Reviewer",
+        view.nameOf()
+      );
       meta.appendText(` \xB7 ${review.shortDate(it.date)} \xB7 ` + (it.kind === "change" ? "suggested change" : "comment"));
       if (it.quote) {
         main.createDiv({
@@ -12531,19 +12632,37 @@ var ReviewersModal = class extends Modal {
   draw() {
     this.list.empty();
     const entries = this.entries();
-    const save = async () => {
-      await this.view.saveEntries(entries);
+    const change = async (which, fn) => {
+      const now = this.entries();
+      for (const x of now) {
+        if (which.some((y) => y.name === x.name)) fn(x, now);
+      }
+      await this.view.saveEntries(now);
+      this.draw();
     };
+    const people = [];
     for (const e of entries) {
-      const row = this.list.createDiv({ cls: "dendrite-reviewer" });
-      row.dataset.name = e.name;
-      const dot = row.createSpan({ cls: "dendrite-reviewer-dot" });
-      const paint = () => {
-        dot.style.background = `var(--color-${e.colour})`;
-      };
-      paint();
-      row.createSpan({ cls: "dendrite-reviewer-name", text: e.name });
-      const sel = row.createEl("select", { cls: "dropdown" });
+      const p = e.note && people.find((x) => x[0].note === e.note);
+      if (p) p.push(e);
+      else people.push([e]);
+    }
+    const find = (n) => this.app.metadataCache.getFirstLinkpathDest(
+      n,
+      this.view.file.path
+    );
+    for (const names of people) {
+      const e = names[0];
+      const block = this.list.createDiv({ cls: "dendrite-reviewer" });
+      block.dataset.name = e.name;
+      const person = e.note ? e.note.split("/").pop() : e.name;
+      block.dataset.person = person;
+      const dot = block.createSpan({ cls: "dendrite-reviewer-dot" });
+      dot.style.background = `var(--color-${e.colour})`;
+      block.createSpan({
+        cls: "dendrite-reviewer-name",
+        text: person
+      });
+      const sel = block.createEl("select", { cls: "dropdown" });
       for (const c of review.REVIEWER_COLOURS) {
         const o = sel.createEl("option", {
           text: c[0].toUpperCase() + c.slice(1)
@@ -12551,29 +12670,24 @@ var ReviewersModal = class extends Modal {
         o.value = c;
       }
       sel.value = e.colour;
-      const same = () => entries.filter((x) => x !== e && e.note && x.note === e.note);
-      sel.addEventListener("change", async () => {
-        for (const x of [e, ...same()]) x.colour = sel.value;
-        await save();
-        this.draw();
-      });
-      const note = row.createEl("input", {
+      sel.addEventListener("change", () => change(names, (x) => {
+        x.colour = sel.value;
+      }));
+      const note = block.createEl("input", {
         type: "text",
         cls: "dendrite-reviewer-note"
       });
       note.placeholder = "Their note, if a person";
       note.value = e.note ? e.note.split("/").pop() : "";
-      const said = row.createDiv({ cls: "dendrite-reviewer-said" });
-      const link = async (f) => {
-        e.note = f ? this.linktext(f) : null;
-        const known = same()[0];
-        if (known) e.colour = known.colour;
-        await save();
-        this.draw();
+      const said = block.createDiv({ cls: "dendrite-reviewer-said" });
+      const link = (f) => {
+        const to = f ? this.linktext(f) : null;
+        return change(names, (x, now) => {
+          const known = to && now.find((y) => y.note === to && !names.some((n) => n.name === y.name));
+          x.note = to;
+          if (known) x.colour = known.colour;
+        });
       };
-      if (same().length) {
-        said.setText("Same person as " + same().map((x) => x.name).join(", "));
-      }
       noteSuggest(this.app, note, (f) => link(f));
       note.addEventListener("change", async () => {
         const v = note.value.trim().replace(/^\[\[|\]\]$/g, "");
@@ -12581,16 +12695,33 @@ var ReviewersModal = class extends Modal {
           await link(null);
           return;
         }
-        const f = this.app.metadataCache.getFirstLinkpathDest(
-          v,
-          this.view.file.path
-        );
+        const f = find(v);
         if (f) await link(f);
         else said.setText(`No note named ${v}`);
       });
-      const named = !e.note && this.app.metadataCache.getFirstLinkpathDest(e.name, this.view.file.path);
+      if (e.note) {
+        const as = block.createDiv({ cls: "dendrite-reviewer-names" });
+        as.createSpan({ text: "written as:" });
+        for (const x of names) {
+          const chip = as.createSpan({
+            cls: "dendrite-reviewer-alias"
+          });
+          chip.dataset.name = x.name;
+          chip.createSpan({ text: x.name });
+          const off = chip.createEl("button", {
+            cls: "dendrite-reviewer-unlink",
+            text: "\xD7"
+          });
+          off.title = `Not ${person}: unlink ${x.name}`;
+          off.onclick = () => change([x], (y) => {
+            y.note = null;
+          });
+        }
+        continue;
+      }
+      const named = find(e.name) || /\s\d+$/.test(e.name) && find(e.name.replace(/\s\d+$/, ""));
       if (named) {
-        const b = row.createEl("button", {
+        const b = block.createEl("button", {
           cls: "dendrite-reviewer-offer",
           text: `Link [[${named.basename}]]`
         });
@@ -12992,8 +13123,21 @@ var DendriteSettings = class extends PluginSettingTab {
       timing.setOn(v && Platform.isDesktopApp);
       save();
     }));
+    new Setting(containerEl).setName("Say what moves the board").setDesc("While on, a notice each time the board moves sideways other than by hand: the steps that centred it, or that it moved with no touch and no centring. For finding what pulls the board back.").addToggle((t) => t.setValue(!!s.showBoardMoves).onChange((v) => {
+      s.showBoardMoves = v;
+      save();
+    }));
   }
 };
+function callers(stack, skip = 1) {
+  const out = [];
+  for (const line of String(stack).split("\n").slice(1 + skip)) {
+    const m = /^\s*at (?:async )?(?:[\w$]+\.)*([\w$]+) \(/.exec(line) || /^(?:[\w$]+\.)*([\w$]+)@/.exec(line.trim());
+    if (m && !out.includes(m[1])) out.push(m[1]);
+    if (out.length === 5) break;
+  }
+  return out;
+}
 timing.wrap(DendriteView.prototype, "board", [
   "render",
   "renderCard",
@@ -14125,3 +14269,4 @@ module.exports.DendriteView = DendriteView;
 module.exports.DendritePreview = DendritePreview;
 module.exports.DendriteSettings = DendriteSettings;
 module.exports.exportStyle = exportStyle;
+module.exports.callers = callers;

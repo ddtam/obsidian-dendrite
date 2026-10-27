@@ -65,6 +65,7 @@ function readBody(xml) {
     let ins = null;
     let del = null;
     let inText = false;
+    let cells = 0;
     const pos = () => ({ p: paras.length, o: para ? para.text.length : 0 });
     const addText = (t) => {
         if (!para) return;
@@ -123,8 +124,11 @@ function readBody(xml) {
                 if (para) paras.push(para);
                 para = null;
             } else if (!empty) {
-                para = { text: '', changes: [] };
+                para = { text: '', changes: [], ...(cells ? { cell: true } :
+                                                    {}) };
             }
+        } else if (name === 'w:tc' && !empty) {
+            cells += close ? -1 : 1;
         } else if (name === 'w:pStyle' && para) {
             if (/^(heading\s*\d|title)$/i.test(attr(attrs, 'w:val'))) {
                 para.heading = true;
@@ -227,6 +231,23 @@ function readReview(buf, zlib) {
     if (!body) throw new Error('not a Word document');
     const { paras, ranges } = readBody(body);
     const notes = readComments(files.get('word/comments.xml'));
+    // The text before offset `s` of paragraph `p` and after offset `e` of
+    // paragraph `q`. A table cell is often a lone number, so its context
+    // runs on through the cells beside it, as the card's table row reads.
+    const around = (p, s, q, e) => {
+        let before = paras[p].text.slice(0, s);
+        let after = paras[q].text.slice(e);
+        for (let k = p - 1; paras[p].cell && k >= 0 && paras[k].cell &&
+             before.length < CONTEXT; k--) {
+            before = `${paras[k].text} ${before}`;
+        }
+        for (let k = q + 1; paras[q].cell && k < paras.length &&
+             paras[k].cell && after.length < CONTEXT; k++) {
+            after = `${after} ${paras[k].text}`;
+        }
+        return { before: tail(before, CONTEXT),
+                 after: after.slice(0, CONTEXT) };
+    };
     const items = [];
     for (const [id, note] of notes) {
         const r = ranges.get(id);
@@ -243,14 +264,10 @@ function readReview(buf, zlib) {
             parts.push(paras[end.p].text.slice(0, end.o));
             quote = parts.join('\n');
         }
-        const sp = paras[r.start.p].text;
-        const ep = paras[end.p].text;
         items.push({ kind: 'comment', author: note.author, date: note.date,
                      when: note.when,
                      text: note.text, quote,
-                     before: sp.slice(Math.max(0, r.start.o - CONTEXT),
-                                      r.start.o),
-                     after: ep.slice(end.o, end.o + CONTEXT),
+                     ...around(r.start.p, r.start.o, end.p, end.o),
                      at: [r.start.p, r.start.o],
                      ...(paras[r.start.p].heading ? { heading: true } :
                          {}) });
@@ -260,9 +277,7 @@ function readReview(buf, zlib) {
             items.push({ kind: 'change', author: c.author, date: c.date,
                          quote: p.text.slice(c.start, c.end),
                          insert: c.insert,
-                         before: p.text.slice(Math.max(0, c.start - CONTEXT),
-                                              c.start),
-                         after: p.text.slice(c.end, c.end + CONTEXT),
+                         ...around(k, c.start, k, c.end),
                          at: [k, c.start] });
         }
     });
@@ -629,12 +644,18 @@ function locate(item, cards) {
     const after = normalise(item.after || '').text;
     // Exact: the passage as sent, the context deciding between copies.
     const found = [];
-    const probe = quote || tail(before, 30);
-    if (probe.length >= 3) {
+    // A point with no text before it, as a paragraph added above another,
+    // is found by the text after it.
+    const head = !quote && !before ? after.slice(0, 30) : '';
+    const probe = quote || head || tail(before, 30);
+    // A passage under three characters, as a number in a table cell,
+    // is taken only where the text around it agrees too.
+    const least = probe.length >= 3 ? 0 : 8;
+    if (probe.length >= 3 || (quote && (before || after))) {
         for (const c of prepared) {
             let k = c.norm.text.indexOf(probe);
             while (k >= 0) {
-                const s = quote ? k : k + probe.length;
+                const s = quote || head ? k : k + probe.length;
                 const e = quote ? k + probe.length : s;
                 let score = 0;
                 const pre = c.norm.text.slice(0, s);
@@ -646,7 +667,9 @@ function locate(item, cards) {
                        b[b.length - 1 - score]) score++;
                 let sa = 0;
                 while (sa < a.length && post.trimStart()[sa] === a[sa]) sa++;
-                found.push({ c, s, e, score: score + sa });
+                if (score + sa >= least) {
+                    found.push({ c, s, e, score: score + sa });
+                }
                 k = c.norm.text.indexOf(probe, k + 1);
             }
         }
@@ -684,7 +707,14 @@ function locate(item, cards) {
     }
     // The passage is gone: after the last word of the text before it.
     const pre = best.r.match.slice(0, bw.length).filter((j) => j >= 0);
-    if (!pre.length) return null;
+    if (!pre.length) {
+        // Or before the first word of the text after it.
+        const post = best.r.match.slice(bw.length + qw.length)
+            .filter((j) => j >= 0);
+        if (!post.length || bw.length) return null;
+        const w = best.cw[post[0]];
+        return place(best.c, w.at, w.at, 'close');
+    }
     const w = best.cw[pre[pre.length - 1]];
     return place(best.c, w.at + w.w.length, w.at + w.w.length, 'close');
 }
@@ -779,6 +809,10 @@ const clean = (s, edges = false) => {
     return edges ? t : t.trim();
 };
 
+/** A suggestion kept as a comment, saying what it would replace. */
+const looseText = (passage, text) =>
+    `replace "${clean(passage)}" with "${clean(text)}"`;
+
 // A Google Docs link at the end of a comment's text, to its thread.
 const LINK = /\s+(https:\/\/docs\.google\.com\/\S+)$/;
 
@@ -864,8 +898,10 @@ function alreadyIn(md, item) {
         }
         if (x.author !== author) return false;
         if (item.kind === 'change') {
-            return x.kind === 'suggest' &&
-                x.text === clean(item.insert, true);
+            // Or as the comment it became where it could not be marked.
+            return x.kind === 'suggest' ?
+                x.text === clean(item.insert, true) :
+                x.text === looseText(item.quote, item.insert);
         }
         const text = flat(item.text);
         const had = flat(noteLink(x.text).text);
@@ -907,21 +943,28 @@ function addItems(md, adds) {
                                             b.start - a.start);
     let out = md;
     for (const a of sorted) {
-        const lit = a.end > a.start && canHighlight(out, a.start, a.end);
+        // A comment already here that the passage overlaps, or that its
+        // end falls inside: the new one goes after it, not into it.
+        const point = a.end === a.start;
+        const over = reviewItems(out).find((x) => (point ?
+            x.start < a.end && a.end < x.end :
+            a.start < x.end && x.start < a.end));
+        const lit = !over && a.end > a.start &&
+            canHighlight(out, a.start, a.end);
+        const at = over ? Math.max(over.end, a.end) : a.end;
         // A suggestion on a passage that cannot be marked can no longer
         // be applied safely, so it is kept as a comment saying what it
         // was; one at a point, an insertion, needs no mark.
         const loose = a.kind === 'suggest' && a.end > a.start && !lit;
         let text = a.text;
         if (loose) {
-            text = `replace "${clean(a.quote || out.slice(a.start, a.end))}" ` +
-                `with "${clean(a.text)}"`;
+            text = looseText(a.quote || out.slice(a.start, a.end), a.text);
         }
         const kind = loose ? 'review' : a.kind;
         const piece = itemText(kind, lit ? out.slice(a.start, a.end) : '',
                                a.author, a.date, text);
         out = lit ? out.slice(0, a.start) + piece + out.slice(a.end) :
-            out.slice(0, a.end) + piece + out.slice(a.end);
+            out.slice(0, at) + piece + out.slice(at);
     }
     return out;
 }
@@ -1067,6 +1110,18 @@ function colourEntries(list) {
     return out;
 }
 
+/**
+ * Who each reviewer name linked to a person's note is, by the note's
+ * name: "Aly Karsan 2" linked to [[Aly Karsan]] is Aly Karsan.
+ */
+function reviewerNames(list) {
+    const out = new Map();
+    for (const [name, , , note] of colourEntries(list)) {
+        if (note) out.set(name, note.split('/').pop());
+    }
+    return out;
+}
+
 /** Reviewers as the property keeps them: [{ name, note, colour }]. */
 function reviewerEntries(list) {
     return colourEntries(list).filter(([, , c]) =>
@@ -1207,8 +1262,18 @@ function replyBox(parent, send, typing = null) {
  * the comment's index and 'resolve' or, for a suggestion, 'apply' or
  * 'dismiss'.
  */
+/**
+ * A reviewer's name in `el`: the person it is linked to, the name as
+ * the review wrote it on hover when that differs.
+ */
+function shownAs(el, name, nameOf) {
+    const shown = (nameOf && nameOf(name)) || name;
+    el.textContent = shown;
+    if (shown !== name) el.title = `As written: ${name}`;
+}
+
 function decorate(root, items, act, onMenu = null, colourOf = null,
-                  typing = null) {
+                  typing = null, nameOf = null) {
     const nums = [...root.querySelectorAll('sup.dendrite-review-n')];
     const doc = root.ownerDocument;
     const blocks = new Map();
@@ -1247,7 +1312,7 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
             const meta = doc.createElement('div');
             meta.className = 'dendrite-review-meta';
             const who = doc.createElement('b');
-            who.textContent = it.author || 'Reviewer';
+            shownAs(who, it.author || 'Reviewer', nameOf);
             meta.append(who, ` · ${shortDate(it.date)}`);
             if (passages(i) > 1) meta.append(` · ${passages(i)} passages`);
             const text = doc.createElement('div');
@@ -1324,7 +1389,8 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
 }
 
 module.exports = { readReview, readReviewJson, readBody, readComments,
-                   plainMap, normalise, locate, reviewItems, alreadyIn,
+                   reviewerNames, shownAs, plainMap, normalise, locate,
+                   reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
                    commentActions, commentMenu, googleData, googleOf,
                    REVIEWER_COLOURS, reviewerColours, colourList,

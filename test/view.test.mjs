@@ -253,6 +253,48 @@ test('a phone\'s touch scroll counts as by hand when the board is rebuilt',
     assert.equal(centred, 0, 'not pulled back to the active card');
 });
 
+test('Say what moves the board names what centred it, and says when ' +
+     'it moved with no touch and no centring', async () => {
+    const { callers } = require('../src/main.js');
+    // The stacks of the two engines Obsidian runs in.
+    assert.deepEqual(callers('Error\n' +
+        '    at DendriteView.tellCentred (plugin:dendrite:1:2)\n' +
+        '    at DendriteView.centre (plugin:dendrite:1:2)\n' +
+        '    at DendriteView.applyActive (plugin:dendrite:1:2)\n' +
+        '    at async DendriteView.select (plugin:dendrite:1:2)\n'),
+    ['centre', 'applyActive', 'select']);
+    assert.deepEqual(callers('tellCentred@app://x:1:2\n' +
+        'centre@app://x:1:2\n@app://x:1:2\nrenderCard@app://x:1:2\n', 0),
+    ['centre', 'renderCard']);
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'A', 'G-bbbbb': 'B' });
+    view.plugin.settings.showBoardMoves = true;
+    const board = view.board;
+    board.scrollLeft = 300;
+    h.notices.length = 0;
+    await view.select('G-bbbbb');
+    assert.match(h.notices[0] || '',
+                 /^Dendrite centred the board, -300 px: .*applyActive/);
+    // Long after any touch or centring, something else moves it.
+    view.handAt = 0;
+    view.centredAt = 0;
+    h.notices.length = 0;
+    board.scrollLeft = 0;
+    board.dispatchEvent(new h.window.Event('scroll'));
+    board.scrollLeft = 250;
+    board.dispatchEvent(new h.window.Event('scroll'));
+    assert.deepEqual(h.notices, ['Dendrite: the board moved 250 px ' +
+                                 'sideways with no touch and no centring.']);
+    // Off, nothing is said.
+    view.plugin.settings.showBoardMoves = false;
+    h.notices.length = 0;
+    board.scrollLeft = 0;
+    board.dispatchEvent(new h.window.Event('scroll'));
+    await view.select('G-aaaaa');
+    assert.deepEqual(h.notices, []);
+});
+
 test('leaving the editor saves at once, before the autosave fires',
      async () => {
     const { view, read, text } = await open('---\ndendrite_prefix: G\n---\n');
@@ -1244,7 +1286,7 @@ test('settings are grouped under headings by what they affect', () => {
         'Google account',
         '## Other plugins', 'Keep Linter out of the writing folder',
         'Clean up cards with Linter',
-        '## Diagnostics', 'Record timings',
+        '## Diagnostics', 'Record timings', 'Say what moves the board',
     ]);
 });
 
@@ -4362,22 +4404,22 @@ test('names linked to the same note are one person: one colour for all ' +
     assert.deepEqual(fm(), ['[[Joshua Bridgers]]: blue', 'Aly Karsan: green',
         '[[Joshua Bridgers|jbridgers]]: blue']);
     assert.ok(view.cardEls.get('G-ccccc').querySelector('mark.is-c-blue'));
-    // Shown together, each said to be the same person.
-    assert.deepEqual([...modal.contentEl.querySelectorAll(
-        '.dendrite-reviewer')].map((r) => r.dataset.name),
-        ['Joshua Bridgers', 'jbridgers', 'Aly Karsan']);
-    assert.match(row('jbridgers').textContent,
-                 /Same person as Joshua Bridgers/);
-    // A colour set for one, in the dialog: both.
-    const sel = row('jbridgers').querySelector('select');
+    // One block for the person, the names as written under it.
+    const people = () => [...modal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')].map((r) => [r.dataset.person,
+        [...r.querySelectorAll('.dendrite-reviewer-alias')]
+            .map((x) => x.dataset.name)]);
+    assert.deepEqual(people(), [
+        ['Joshua Bridgers', ['Joshua Bridgers', 'jbridgers']],
+        ['Aly Karsan', []]]);
+    // A colour set for the person, in the dialog: both names.
+    const sel = row('Joshua Bridgers').querySelector('select');
     sel.value = 'cyan';
     sel.dispatchEvent(new h.window.Event('change'));
     await tick(30);
     assert.deepEqual(fm(), ['[[Joshua Bridgers]]: cyan',
         '[[Joshua Bridgers|jbridgers]]: cyan', 'Aly Karsan: green'],
         'kept with the same person\'s names together');
-    assert.equal(row('Joshua Bridgers').querySelector('select').value,
-                 'cyan');
     // From a comment's right-click: both.
     await view.setReviewerColour('Joshua Bridgers', 'pink');
     await tick(30);
@@ -4385,6 +4427,43 @@ test('names linked to the same note are one person: one colour for all ' +
         '[[Joshua Bridgers|jbridgers]]: pink', 'Aly Karsan: green'],
         'kept with the same person\'s names together');
     assert.ok(view.cardEls.get('G-ccccc').querySelector('mark.is-c-pink'));
+    // One name unlinked by its ×: its own block again, its colour kept.
+    await row('Joshua Bridgers').querySelector(
+        '.dendrite-reviewer-alias[data-name="jbridgers"] button').onclick();
+    await tick(30);
+    assert.deepEqual(people(), [
+        ['Joshua Bridgers', ['Joshua Bridgers']], ['Aly Karsan', []],
+        ['jbridgers', []]]);
+    assert.deepEqual(fm(), ['[[Joshua Bridgers]]: pink', 'jbridgers: pink',
+                            'Aly Karsan: green']);
+});
+
+test('a name Word numbers, as "Aly Karsan 2", is offered the note without ' +
+     'the number, and a linked name is shown as the person', async () => {
+    const { app, view } = await open(REVIEWED_INDEX, {
+        'G-aaaaa': 'First ==one==%%[!review] Aly Karsan 2, 2026-10-23: ' +
+            'Why?%%.',
+        'G-bbbbb': 'Second ==two==%%[!review] jbridgers, 2026-10-23: ' +
+            'No.%%.' });
+    app.vault.folders.add('People');
+    await app.vault.create('People/Aly Karsan.md', 'A person.');
+    await tick(30);
+    await menuItem(view.reviewMenu(), 'Reviewers…').click();
+    const modal = h.obsidian.lastModal;
+    const row = (name) => [...modal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')].find((r) => r.dataset.name === name);
+    const offer = row('Aly Karsan 2').querySelector(
+        '.dendrite-reviewer-offer');
+    assert.equal(offer && offer.textContent, 'Link [[Aly Karsan]]');
+    assert.ok(!row('jbridgers').querySelector('.dendrite-reviewer-offer'));
+    await offer.onclick();
+    await tick(30);
+    const who = (id) => view.cardEls.get(id)
+        .querySelector('.dendrite-review-meta b');
+    assert.equal(who('G-aaaaa').textContent, 'Aly Karsan');
+    assert.equal(who('G-aaaaa').title, 'As written: Aly Karsan 2');
+    assert.equal(who('G-bbbbb').textContent, 'jbridgers', 'not linked');
+    assert.equal(who('G-bbbbb').title, '');
 });
 
 test('a reviewer\'s note is found with Obsidian\'s note search as it is ' +

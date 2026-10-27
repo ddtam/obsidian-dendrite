@@ -2032,6 +2032,34 @@ button.dendrite-review-btn:hover {
 .dendrite-reviewer-said:empty {
     display: none;
 }
+.dendrite-reviewers {
+    gap: 12px;
+}
+/* A person's names as the reviews wrote them, under the person. */
+.dendrite-reviewer-names {
+    grid-column: 2 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+.dendrite-reviewer-alias {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 2px 0 6px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+}
+.dendrite-reviewer-names button.dendrite-reviewer-unlink {
+    height: auto;
+    padding: 0 4px;
+    background: none;
+    box-shadow: none;
+    color: var(--text-faint);
+}
 .dendrite-reviewer-path {
     color: var(--text-faint);
     font-size: var(--font-ui-smaller);

@@ -108,6 +108,9 @@ const DEFAULTS = {
     // The name a reply to a review comment is signed with.
     replyName: '',
     recordTimings: false,
+    // A notice for each time the board is moved sideways other than by
+    // hand, naming what moved it.
+    showBoardMoves: false,
     // Reviews submitted, pending until added or ignored on the board,
     // and the latest ones decided, so a submitter can ask.
     reviewQueue: [],
@@ -929,6 +932,7 @@ class DendriteView extends ItemView {
                 this.scrolledByHand = true;
             }, { passive: true });
         }
+        this.watchBoardMoves(board);
         // A press on the board itself, not a card, is on its scrollbar.
         board.addEventListener('pointerdown', (e) => {
             if (e.target === board) this.scrolledByHand = true;
@@ -1188,7 +1192,8 @@ class DendriteView extends ItemView {
                 review.decorate(out, notes,
                     (n, what, arg) => this.reviewAction(id, n, what, arg),
                     (n, e, k) => this.commentMenu(id, n, e, k),
-                    this.colourOf(), (el) => ownKeys(this.app, el));
+                    this.colourOf(), (el) => ownKeys(this.app, el),
+                    this.nameOf());
                 externalLinks(out);
             }
         } else if (!kind) {
@@ -1384,8 +1389,51 @@ class DendriteView extends ItemView {
         if (col) {
             const left = col.offsetLeft -
                 (this.board.clientWidth - col.offsetWidth) / 2;
+            this.tellCentred(left);
             this.board.scrollTo({ left, behavior });
         }
+    }
+
+    /** With Say what moves the board on, a centring that moves it. */
+    tellCentred(left) {
+        this.centredAt = Date.now();
+        if (!this.plugin.settings.showBoardMoves) return;
+        const max = this.board.scrollWidth - this.board.clientWidth;
+        const to = Math.max(0, Math.min(max, left));
+        const by = Math.round(to - this.board.scrollLeft);
+        if (Math.abs(by) < 20) return;
+        new Notice(`Dendrite centred the board, ${by} px: ` +
+                   callers(new Error().stack).join(' \u2190 '), 10000);
+    }
+
+    /**
+     * With Say what moves the board on, the board moved sideways with no
+     * touch, wheel or centring in the last moments.
+     */
+    watchBoardMoves(board) {
+        let rest = board.scrollLeft;
+        const handAt = () => { this.handAt = Date.now(); };
+        for (const t of ['touchstart', 'touchmove', 'touchend', 'wheel',
+                         'pointerdown']) {
+            board.addEventListener(t, handAt, { passive: true });
+        }
+        board.addEventListener('scroll', (e) => {
+            if (e.target !== board) return;
+            const now = Date.now();
+            const quiet = now - (this.handAt || 0) > 3000 &&
+                now - (this.centredAt || 0) > 1500;
+            // Measured from where a hand or a centring last left it.
+            if (!quiet) {
+                rest = board.scrollLeft;
+                return;
+            }
+            const by = Math.round(board.scrollLeft - rest);
+            if (Math.abs(by) < 20) return;
+            rest = board.scrollLeft;
+            if (!this.plugin.settings.showBoardMoves) return;
+            new Notice(`Dendrite: the board moved ${by} px sideways with ` +
+                       'no touch and no centring.', 10000);
+        });
     }
 
     /**
@@ -3664,7 +3712,8 @@ class DendriteView extends ItemView {
             review.decorate(out, notes,
                 (n, what, arg) => this.reviewAction(id, n, what, arg),
                 (n, e, k) => this.commentMenu(id, n, e, k),
-                this.colourOf(), (el) => ownKeys(this.app, el));
+                this.colourOf(), (el) => ownKeys(this.app, el),
+                this.nameOf());
             externalLinks(out);
         }
     }
@@ -5061,7 +5110,7 @@ class DendriteView extends ItemView {
             const who = it.author || 'Reviewer';
             showCommentMenu(review.commentMenu(it), event,
                             (what) => this.reviewAction(id, n, what), {
-                                author: who,
+                                author: this.nameOf()(who),
                                 current: this.colourOf()(who),
                                 pick: (c) => this.setReviewerColour(who, c),
                             });
@@ -5084,6 +5133,15 @@ class DendriteView extends ItemView {
     colourOf() {
         const map = this.reviewers();
         return (who) => map.get(who) || null;
+    }
+
+    /** A reviewer name as the person it is linked to, or as it is. */
+    nameOf() {
+        const fm = this.file &&
+            this.app.metadataCache.getFileCache(this.file)?.frontmatter;
+        const names = review.reviewerNames(
+            fm && fm.dendrite_reviewer_colours);
+        return (who) => names.get(who) || who;
     }
 
     /**
@@ -6723,6 +6781,7 @@ class DendritePreview extends ItemView {
         const fm = this.app.metadataCache.getFileCache(this.file)
             ?.frontmatter || {};
         this.colours = review.reviewerColours(fm.dendrite_reviewer_colours);
+        this.names = review.reviewerNames(fm.dendrite_reviewer_colours);
         const colourOf = (who) => this.colours.get(who) || null;
         const top = Number(fm.dendrite_heading_top);
         const headingTop = top >= 1 && top <= 6 ? top :
@@ -6989,7 +7048,8 @@ class DendritePreview extends ItemView {
                 this.goComment();
             });
             const meta = el.createDiv({ cls: 'dendrite-review-meta' });
-            meta.createEl('b', { text: it.author || 'Reviewer' });
+            review.shownAs(meta.createEl('b'), it.author || 'Reviewer',
+                           (who) => this.names.get(who));
             meta.appendText(` · ${review.shortDate(it.date)}`);
             if (entry.parts.length > 1) {
                 meta.appendText(` · ${entry.parts.length} passages`);
@@ -7026,7 +7086,7 @@ class DendritePreview extends ItemView {
                         this.plugin.reviewFromPreview(this.file, id, n, what);
                     }
                 }, this.plugin.reviewerColourFor ? {
-                    author: who, current: c,
+                    author: this.names.get(who) || who, current: c,
                     pick: (to) => this.plugin.reviewerColourFor(this.file,
                                                                 who, to),
                 } : null);
@@ -8139,7 +8199,8 @@ class ReviewImportModal extends Modal {
             };
             const main = el.createDiv({ cls: 'dendrite-review-main' });
             const meta = main.createDiv({ cls: 'dendrite-review-meta' });
-            meta.createEl('b', { text: it.author || 'Reviewer' });
+            review.shownAs(meta.createEl('b'), it.author || 'Reviewer',
+                           view.nameOf());
             meta.appendText(` · ${review.shortDate(it.date)} · ` +
                 (it.kind === 'change' ? 'suggested change' : 'comment'));
             if (it.quote) {
@@ -8354,50 +8415,62 @@ class ReviewersModal extends Modal {
     draw() {
         this.list.empty();
         const entries = this.entries();
-        const save = async () => {
-            await this.view.saveEntries(entries);
+        // `fn` applied to the names in `which`, as the property is now,
+        // since a colour can be changed from a comment while this is open.
+        const change = async (which, fn) => {
+            const now = this.entries();
+            for (const x of now) {
+                if (which.some((y) => y.name === x.name)) fn(x, now);
+            }
+            await this.view.saveEntries(now);
+            this.draw();
         };
+        // One block per person: the names linked to one note together,
+        // a name linked to none on its own.
+        const people = [];
         for (const e of entries) {
-            const row = this.list.createDiv({ cls: 'dendrite-reviewer' });
-            row.dataset.name = e.name;
-            const dot = row.createSpan({ cls: 'dendrite-reviewer-dot' });
-            const paint = () => {
-                dot.style.background = `var(--color-${e.colour})`;
-            };
-            paint();
-            row.createSpan({ cls: 'dendrite-reviewer-name', text: e.name });
-            const sel = row.createEl('select', { cls: 'dropdown' });
+            const p = e.note && people.find((x) => x[0].note === e.note);
+            if (p) p.push(e);
+            else people.push([e]);
+        }
+        const find = (n) => this.app.metadataCache.getFirstLinkpathDest(n,
+            this.view.file.path);
+        for (const names of people) {
+            const e = names[0];
+            const block = this.list.createDiv({ cls: 'dendrite-reviewer' });
+            block.dataset.name = e.name;
+            const person = e.note ? e.note.split('/').pop() : e.name;
+            block.dataset.person = person;
+            const dot = block.createSpan({ cls: 'dendrite-reviewer-dot' });
+            dot.style.background = `var(--color-${e.colour})`;
+            block.createSpan({ cls: 'dendrite-reviewer-name',
+                               text: person });
+            const sel = block.createEl('select', { cls: 'dropdown' });
             for (const c of review.REVIEWER_COLOURS) {
                 const o = sel.createEl('option', {
                     text: c[0].toUpperCase() + c.slice(1) });
                 o.value = c;
             }
             sel.value = e.colour;
-            // One person's names, by their note, share their colour.
-            const same = () => entries.filter((x) => x !== e && e.note &&
-                                              x.note === e.note);
-            sel.addEventListener('change', async () => {
-                for (const x of [e, ...same()]) x.colour = sel.value;
-                await save();
-                this.draw();
-            });
-            const note = row.createEl('input', { type: 'text',
+            sel.addEventListener('change', () => change(names, (x) => {
+                x.colour = sel.value;
+            }));
+            const note = block.createEl('input', { type: 'text',
                 cls: 'dendrite-reviewer-note' });
             note.placeholder = 'Their note, if a person';
             note.value = e.note ? e.note.split('/').pop() : '';
-            const said = row.createDiv({ cls: 'dendrite-reviewer-said' });
-            const link = async (f) => {
-                e.note = f ? this.linktext(f) : null;
-                // A name of someone already here takes their colour.
-                const known = same()[0];
-                if (known) e.colour = known.colour;
-                await save();
-                this.draw();
+            const said = block.createDiv({ cls: 'dendrite-reviewer-said' });
+            // Every name of this person linked to note `f`, or to none;
+            // linked to someone already here, they take that colour.
+            const link = (f) => {
+                const to = f ? this.linktext(f) : null;
+                return change(names, (x, now) => {
+                    const known = to && now.find((y) => y.note === to &&
+                        !names.some((n) => n.name === y.name));
+                    x.note = to;
+                    if (known) x.colour = known.colour;
+                });
             };
-            if (same().length) {
-                said.setText('Same person as ' +
-                             same().map((x) => x.name).join(', '));
-            }
             // Found as it is typed, with Obsidian's note search.
             noteSuggest(this.app, note, (f) => link(f));
             note.addEventListener('change', async () => {
@@ -8406,16 +8479,34 @@ class ReviewersModal extends Modal {
                     await link(null);
                     return;
                 }
-                const f = this.app.metadataCache.getFirstLinkpathDest(v,
-                    this.view.file.path);
+                const f = find(v);
                 if (f) await link(f);
                 else said.setText(`No note named ${v}`);
             });
-            // A note with their name, offered when not linked.
-            const named = !e.note && this.app.metadataCache
-                .getFirstLinkpathDest(e.name, this.view.file.path);
+            if (e.note) {
+                // The names the reviews wrote, each unlinked on its own.
+                const as = block.createDiv({ cls: 'dendrite-reviewer-names' });
+                as.createSpan({ text: 'written as:' });
+                for (const x of names) {
+                    const chip = as.createSpan({
+                        cls: 'dendrite-reviewer-alias' });
+                    chip.dataset.name = x.name;
+                    chip.createSpan({ text: x.name });
+                    const off = chip.createEl('button', {
+                        cls: 'dendrite-reviewer-unlink', text: '×' });
+                    off.title = `Not ${person}: unlink ${x.name}`;
+                    off.onclick = () => change([x], (y) => {
+                        y.note = null;
+                    });
+                }
+                continue;
+            }
+            // A note with their name, offered when not linked; or with
+            // it less a number Word adds, as "Aly Karsan 2".
+            const named = find(e.name) || (/\s\d+$/.test(e.name) &&
+                find(e.name.replace(/\s\d+$/, '')));
             if (named) {
-                const b = row.createEl('button', {
+                const b = block.createEl('button', {
                     cls: 'dendrite-reviewer-offer',
                     text: `Link [[${named.basename}]]` });
                 b.onclick = () => link(named);
@@ -8994,7 +9085,32 @@ class DendriteSettings extends PluginSettingTab {
                     timing.setOn(v && Platform.isDesktopApp);
                     save();
                 }));
+        new Setting(containerEl).setName('Say what moves the board')
+            .setDesc('While on, a notice each time the board moves ' +
+                     'sideways other than by hand: the steps that centred ' +
+                     'it, or that it moved with no touch and no centring. ' +
+                     'For finding what pulls the board back.')
+            .addToggle((t) => t.setValue(!!s.showBoardMoves)
+                .onChange((v) => {
+                    s.showBoardMoves = v;
+                    save();
+                }));
     }
+}
+
+/**
+ * The functions that led to the one that read `stack`, nearest first,
+ * from Chromium's "at View.name (" or WebKit's "name@" lines.
+ */
+function callers(stack, skip = 1) {
+    const out = [];
+    for (const line of String(stack).split('\n').slice(1 + skip)) {
+        const m = /^\s*at (?:async )?(?:[\w$]+\.)*([\w$]+) \(/.exec(line) ||
+            /^(?:[\w$]+\.)*([\w$]+)@/.exec(line.trim());
+        if (m && !out.includes(m[1])) out.push(m[1]);
+        if (out.length === 5) break;
+    }
+    return out;
 }
 
 // Timed while Record timings is on (timing.js): the steps that draw the
@@ -10090,3 +10206,4 @@ module.exports.DendriteView = DendriteView;
 module.exports.DendritePreview = DendritePreview;
 module.exports.DendriteSettings = DendriteSettings;
 module.exports.exportStyle = exportStyle;
+module.exports.callers = callers;
