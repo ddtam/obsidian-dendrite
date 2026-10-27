@@ -1773,6 +1773,17 @@ button.dendrite-review-btn:hover {
 .dendrite-pbubble.is-faded {
     opacity: 0.4;
 }
+/* A passage pointed at: its bubble marked, the others dimmed. */
+.dendrite-pgutter.has-hover .dendrite-pbubble:not(.is-hover) {
+    opacity: 0.4;
+}
+.dendrite-pbubble.is-hover {
+    opacity: 1;
+    box-shadow: 0 0 0 1px var(--dendrite-review);
+}
+.dendrite-pbubble.is-suggest.is-hover {
+    box-shadow: 0 0 0 1px var(--dendrite-suggest);
+}
 .dendrite-pbubble.is-faded:hover {
     opacity: 1;
 }

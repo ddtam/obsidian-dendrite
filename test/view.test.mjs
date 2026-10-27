@@ -1902,6 +1902,45 @@ test('the preview shows every comment of a card where a Google comment ' +
     await view.onClose();
 });
 
+test('pointing at a passage in the preview marks its bubble and its ' +
+     'other passages, the other bubbles dimmed', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const g = 'https://docs.google.com/document/d/x/edit?disco=doco.A1';
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|t]]\n');
+    await app.vault.create(cardPath('G-aaaaa'),
+        `%%{1%%WGS%%}1 [!review] Josh, 2026-10-23: Same. ${g}%% and ` +
+        `%%{2%%RNA%%}2 [!review] Josh, 2026-10-23: Same. ${g}%% from ` +
+        `%%{3%%18%%}3 [!suggest] Aly, 2026-10-23: 51%% patients.`);
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(50);
+    const bubbles = [...view.contentEl.querySelectorAll('.dendrite-pbubble')];
+    const rna = [...view.doc.querySelectorAll('mark')]
+        .find((el) => el.textContent === 'RNA');
+    const over = (el) => el.dispatchEvent(new h.window.MouseEvent(
+        'mouseover', { bubbles: true }));
+    over(rna);
+    assert.ok(bubbles[0].classList.contains('is-hover'), 'its bubble');
+    assert.ok(view.gutterEl.classList.contains('has-hover'));
+    assert.ok(!bubbles[1].classList.contains('is-hover'));
+    const lit = [...view.doc.querySelectorAll('mark.is-hover')]
+        .map((el) => el.textContent);
+    assert.deepEqual(lit, ['WGS', 'RNA'], 'its other passage too');
+    // Off the passages: nothing marked.
+    over(view.doc.querySelector('.dendrite-pblock'));
+    assert.ok(!bubbles[0].classList.contains('is-hover'));
+    assert.ok(!view.gutterEl.classList.contains('has-hover'));
+    // Aly's number: her bubble.
+    over(view.doc.querySelector('sup.dendrite-item-2'));
+    assert.ok(bubbles[1].classList.contains('is-hover'));
+    await view.onClose();
+});
+
 test('a preview whose parts are never seen scrolling into view draws ' +
      'them while idle, and a failure to draw says so', async () => {
     const { DendritePreview } = require('../src/main.js');

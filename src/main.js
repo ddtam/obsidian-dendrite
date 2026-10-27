@@ -7417,6 +7417,11 @@ class DendritePreview extends ItemView {
         this.doc = el.createDiv({ cls: 'dendrite-preview-doc ' +
                                        'markdown-preview-view ' +
                                        'markdown-rendered' });
+        // A passage or number pointed at marks its comment's bubble and
+        // passages, the other bubbles dimmed, as the bubble pointed at
+        // marks its passages.
+        this.doc.addEventListener('mouseover', (e) =>
+            this.hoverComment(this.commentAt(e.target)));
         // A wheel over the text moves the text at its own pace, the
         // comment column hurrying through a crowded run; over the
         // comments, the usual scroll moves them, and the text keeps pace.
@@ -7764,6 +7769,48 @@ class DendritePreview extends ItemView {
             const b = this.blocks.get(p.id);
             return b ? this.passageOf(b.el, p.n) : [];
         });
+    }
+
+    /**
+     * The comment, of reviewList, whose passage or number `el` is in:
+     * its number's index, found from a passage by the id it is held by,
+     * or, in the old form, by the number after it; or null.
+     */
+    commentAt(el) {
+        const at = el && el.closest && el.closest(
+            'sup.dendrite-review-n, mark.dendrite-review-mark, ' +
+            '.dendrite-review-old, .dendrite-review-new');
+        const block = at && at.closest('.dendrite-pblock');
+        if (!block) return null;
+        let sup = at.matches('sup') ? at : null;
+        const rid = !sup && [...at.classList].find((c) =>
+            c.startsWith('dendrite-rid-'));
+        if (rid) sup = block.querySelector(`sup.${rid}`);
+        for (let x = at; !sup && x; x = x.nextElementSibling) {
+            if (x.matches('sup.dendrite-review-n')) sup = x;
+        }
+        const k = sup && [...sup.classList].find((c) =>
+            c.startsWith('dendrite-item-'));
+        if (!k) return null;
+        const n = Number(k.slice('dendrite-item-'.length));
+        const id = block.dataset.id;
+        return this.reviewList.find((x) => x.parts.some((p) =>
+            p.id === id && p.n === n)) || null;
+    }
+
+    /** One comment marked, its bubble and passages, or none, `entry`. */
+    hoverComment(entry) {
+        if (entry === this.hovered) return;
+        const mark = (x, on) => {
+            if (!x) return;
+            for (const p of this.passagesOf(x)) p.toggleClass('is-hover', on);
+            const b = this.bubbleOf(x.id, x.n);
+            if (b) b.toggleClass('is-hover', on);
+        };
+        mark(this.hovered, false);
+        this.hovered = entry;
+        mark(entry, true);
+        if (this.gutterEl) this.gutterEl.toggleClass('has-hover', !!entry);
     }
 
     /** A comment's passage in a card's drawn text, `n` its index. */
