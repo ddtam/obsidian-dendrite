@@ -7513,8 +7513,10 @@ class DendritePreview extends ItemView {
             });
         comments.addClass('is-toggle');
         comments.toggleClass('is-on', this.showComments);
-        // Back and on through the comments, in reading order.
-        this.navEl = bar.createDiv({ cls: 'dendrite-pcomments-nav' });
+        // Back and on through the comments, in reading order: a stepper,
+        // one bordered group with the count in its own cell.
+        this.navEl = bar.createDiv({ cls: 'dendrite-seg ' +
+                                          'dendrite-pcomments-nav' });
         const navBtn = (icon, label, d) => barButton(this.navEl, icon, '',
             label, () => this.stepComment(d));
         navBtn('chevron-left', 'Previous comment', -1);

@@ -12652,7 +12652,7 @@ var DendritePreview = class extends ItemView {
     );
     comments.addClass("is-toggle");
     comments.toggleClass("is-on", this.showComments);
-    this.navEl = bar.createDiv({ cls: "dendrite-pcomments-nav" });
+    this.navEl = bar.createDiv({ cls: "dendrite-seg dendrite-pcomments-nav" });
     const navBtn = (icon, label, d) => barButton(
       this.navEl,
       icon,
