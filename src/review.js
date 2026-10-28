@@ -940,18 +940,82 @@ function threadIds(items) {
     });
 }
 
+// A reply addressed to one reader, `@Claude text`: for them, so it
+// does not go back to the reviewer.
+const TO = /^@(\S+)\s+([\s\S]*)$/;
+
+/** Whom a reply is addressed to, or null, and its text without that. */
+function addressed(r) {
+    const m = TO.exec(r.text || '');
+    return m ? { to: m[1], text: m[2] } : { to: null, text: r.text || '' };
+}
+
 /**
- * A reply with no text, drawn as a mark in its comment's name line: its
- * writer, Claude, read the comment and had nothing to add.
+ * Whether a comment waits for `name`'s answer. A reviewer's: until they
+ * answer it, and again when a reviewer replies or someone replies to
+ * them. The writer's own, in `self`, only when it or a reply in it is
+ * addressed to them, and then as a thread of theirs, followed up by
+ * any reply. The writer answering a reviewer does not count.
  */
-function seenMark(doc, r, nameOf = (x) => x) {
-    const el = doc.createElement('span');
-    el.className = 'dendrite-review-seen';
-    const who = doc.createElement('span');
-    shownAs(who, r.author || 'Me', nameOf);
-    el.append('✓ ', who.textContent);
-    el.title = `${who.textContent} read this on ${shortDate(r.date)} ` +
-        'and had nothing to add';
+function awaits(it, name, self) {
+    const rs = it.replies || [];
+    const to = (x) => addressed(x).to === name;
+    const mine = self.has(it.author);
+    const asked = it.author === name || (mine && to(it));
+    if (mine && !asked && !rs.some(to)) return false;
+    let j = rs.length - 1;
+    while (j >= 0 && rs[j].author !== name) j--;
+    if (j < 0 && it.author !== name) return true;
+    return rs.slice(j + 1).some((r) => asked || !self.has(r.author) ||
+        to(r));
+}
+
+/**
+ * `text` into `el`, a reader it opens by addressing, `@Claude`, in that
+ * reader's colour.
+ */
+function fillAddressed(el, text, colourOf = null) {
+    const { to, text: rest } = addressed({ text });
+    if (!to) {
+        el.textContent = text;
+        return;
+    }
+    const doc = el.ownerDocument;
+    const at = doc.createElement('span');
+    const c = colourOf && colourOf(to);
+    at.className = 'dendrite-review-to' + (c ? ` is-c-${c}` : '');
+    at.textContent = `@${to}`;
+    el.textContent = '';
+    el.append(at, ` ${rest}`);
+}
+
+/**
+ * A reply as drawn under its comment, in its writer's colour: their
+ * name over its text. One with no text is a read mark, a row saying
+ * its writer read the comment and had nothing to add.
+ */
+function replyRow(doc, r, nameOf = null, colourOf = null) {
+    const el = doc.createElement('div');
+    const rc = colourOf && colourOf(r.author || 'Me');
+    const seen = !String(r.text || '').trim();
+    el.className = 'dendrite-review-reply' + (seen ? ' is-seen' : '') +
+        (rc ? ` is-c-${rc}` : '');
+    const by = doc.createElement('div');
+    by.className = 'dendrite-review-meta';
+    const b = doc.createElement('b');
+    shownAs(b, r.author || 'Me', nameOf);
+    if (seen) by.append('✓ ');
+    by.append(b, ` · ${shortDate(r.date)}`);
+    el.append(by);
+    if (seen) {
+        el.title = `${b.textContent} read this on ${shortDate(r.date)} ` +
+            'and had nothing to add';
+        return el;
+    }
+    const said = doc.createElement('div');
+    said.className = 'dendrite-review-text';
+    fillAddressed(said, r.text, colourOf);
+    el.append(said);
     return el;
 }
 
@@ -965,7 +1029,25 @@ function seenMark(doc, r, nameOf = (x) => x) {
 function forReviewers(items, self) {
     const mine = (who) => self.has(who) || who === 'Claude';
     return items.filter((it) => !mine(it.author)).map((it) => ({ ...it,
-        replies: (it.replies || []).filter((r) => r.author !== 'Claude') }));
+        replies: (it.replies || []).filter((r) => r.author !== 'Claude' &&
+            addressed(r).to !== 'Claude') }));
+}
+
+/**
+ * A card's markdown with `name`'s replies at the end of its `n`th
+ * comment's thread replaced by `reply`; null where someone else has
+ * replied since, or there are none, so a thread is never changed under
+ * an answer to it.
+ */
+function replaceReplies(md, n, name, reply) {
+    const it = reviewItems(md)[n];
+    const rs = it ? it.replies : [];
+    let k = rs.length;
+    while (k > 0 && rs[k - 1].author === name) k--;
+    if (k === rs.length) return null;
+    let out = md;
+    for (let x = rs.length - 1; x >= k; x--) out = removeReply(out, n, x);
+    return addReply(out, n, reply);
 }
 
 /** A card's markdown with the `k`th reply to its `n`th comment taken out. */
@@ -1763,7 +1845,7 @@ function commentMenu(it) {
  * written. `typing(el)`, if given, is told of the box, so the keys typed
  * in it stay in it.
  */
-function replyBox(parent, send, typing = null) {
+function replyBox(parent, send, typing = null, start = '') {
     const doc = parent.ownerDocument;
     const old = parent.querySelector(':scope > .dendrite-review-reply-form');
     if (old) {
@@ -1776,6 +1858,7 @@ function replyBox(parent, send, typing = null) {
     box.className = 'dendrite-review-reply-box';
     box.rows = 2;
     box.placeholder = 'Reply';
+    box.value = start;
     const row = doc.createElement('div');
     row.className = 'dendrite-review-reply-btns';
     const go = doc.createElement('button');
@@ -1818,6 +1901,7 @@ function replyBox(parent, send, typing = null) {
     parent.append(form);
     if (typing) typing(box);
     box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
     return form;
 }
 
@@ -1896,47 +1980,37 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                 a.addEventListener('click', (e) => e.stopPropagation());
                 meta.append(' ', a);
             }
-            text.textContent = it.kind !== 'suggest' ? said :
+            if (it.kind !== 'suggest') fillAddressed(text, said, colourOf);
+            else text.textContent =
                 !it.text.trim() ? 'Suggests deleting this.' :
                 it.passage ? `Suggests: ${it.text.trim()}` :
                 `Suggests adding: ${it.text.trim()}`;
             main.append(meta, text);
-            // Its replies, under it, each with its own right-click menu;
-            // one with no text a mark in the name line that its writer
-            // read the comment and had nothing to add.
+            // Its replies, under it, each with its own right-click menu,
+            // a seen mark among them; Claude's with a reply to Claude.
             (it.replies || []).forEach((r, k) => {
-                if (!r.text.trim()) {
-                    const mark = seenMark(doc, r, nameOf);
-                    if (onMenu) {
-                        mark.addEventListener('contextmenu', (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onMenu(i, e, k);
-                        });
-                    }
-                    meta.append(' ', mark);
-                    return;
-                }
-                const el = doc.createElement('div');
-                // In its writer's colour, under the name they are shown as.
-                const rc = colourOf && colourOf(r.author || 'Me');
-                el.className = 'dendrite-review-reply' +
-                    (rc ? ` is-c-${rc}` : '');
-                const by = doc.createElement('div');
-                by.className = 'dendrite-review-meta';
-                const b = doc.createElement('b');
-                shownAs(b, r.author || 'Me', nameOf);
-                by.append(b, ` · ${shortDate(r.date)}`);
-                const said = doc.createElement('div');
-                said.className = 'dendrite-review-text';
-                said.textContent = r.text;
-                el.append(by, said);
+                const el = replyRow(doc, r, nameOf, colourOf);
                 if (onMenu) {
                     el.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
                         onMenu(i, e, k);
                     });
+                }
+                if (r.author === 'Claude') {
+                    const btn = doc.createElement('button');
+                    btn.className = 'dendrite-review-btn';
+                    btn.textContent = 'Reply to Claude';
+                    btn.title = 'For Claude only: not sent to the reviewer';
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        replyBox(main, (t) => act(i, 'reply', t), typing,
+                                 '@Claude ');
+                    });
+                    const bar = doc.createElement('span');
+                    bar.className = 'dendrite-review-acts';
+                    bar.append(btn);
+                    el.prepend(bar);
                 }
                 main.append(el);
             });
@@ -2013,7 +2087,8 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    REVIEWER_COLOURS, colourCss, reviewerColours, colourList,
                    assignColours, reviewerEntries, entryList,
                    addReply, removeReply, replyBox, threadId,
-                   threadIds, forReviewers, seenMark,
+                   threadIds, forReviewers, replyRow,
+                   addressed, awaits, replaceReplies, fillAddressed,
                    suggestInto,
                    firstOfComment, countComments,
                    itemText,

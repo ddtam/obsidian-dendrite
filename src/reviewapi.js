@@ -14,15 +14,19 @@
 //        the manuscript's open comments, each with its id and replies, and
 //        the text of their cards, so a reviewer can read them in context
 //        and what was answered; `author=me` is the
-//        writer's own, and `awaiting` leaves out those whose last word is
-//        that name's, and `card` keeps to that card and those under it;
-//        read only
+//        writer's own, and `awaiting` keeps those waiting for that name:
+//        not answered by them, or replied to since by a reviewer, by the
+//        writer on their own comment, or as `@<name> ...`; and `card`
+//        keeps to that card and those under it; read only
 //   POST /dendrite/reply         { manuscript, thread, text, author? }
 //        a reply written under the comment whose id is `thread`, at
 //        once, as `author`, Claude if not given; up to 500 characters.
 //        With `seen: true` and no text, a reply with no text, saying the
 //        comment was read and there is nothing to add; `threads`, a list
-//        of ids, in place of `thread` for several at once
+//        of ids, in place of `thread` for several at once. With
+//        `replace: true`, it takes the place of the writer's replies at
+//        the end of the thread, a seen mark taking them back, and is
+//        refused where someone has replied since
 //   POST /dendrite/suggest       { manuscript, items: [{ card, quote,
 //        replace, before?, after?, author? }] }
 //        suggested changes, each written at once where its quote is

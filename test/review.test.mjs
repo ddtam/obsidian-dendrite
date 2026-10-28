@@ -951,25 +951,120 @@ test('what goes back to reviewers: their comments with the writer\'s ' +
         [['Aly', 'Why?', ['Derek Tam']]]);
 });
 
-test('a reply with no text is drawn as a mark that its writer saw the ' +
-     'comment, not as a reply', () => {
+test('a reply with no text is drawn at the end of its thread, in its ' +
+     'writer\'s colour, as a mark that they read it and had nothing to ' +
+     'add, with a reply to them', () => {
     const { JSDOM } = require('jsdom');
     const doc = new JSDOM('<div id="root"></div>').window.document;
     const md = 'A ==b==%%[!review] Aly, 2026-10-23: Typo.%%%%[!reply] ' +
-        'Claude, 2026-10-27: %%.';
+        'Derek, 2026-10-24: Fixed.%%%%[!reply] Claude, 2026-10-27: %%.';
     const root = doc.getElementById('root');
     root.innerHTML = '<p>' + r.renderMarkdown(md) + '</p>';
     const menus = [];
-    r.decorate(root, r.reviewItems(md), () => {},
-               (n, e, k) => menus.push([n, k]));
-    assert.equal(root.querySelectorAll('.dendrite-review-reply').length, 0);
-    const seen = root.querySelector(
-        '.dendrite-review-meta .dendrite-review-seen');
-    assert.equal(seen.textContent, '✓ Claude');
+    const acts = [];
+    r.decorate(root, r.reviewItems(md), (...a) => acts.push(a),
+               (n, e, k) => menus.push([n, k]),
+               (who) => (who === 'Claude' ? 'purple' : null));
+    const rows = [...root.querySelectorAll('.dendrite-review-reply')];
+    assert.equal(rows.length, 2, 'the mark is the thread\'s last row');
+    const seen = rows[1];
+    assert.ok(seen.classList.contains('is-seen'));
+    assert.ok(seen.classList.contains('is-c-purple'), 'Claude\'s colour');
+    assert.equal(seen.querySelector('.dendrite-review-meta').textContent,
+                 '✓ Claude · 27 Oct', 'a read mark');
+    assert.equal(root.querySelector('.dendrite-review-note > * > ' +
+        '.dendrite-review-meta .dendrite-review-seen'), null,
+    'not in the comment\'s name line');
     // Taken back from its own menu, as a reply is.
     seen.dispatchEvent(new doc.defaultView.MouseEvent('contextmenu',
                                                       { bubbles: true }));
-    assert.deepEqual(menus, [[0, 0]]);
+    assert.deepEqual(menus, [[0, 1]]);
+    // A reply to Claude: the box opens addressed, in plain sight.
+    const to = seen.querySelector('button');
+    assert.equal(to.textContent, 'Reply to Claude');
+    to.click();
+    const box = root.querySelector('.dendrite-review-reply-box');
+    assert.equal(box.value, '@Claude ');
+    box.value += 'Why not the other?';
+    root.querySelector('.dendrite-review-reply-form .mod-cta').onclick();
+    assert.deepEqual(acts, [[0, 'reply', '@Claude Why not the other?']]);
+    assert.equal(rows[0].querySelector('button'), null,
+                 'the writer\'s own reply has none');
+});
+
+test('a reply addressed to Claude shows it, Claude\'s name in Claude\'s ' +
+     'colour, and is left out of what goes back to reviewers', () => {
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div id="root"></div>').window.document;
+    const md = 'A ==b==%%[!review] Aly, 2026-10-23: Why?%%%%[!reply] ' +
+        'Derek, 2026-10-27: @Claude Is she right?%%%%[!reply] Derek, ' +
+        '2026-10-27: Fixed in Methods.%%.';
+    const root = doc.getElementById('root');
+    root.innerHTML = '<p>' + r.renderMarkdown(md) + '</p>';
+    r.decorate(root, r.reviewItems(md), () => {}, null,
+               (who) => (who === 'Claude' ? 'purple' : null));
+    const rows = [...root.querySelectorAll('.dendrite-review-reply')];
+    assert.equal(rows[0].querySelector('.dendrite-review-meta').textContent,
+                 'Derek · 27 Oct');
+    const said = rows[0].querySelector('.dendrite-review-text');
+    assert.equal(said.textContent, '@Claude Is she right?');
+    assert.equal(said.querySelector('.dendrite-review-to.is-c-purple')
+        .textContent, '@Claude');
+    const out = r.forReviewers(r.reviewItems(md), new Set(['Derek']));
+    assert.deepEqual(out[0].replies.map((x) => x.text),
+                     ['Fixed in Methods.']);
+});
+
+test('a thread awaits Claude until Claude answers, and again only when ' +
+     'someone replies to Claude; the writer\'s own, when addressed to ' +
+     'Claude', () => {
+    const self = new Set(['Derek', 'Me']);
+    const at = (md) => r.reviewItems(md).map((it) =>
+        r.awaits(it, 'Claude', self));
+    const C = '%%[!reply] Claude, 2026-10-27: %%';
+    const rev = (x) => `A ==b==%%[!review] Aly, 2026-10-23: Why?%%${x}.`;
+    const own = (x) => 'A ==b==%%[!review] Derek, 2026-10-23: @Claude ' +
+        `Why?%%${x}.`;
+    const note = (x) => `A ==b==%%[!review] Derek, 2026-10-23: Why?%%${x}.`;
+    assert.deepEqual(at(rev('')), [true], 'not answered');
+    assert.deepEqual(at(rev(C)), [false], 'seen');
+    assert.deepEqual(at(rev(C + '%%[!reply] Derek, 2026-10-28: Done.%%')),
+                     [false], 'the writer answering the reviewer');
+    assert.deepEqual(at(rev(C + '%%[!reply] Derek, 2026-10-28: @Claude ' +
+        'Sure?%%')), [true], 'the writer asking Claude');
+    assert.deepEqual(at(rev(C + '%%[!reply] Aly, 2026-10-28: Also.%%')),
+                     [true], 'the reviewer again');
+    assert.deepEqual(at(own('')), [true], 'the writer asks Claude');
+    assert.deepEqual(at(own(C + '%%[!reply] Derek, 2026-10-28: And?%%')),
+                     [true], 'the writer\'s own question, followed up');
+    assert.deepEqual(at(note('')), [false], 'the writer\'s own note');
+    assert.deepEqual(at(note('%%[!reply] Derek, 2026-10-28: More.%%')),
+                     [false], 'and its follow-up');
+    assert.deepEqual(at(note('%%[!reply] Derek, 2026-10-28: @Claude ' +
+        'Ideas?%%')), [true], 'until Claude is asked in it');
+    assert.deepEqual(at('A ==b==%%[!review] Claude, 2026-10-23: x%%.'),
+                     [false], 'Claude\'s own comment');
+});
+
+test('Claude\'s last replies in a thread are replaced by one, and only ' +
+     'when nobody has replied since', () => {
+    const head = 'A ==b==%%[!review] Aly, 2026-10-23: 200+?%%';
+    const old = '%%[!reply] Claude, 2026-10-27: Conflicts with 175.%%' +
+        '%%[!reply] Claude, 2026-10-28: Correction: 200+ stands.%%';
+    const now = { author: 'Claude', date: '2026-10-28',
+                  text: '200+ is the expanded cohort; fine.' };
+    assert.equal(r.replaceReplies(`${head}${old}.`, 0, 'Claude', now),
+        `${head}%%[!reply] Claude, 2026-10-28: 200+ is the expanded ` +
+        'cohort; fine.%%.');
+    const seen = { author: 'Claude', date: '2026-10-28', text: '' };
+    assert.equal(r.replaceReplies(`${head}${old}.`, 0, 'Claude', seen),
+                 `${head}%%[!reply] Claude, 2026-10-28: %%.`,
+                 'taken back: a seen mark');
+    const derek = '%%[!reply] Derek, 2026-10-28: OK.%%';
+    assert.equal(r.replaceReplies(`${head}${old}${derek}.`, 0, 'Claude',
+                                  now), null, 'answered since');
+    assert.equal(r.replaceReplies(`${head}.`, 0, 'Claude', now), null,
+                 'nothing of Claude\'s');
 });
 
 test('a thread id stays the same as replies are added and differs ' +

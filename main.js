@@ -2422,21 +2422,74 @@ var require_review = __commonJS({
         return k === 1 ? id : `${id}.${k}`;
       });
     }
-    function seenMark(doc, r, nameOf = (x) => x) {
-      const el = doc.createElement("span");
-      el.className = "dendrite-review-seen";
-      const who = doc.createElement("span");
-      shownAs(who, r.author || "Me", nameOf);
-      el.append("\u2713 ", who.textContent);
-      el.title = `${who.textContent} read this on ${shortDate(r.date)} and had nothing to add`;
+    var TO = /^@(\S+)\s+([\s\S]*)$/;
+    function addressed(r) {
+      const m = TO.exec(r.text || "");
+      return m ? { to: m[1], text: m[2] } : { to: null, text: r.text || "" };
+    }
+    function awaits(it, name, self) {
+      const rs = it.replies || [];
+      const to = (x) => addressed(x).to === name;
+      const mine = self.has(it.author);
+      const asked = it.author === name || mine && to(it);
+      if (mine && !asked && !rs.some(to)) return false;
+      let j = rs.length - 1;
+      while (j >= 0 && rs[j].author !== name) j--;
+      if (j < 0 && it.author !== name) return true;
+      return rs.slice(j + 1).some((r) => asked || !self.has(r.author) || to(r));
+    }
+    function fillAddressed(el, text, colourOf = null) {
+      const { to, text: rest } = addressed({ text });
+      if (!to) {
+        el.textContent = text;
+        return;
+      }
+      const doc = el.ownerDocument;
+      const at = doc.createElement("span");
+      const c = colourOf && colourOf(to);
+      at.className = "dendrite-review-to" + (c ? ` is-c-${c}` : "");
+      at.textContent = `@${to}`;
+      el.textContent = "";
+      el.append(at, ` ${rest}`);
+    }
+    function replyRow(doc, r, nameOf = null, colourOf = null) {
+      const el = doc.createElement("div");
+      const rc = colourOf && colourOf(r.author || "Me");
+      const seen = !String(r.text || "").trim();
+      el.className = "dendrite-review-reply" + (seen ? " is-seen" : "") + (rc ? ` is-c-${rc}` : "");
+      const by = doc.createElement("div");
+      by.className = "dendrite-review-meta";
+      const b = doc.createElement("b");
+      shownAs(b, r.author || "Me", nameOf);
+      if (seen) by.append("\u2713 ");
+      by.append(b, ` \xB7 ${shortDate(r.date)}`);
+      el.append(by);
+      if (seen) {
+        el.title = `${b.textContent} read this on ${shortDate(r.date)} and had nothing to add`;
+        return el;
+      }
+      const said = doc.createElement("div");
+      said.className = "dendrite-review-text";
+      fillAddressed(said, r.text, colourOf);
+      el.append(said);
       return el;
     }
     function forReviewers(items, self) {
       const mine = (who) => self.has(who) || who === "Claude";
       return items.filter((it) => !mine(it.author)).map((it) => ({
         ...it,
-        replies: (it.replies || []).filter((r) => r.author !== "Claude")
+        replies: (it.replies || []).filter((r) => r.author !== "Claude" && addressed(r).to !== "Claude")
       }));
+    }
+    function replaceReplies(md, n, name, reply) {
+      const it = reviewItems(md)[n];
+      const rs = it ? it.replies : [];
+      let k = rs.length;
+      while (k > 0 && rs[k - 1].author === name) k--;
+      if (k === rs.length) return null;
+      let out = md;
+      for (let x = rs.length - 1; x >= k; x--) out = removeReply(out, n, x);
+      return addReply(out, n, reply);
     }
     function removeReply(md, n, k) {
       const it = reviewItems(md)[n];
@@ -2959,7 +3012,7 @@ var require_review = __commonJS({
     function commentMenu(it) {
       return [...commentActions(it).map(([what, label]) => [what, label, false]), ["delete", "Delete from Dendrite", true]];
     }
-    function replyBox(parent, send, typing = null) {
+    function replyBox(parent, send, typing = null, start = "") {
       const doc = parent.ownerDocument;
       const old = parent.querySelector(":scope > .dendrite-review-reply-form");
       if (old) {
@@ -2972,6 +3025,7 @@ var require_review = __commonJS({
       box.className = "dendrite-review-reply-box";
       box.rows = 2;
       box.placeholder = "Reply";
+      box.value = start;
       const row = doc.createElement("div");
       row.className = "dendrite-review-reply-btns";
       const go = doc.createElement("button");
@@ -3013,6 +3067,7 @@ var require_review = __commonJS({
       parent.append(form);
       if (typing) typing(box);
       box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
       return form;
     }
     function shownAs(el, name, nameOf) {
@@ -3074,39 +3129,36 @@ var require_review = __commonJS({
             a.addEventListener("click", (e) => e.stopPropagation());
             meta.append(" ", a);
           }
-          text.textContent = it.kind !== "suggest" ? said : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
+          if (it.kind !== "suggest") fillAddressed(text, said, colourOf);
+          else text.textContent = !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
           main.append(meta, text);
           (it.replies || []).forEach((r, k) => {
-            if (!r.text.trim()) {
-              const mark = seenMark(doc, r, nameOf);
-              if (onMenu) {
-                mark.addEventListener("contextmenu", (e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onMenu(i, e, k);
-                });
-              }
-              meta.append(" ", mark);
-              return;
-            }
-            const el = doc.createElement("div");
-            const rc = colourOf && colourOf(r.author || "Me");
-            el.className = "dendrite-review-reply" + (rc ? ` is-c-${rc}` : "");
-            const by = doc.createElement("div");
-            by.className = "dendrite-review-meta";
-            const b2 = doc.createElement("b");
-            shownAs(b2, r.author || "Me", nameOf);
-            by.append(b2, ` \xB7 ${shortDate(r.date)}`);
-            const said2 = doc.createElement("div");
-            said2.className = "dendrite-review-text";
-            said2.textContent = r.text;
-            el.append(by, said2);
+            const el = replyRow(doc, r, nameOf, colourOf);
             if (onMenu) {
               el.addEventListener("contextmenu", (e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 onMenu(i, e, k);
               });
+            }
+            if (r.author === "Claude") {
+              const btn = doc.createElement("button");
+              btn.className = "dendrite-review-btn";
+              btn.textContent = "Reply to Claude";
+              btn.title = "For Claude only: not sent to the reviewer";
+              btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                replyBox(
+                  main,
+                  (t) => act(i, "reply", t),
+                  typing,
+                  "@Claude "
+                );
+              });
+              const bar2 = doc.createElement("span");
+              bar2.className = "dendrite-review-acts";
+              bar2.append(btn);
+              el.prepend(bar2);
             }
             main.append(el);
           });
@@ -3207,7 +3259,11 @@ var require_review = __commonJS({
       threadId,
       threadIds,
       forReviewers,
-      seenMark,
+      replyRow,
+      addressed,
+      awaits,
+      replaceReplies,
+      fillAddressed,
       suggestInto,
       firstOfComment,
       countComments,
@@ -3298,19 +3354,14 @@ var require_cmreview = __commonJS({
             review2.shownAs(who, c.author || "Reviewer", nameOf);
             meta.append(who, ` \xB7 ${review2.shortDate(c.date)}`);
             const { text: said } = review2.noteLink(c.text);
-            div("dendrite-review-text", main).textContent = c.kind !== "suggest" ? said : !c.text.trim() ? "Suggests deleting this." : c.passage ? `Suggests: ${c.text.trim()}` : `Suggests adding: ${c.text.trim()}`;
+            const shown = div("dendrite-review-text", main);
+            if (c.kind !== "suggest") {
+              review2.fillAddressed(shown, said, colourOf);
+            } else {
+              shown.textContent = !c.text.trim() ? "Suggests deleting this." : c.passage ? `Suggests: ${c.text.trim()}` : `Suggests adding: ${c.text.trim()}`;
+            }
             for (const r of c.replies || []) {
-              if (!r.text.trim()) {
-                meta.append(" ", review2.seenMark(doc, r, nameOf));
-                continue;
-              }
-              const rc = colourOf(r.author || "Me");
-              const rel = div("dendrite-review-reply" + (rc ? ` is-c-${rc}` : ""), main);
-              const by = div("dendrite-review-meta", rel);
-              const b = doc.createElement("b");
-              review2.shownAs(b, r.author || "Me", nameOf);
-              by.append(b, ` \xB7 ${review2.shortDate(r.date)}`);
-              div("dendrite-review-text", rel).textContent = r.text;
+              main.append(review2.replyRow(doc, r, nameOf, colourOf));
             }
           }
           return box;
@@ -5958,6 +6009,11 @@ function ownKeys(app, el) {
   });
 }
 var MAX_REPLY = 500;
+var REFUSED = -2;
+function withReply(body, n, reply) {
+  const { replace, ...r } = reply;
+  return replace ? review.replaceReplies(body, n, r.author, r) : review.addReply(body, n, r);
+}
 function localDay(d = /* @__PURE__ */ new Date()) {
   const two = (x) => String(x).padStart(2, "0");
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
@@ -11143,7 +11199,9 @@ var DendriteView = class extends ItemView {
       const body2 = ed.editor.value;
       const n2 = review.threadIds(review.reviewItems(body2)).indexOf(tid);
       if (n2 < 0) return n2;
-      ed.editor.update(review.addReply(body2, n2, reply));
+      const out2 = withReply(body2, n2, reply);
+      if (out2 === null) return REFUSED;
+      ed.editor.update(out2);
       ed.dirty = true;
       ed.changed = true;
       await this.save(ed);
@@ -11153,7 +11211,10 @@ var DendriteView = class extends ItemView {
     if (!f) return -1;
     const { body } = core.splitFrontmatter(await this.app.vault.read(f));
     const n = review.threadIds(review.reviewItems(body)).indexOf(tid);
-    if (n >= 0) await this.reviewAction(id, n, "reply", reply);
+    if (n < 0) return n;
+    const out = withReply(body, n, reply);
+    if (out === null) return REFUSED;
+    await this.reviewAction(id, n, "text", out);
     return n;
   }
   /**
@@ -13066,30 +13127,23 @@ var DendritePreview = class extends ItemView {
         a.title = "Open this comment in Google Docs";
         externalLinks(meta);
       }
-      el.createDiv({
-        cls: "dendrite-pbubble-text",
-        text: it.kind !== "suggest" ? text : !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`
-      });
-      for (const r of it.replies || []) {
-        if (!r.text.trim()) {
-          meta.appendText(" ");
-          meta.appendChild(review.seenMark(
-            meta.ownerDocument,
-            r,
-            (who) => this.names.get(who)
-          ));
-          continue;
-        }
-        const rc = this.colours && this.colours.get(r.author || "Me");
-        const rel = el.createDiv({ cls: "dendrite-review-reply" + (rc ? ` is-c-${rc}` : "") });
-        const by = rel.createDiv({ cls: "dendrite-review-meta" });
-        review.shownAs(
-          by.createEl("b"),
-          r.author || "Me",
-          (who) => this.names.get(who)
+      const shown = el.createDiv({ cls: "dendrite-pbubble-text" });
+      if (it.kind !== "suggest") {
+        review.fillAddressed(
+          shown,
+          text,
+          (who) => this.colours && this.colours.get(who)
         );
-        by.appendText(` \xB7 ${review.shortDate(r.date)}`);
-        rel.createDiv({ cls: "dendrite-review-text", text: r.text });
+      } else {
+        shown.textContent = !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
+      }
+      for (const r of it.replies || []) {
+        el.appendChild(review.replyRow(
+          el.ownerDocument,
+          r,
+          (who) => this.names.get(who),
+          (who) => this.colours && this.colours.get(who)
+        ));
       }
       const row = el.createDiv({ cls: "dendrite-pbubble-btns" });
       el.addEventListener("contextmenu", (e) => {
@@ -15505,8 +15559,8 @@ module.exports = class DendritePlugin extends Plugin {
    * with its id, card, passage, reviewer, text, Google link and
    * replies, in reading order, and the text of their cards without
    * comments; only `author`'s, if given, where "me" is
-   * any name the writer signs with; with `awaiting`, only those whose
-   * last word, the comment or its last reply, is not that name's; and
+   * any name the writer signs with; with `awaiting`, only those that
+   * wait for that name's answer (review.awaits); and
    * with `card`, only that card's and those of the cards under it.
    * Read only, for a reviewer to read what was answered.
    */
@@ -15543,8 +15597,11 @@ module.exports = class DendritePlugin extends Plugin {
       for (const [k, it] of items.entries()) {
         if (author && !who.has(it.author)) continue;
         const replies = it.replies || [];
-        const last = replies.length ? replies[replies.length - 1].author : it.author;
-        if (awaiting && last === awaiting) continue;
+        if (awaiting && !review.awaits(
+          it,
+          awaiting,
+          this.selfNames()
+        )) continue;
         const { text: said, url } = review.noteLink(it.text);
         cards[n.id] = core.stripComments(body).trim();
         threads.push({
@@ -15572,7 +15629,9 @@ module.exports = class DendritePlugin extends Plugin {
   }
   /**
    * A reply from a program, written at once under the comment `thread`
-   * names, as threadsFor gives it: `card/id`. Through the board when
+   * names, as threadsFor gives it: `card/id`. With `replace`, it takes
+   * the place of its writer's replies at the end of the thread, and is
+   * refused where someone has replied since. Through the board when
    * one has the manuscript open, so it is drawn, undone, and goes into
    * the card's editor if the card is being typed in.
    */
@@ -15597,11 +15656,13 @@ module.exports = class DendritePlugin extends Plugin {
     const reply = {
       author: String(data.author || "").trim() || "Claude",
       date: localDay(),
-      text: data.seen ? "" : said
+      text: data.seen ? "" : said,
+      replace: !!data.replace
     };
     const view = this.openViews().find((v) => v.file === file);
     const done = [];
     const missing = [];
+    const refused = [];
     for (const id of ids) {
       const [card, tid] = id.split("/");
       const f = card && this.app.metadataCache.getFirstLinkpathDest(
@@ -15609,15 +15670,17 @@ module.exports = class DendritePlugin extends Plugin {
         file.path
       );
       const n = !(f instanceof TFile) ? -1 : await (view ? view.replyFrom(card, tid, reply) : this.replyInFile(f, tid, reply));
-      (n < 0 ? missing : done).push(id);
+      if (n === REFUSED) {
+        refused.push({ id, reason: "someone has replied since; send a new reply instead" });
+      } else (n < 0 ? missing : done).push(id);
     }
-    if (!done.length) {
+    if (!done.length && !refused.length) {
       return bad(404, `no open comment ${missing.join(", ")}; it may have been resolved or changed`);
     }
-    if (!data.seen) {
+    if (!data.seen && done.length) {
       new Notice(`Dendrite: ${reply.author} replied on ${done.map((x) => x.split("/")[0]).join(", ")}.`);
     }
-    return { status: 201, json: { done, missing } };
+    return { status: 201, json: { done, missing, refused } };
   }
   /**
    * Suggested changes from a program, `items` [{ card, quote, replace,
@@ -15670,13 +15733,18 @@ module.exports = class DendritePlugin extends Plugin {
     });
     return reason;
   }
-  /** A reply written into a card's file; the comment's index, or -1. */
+  /**
+   * A reply written into a card's file; the comment's index, -1 where
+   * it is not there, or REFUSED where it would replace and cannot.
+   */
   async replyInFile(f, tid, reply) {
     let n = -1;
     await this.app.vault.process(f, (data) => {
       const { fm, body } = core.splitFrontmatter(data);
       n = review.threadIds(review.reviewItems(body)).indexOf(tid);
-      return n < 0 ? data : fm + review.addReply(body, n, reply);
+      const out = n < 0 ? null : withReply(body, n, reply);
+      if (n >= 0 && out === null) n = REFUSED;
+      return out === null ? data : fm + out;
     });
     return n;
   }

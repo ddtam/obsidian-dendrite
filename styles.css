@@ -1497,11 +1497,6 @@ body {
     color: var(--text-normal);
 }
 /* Read by Claude, with nothing to add: quiet, in the name line. */
-.dendrite-review-seen {
-    color: var(--text-faint);
-    font-size: var(--font-ui-smaller);
-    white-space: nowrap;
-}
 .dendrite-review-quote {
     color: var(--text-muted);
     font-style: italic;
@@ -2322,6 +2317,30 @@ button.dendrite-reviewer-colour {
 }
 .dendrite-review-reply[class*="is-c-"] > .dendrite-review-meta b {
     color: var(--dendrite-review);
+}
+/* A reader a comment or reply is addressed to, @Claude, in their
+   colour. */
+.dendrite-review-to {
+    font-weight: var(--font-semibold);
+}
+.dendrite-review-to[class*="is-c-"] {
+    color: var(--dendrite-review);
+}
+/* A read mark: the last row of its thread, smaller, its name in its
+   writer's colour. */
+.dendrite-review-reply.is-seen > .dendrite-review-meta {
+    color: var(--text-faint);
+    font-size: var(--font-ui-smaller);
+}
+/* Reply to Claude, shown on pointing at the reply where there is a
+   pointer. */
+@media (hover: hover) {
+    .dendrite-review-reply > .dendrite-review-acts {
+        visibility: hidden;
+    }
+    .dendrite-review-reply:hover > .dendrite-review-acts {
+        visibility: visible;
+    }
 }
 .dendrite-review-reply-form {
     display: flex;

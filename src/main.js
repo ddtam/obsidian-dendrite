@@ -448,6 +448,20 @@ function ownKeys(app, el) {
 // needs before acting on the comment, and no more.
 const MAX_REPLY = 500;
 
+// A program's reply that was to replace its own and could not.
+const REFUSED = -2;
+
+/**
+ * A card's markdown with a program's reply under its `n`th comment, or,
+ * with `replace`, in place of its writer's last replies; null where
+ * that cannot be done.
+ */
+function withReply(body, n, reply) {
+    const { replace, ...r } = reply;
+    return replace ? review.replaceReplies(body, n, r.author, r) :
+        review.addReply(body, n, r);
+}
+
 function localDay(d = new Date()) {
     const two = (x) => String(x).padStart(2, '0');
     return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
@@ -6022,7 +6036,9 @@ class DendriteView extends ItemView {
             const n = review.threadIds(review.reviewItems(body))
                 .indexOf(tid);
             if (n < 0) return n;
-            ed.editor.update(review.addReply(body, n, reply));
+            const out = withReply(body, n, reply);
+            if (out === null) return REFUSED;
+            ed.editor.update(out);
             ed.dirty = true;
             ed.changed = true;
             await this.save(ed);
@@ -6032,7 +6048,10 @@ class DendriteView extends ItemView {
         if (!f) return -1;
         const { body } = core.splitFrontmatter(await this.app.vault.read(f));
         const n = review.threadIds(review.reviewItems(body)).indexOf(tid);
-        if (n >= 0) await this.reviewAction(id, n, 'reply', reply);
+        if (n < 0) return n;
+        const out = withReply(body, n, reply);
+        if (out === null) return REFUSED;
+        await this.reviewAction(id, n, 'text', out);
         return n;
     }
 
@@ -8028,29 +8047,22 @@ class DendritePreview extends ItemView {
                 a.title = 'Open this comment in Google Docs';
                 externalLinks(meta);
             }
-            el.createDiv({ cls: 'dendrite-pbubble-text',
-                text: it.kind !== 'suggest' ? text :
-                    !it.text.trim() ? 'Suggests deleting this.' :
+            const shown = el.createDiv({ cls: 'dendrite-pbubble-text' });
+            if (it.kind !== 'suggest') {
+                review.fillAddressed(shown, text,
+                    (who) => this.colours && this.colours.get(who));
+            } else {
+                shown.textContent = !it.text.trim() ?
+                    'Suggests deleting this.' :
                     it.passage ? `Suggests: ${it.text.trim()}` :
-                    `Suggests adding: ${it.text.trim()}` });
-            // Its replies, under it; one taken back from the board. One
-            // with no text is a mark that its writer read the comment.
+                    `Suggests adding: ${it.text.trim()}`;
+            }
+            // Its replies, under it, a seen mark among them; one taken
+            // back from the board.
             for (const r of it.replies || []) {
-                if (!r.text.trim()) {
-                    meta.appendText(' ');
-                    meta.appendChild(review.seenMark(meta.ownerDocument, r,
-                        (who) => this.names.get(who)));
-                    continue;
-                }
-                const rc = this.colours &&
-                    this.colours.get(r.author || 'Me');
-                const rel = el.createDiv({ cls: 'dendrite-review-reply' +
-                    (rc ? ` is-c-${rc}` : '') });
-                const by = rel.createDiv({ cls: 'dendrite-review-meta' });
-                review.shownAs(by.createEl('b'), r.author || 'Me',
-                               (who) => this.names.get(who));
-                by.appendText(` · ${review.shortDate(r.date)}`);
-                rel.createDiv({ cls: 'dendrite-review-text', text: r.text });
+                el.appendChild(review.replyRow(el.ownerDocument, r,
+                    (who) => this.names.get(who),
+                    (who) => this.colours && this.colours.get(who)));
             }
             const row = el.createDiv({ cls: 'dendrite-pbubble-btns' });
             el.addEventListener('contextmenu', (e) => {
@@ -10818,8 +10830,8 @@ module.exports = class DendritePlugin extends Plugin {
      * with its id, card, passage, reviewer, text, Google link and
      * replies, in reading order, and the text of their cards without
      * comments; only `author`'s, if given, where "me" is
-     * any name the writer signs with; with `awaiting`, only those whose
-     * last word, the comment or its last reply, is not that name's; and
+     * any name the writer signs with; with `awaiting`, only those that
+     * wait for that name's answer (review.awaits); and
      * with `card`, only that card's and those of the cards under it.
      * Read only, for a reviewer to read what was answered.
      */
@@ -10852,9 +10864,8 @@ module.exports = class DendritePlugin extends Plugin {
             for (const [k, it] of items.entries()) {
                 if (author && !who.has(it.author)) continue;
                 const replies = it.replies || [];
-                const last = replies.length ?
-                    replies[replies.length - 1].author : it.author;
-                if (awaiting && last === awaiting) continue;
+                if (awaiting && !review.awaits(it, awaiting,
+                                               this.selfNames())) continue;
                 const { text: said, url } = review.noteLink(it.text);
                 cards[n.id] = core.stripComments(body).trim();
                 threads.push({ id: `${n.id}/${ids[k]}`, card: n.id,
@@ -10876,7 +10887,9 @@ module.exports = class DendritePlugin extends Plugin {
 
     /**
      * A reply from a program, written at once under the comment `thread`
-     * names, as threadsFor gives it: `card/id`. Through the board when
+     * names, as threadsFor gives it: `card/id`. With `replace`, it takes
+     * the place of its writer's replies at the end of the thread, and is
+     * refused where someone has replied since. Through the board when
      * one has the manuscript open, so it is drawn, undone, and goes into
      * the card's editor if the card is being typed in.
      */
@@ -10905,10 +10918,12 @@ module.exports = class DendritePlugin extends Plugin {
             [String(data.thread || '')];
         const reply = { author: String(data.author || '').trim() ||
                             'Claude',
-                        date: localDay(), text: data.seen ? '' : said };
+                        date: localDay(), text: data.seen ? '' : said,
+                        replace: !!data.replace };
         const view = this.openViews().find((v) => v.file === file);
         const done = [];
         const missing = [];
+        const refused = [];
         for (const id of ids) {
             const [card, tid] = id.split('/');
             const f = card && this.app.metadataCache.getFirstLinkpathDest(
@@ -10916,17 +10931,20 @@ module.exports = class DendritePlugin extends Plugin {
             const n = !(f instanceof TFile) ? -1 :
                 await (view ? view.replyFrom(card, tid, reply) :
                     this.replyInFile(f, tid, reply));
-            (n < 0 ? missing : done).push(id);
+            if (n === REFUSED) {
+                refused.push({ id, reason: 'someone has replied since; ' +
+                    'send a new reply instead' });
+            } else (n < 0 ? missing : done).push(id);
         }
-        if (!done.length) {
+        if (!done.length && !refused.length) {
             return bad(404, `no open comment ${missing.join(', ')}; it may ` +
                        'have been resolved or changed');
         }
-        if (!data.seen) {
+        if (!data.seen && done.length) {
             new Notice(`Dendrite: ${reply.author} replied on ` +
                        `${done.map((x) => x.split('/')[0]).join(', ')}.`);
         }
-        return { status: 201, json: { done, missing } };
+        return { status: 201, json: { done, missing, refused } };
     }
 
     /**
@@ -10987,13 +11005,18 @@ module.exports = class DendritePlugin extends Plugin {
         return reason;
     }
 
-    /** A reply written into a card's file; the comment's index, or -1. */
+    /**
+     * A reply written into a card's file; the comment's index, -1 where
+     * it is not there, or REFUSED where it would replace and cannot.
+     */
     async replyInFile(f, tid, reply) {
         let n = -1;
         await this.app.vault.process(f, (data) => {
             const { fm, body } = core.splitFrontmatter(data);
             n = review.threadIds(review.reviewItems(body)).indexOf(tid);
-            return n < 0 ? data : fm + review.addReply(body, n, reply);
+            const out = n < 0 ? null : withReply(body, n, reply);
+            if (n >= 0 && out === null) n = REFUSED;
+            return out === null ? data : fm + out;
         });
         return n;
     }

@@ -5775,16 +5775,14 @@ test('a reply written to a card shows in the preview\'s bubble, though ' +
         '.dendrite-pbubble .dendrite-review-reply');
     assert.ok(shown, 'the reply is in the bubble');
     assert.match(shown.textContent, /In Methods\./);
-    // One with no text: a mark in the bubble's name line instead.
+    // One with no text: a mark at the end of the bubble instead.
     await app.vault.modify(app.vault.getAbstractFileByPath(
         cardPath('G-aaaaa')), card.replace('many.%%',
         'many.%%%%[!reply] Claude, 2026-10-27: %%'));
     await tick(500);
-    assert.equal(view.contentEl.querySelectorAll(
-        '.dendrite-pbubble .dendrite-review-reply').length, 0);
     assert.equal(view.contentEl.querySelector('.dendrite-pbubble ' +
-        '.dendrite-review-meta .dendrite-review-seen').textContent,
-        '✓ Claude');
+        '.dendrite-review-reply.is-seen').textContent,
+        '✓ Claude · 27 Oct');
 });
 
 test('threads: each open comment of a manuscript with its card, passage ' +
@@ -5819,11 +5817,12 @@ test('threads: each open comment of a manuscript with its card, passage ' +
 });
 
 test('threads carry an id a reply names; a reply goes under its comment, ' +
-     'and those of Derek\'s own still waiting for Claude can be asked for',
+     'and those of Derek\'s own asking Claude, still waiting, can be ' +
+     'asked for',
      async () => {
     const DendritePlugin = require('../src/main.js');
-    const A = 'The ==cohort==%%[!review] Derek Tam, 2026-10-27: Is this ' +
-        'too long?%% is large.';
+    const A = 'The ==cohort==%%[!review] Derek Tam, 2026-10-27: @Claude ' +
+        'Is this too long?%% is large.';
     const B = 'B ==text==%%[!review] Aly, 2026-10-23: Why?%% and ' +
         '==more==%%[!review] Me, 2026-10-27: Cite?%%%%[!reply] Claude, ' +
         '2026-10-27: Done.%%.';
@@ -5841,10 +5840,12 @@ test('threads carry an id a reply names; a reply goes under its comment, ' +
     // Each card's text, without its comments, to read them in context.
     assert.deepEqual(got.cards, { 'G-aaaaa': 'The cohort is large.',
                                   'G-bbbbb': 'B text and more.' });
-    // Derek's own, by any name he signs with, not yet answered by Claude.
+    // Derek's own asking Claude, by any name he signs with, not yet
+    // answered by Claude.
     const asked = (await p.threadsFor('G', { author: 'me',
         awaiting: 'Claude' })).json.threads;
-    assert.deepEqual(asked.map((t) => t.text), ['Is this too long?']);
+    assert.deepEqual(asked.map((t) => t.text),
+                     ['@Claude Is this too long?']);
     // The reply, by that id, under its comment, as Claude by default.
     const out = await p.replyTo({ manuscript: 'G', thread: asked[0].id,
                                   text: 'Cut the second clause.' });
@@ -5903,6 +5904,42 @@ test('Claude passes comments by as seen, a reply with no text, and ' +
     assert.equal(no.status, 400);
     assert.match(no.json.error, /500/);
     assert.doesNotMatch(text(cardPath('G-aaaaa')), /word word/);
+});
+
+test('Claude replaces its own last replies in a thread, and a reply ' +
+     'addressed to Claude brings the thread back to it', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'The ==cohort==%%[!review] Aly, 2026-10-23: 200+?%%' +
+        '%%[!reply] Claude, 2026-10-27: Conflicts with 175.%%' +
+        '%%[!reply] Claude, 2026-10-28: Correction: 200+ stands.%% is.';
+    const B = 'B ==text==%%[!review] Aly, 2026-10-23: Why?%%' +
+        '%%[!reply] Claude, 2026-10-27: Because.%%' +
+        '%%[!reply] Derek Tam, 2026-10-27: Agreed.%% here.';
+    const { app, view, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': A, 'G-bbbbb': B });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [], replyName: 'Derek Tam' };
+    p.openViews = () => [view];
+    const ids = (await p.threadsFor('G')).json.threads.map((t) => t.id);
+    const out = await p.replyTo({ manuscript: 'G', threads: ids,
+        text: '200+ is the expanded cohort.', replace: true });
+    assert.equal(out.status, 201);
+    assert.deepEqual(out.json.done, [ids[0]]);
+    assert.deepEqual(out.json.refused.map((x) => x.id), [ids[1]]);
+    assert.match(out.json.refused[0].reason, /replied since/);
+    assert.match(text(cardPath('G-aaaaa')), new RegExp('200\\+\\?%%' +
+        '%%\\[!reply\\] Claude, [\\d-]+: 200\\+ is the expanded ' +
+        'cohort\\.%% is\\.$'));
+    assert.equal(text(cardPath('G-bbbbb')), B, 'answered since: left');
+    // Derek's answer to the reviewer does not bring it back; one to
+    // Claude does.
+    const waiting = async () => (await p.threadsFor('G',
+        { awaiting: 'Claude' })).json.threads.map((t) => t.card);
+    assert.deepEqual(await waiting(), []);
+    await view.reviewAction('G-bbbbb', 0, 'reply', '@Claude Sure?');
+    assert.deepEqual(await waiting(), ['G-bbbbb']);
 });
 
 test('a suggested change from a program goes in at once where its quote ' +

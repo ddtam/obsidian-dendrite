@@ -108,25 +108,17 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
                 review.shownAs(who, c.author || 'Reviewer', nameOf);
                 meta.append(who, ` · ${review.shortDate(c.date)}`);
                 const { text: said } = review.noteLink(c.text);
-                div('dendrite-review-text', main).textContent =
-                    c.kind !== 'suggest' ? said :
-                        !c.text.trim() ? 'Suggests deleting this.' :
-                            c.passage ? `Suggests: ${c.text.trim()}` :
-                                `Suggests adding: ${c.text.trim()}`;
+                const shown = div('dendrite-review-text', main);
+                if (c.kind !== 'suggest') {
+                    review.fillAddressed(shown, said, colourOf);
+                } else {
+                    shown.textContent = !c.text.trim() ?
+                        'Suggests deleting this.' :
+                        c.passage ? `Suggests: ${c.text.trim()}` :
+                        `Suggests adding: ${c.text.trim()}`;
+                }
                 for (const r of c.replies || []) {
-                    // One with no text: a mark that its writer read it.
-                    if (!r.text.trim()) {
-                        meta.append(' ', review.seenMark(doc, r, nameOf));
-                        continue;
-                    }
-                    const rc = colourOf(r.author || 'Me');
-                    const rel = div('dendrite-review-reply' +
-                        (rc ? ` is-c-${rc}` : ''), main);
-                    const by = div('dendrite-review-meta', rel);
-                    const b = doc.createElement('b');
-                    review.shownAs(b, r.author || 'Me', nameOf);
-                    by.append(b, ` · ${review.shortDate(r.date)}`);
-                    div('dendrite-review-text', rel).textContent = r.text;
+                    main.append(review.replyRow(doc, r, nameOf, colourOf));
                 }
             }
             return box;
