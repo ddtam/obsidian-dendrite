@@ -1004,7 +1004,14 @@ function replyRow(doc, r, nameOf = null, colourOf = null) {
     by.className = 'dendrite-review-meta';
     const b = doc.createElement('b');
     shownAs(b, r.author || 'Me', nameOf);
-    if (seen) by.append('✓ ');
+    if (seen) {
+        const tick = doc.createElement('span');
+        tick.className = 'dendrite-review-check';
+        // Its space inside it: the check sits where a reply's rule is,
+        // and the name where a reply's name is.
+        tick.textContent = '✓ ';
+        by.append(tick);
+    }
     by.append(b, ` · ${shortDate(r.date)}`);
     el.append(by);
     if (seen) {

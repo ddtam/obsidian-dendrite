@@ -2328,9 +2328,31 @@ button.dendrite-reviewer-colour {
 }
 /* A read mark: the last row of its thread, smaller, its name in its
    writer's colour. */
+/* Not a reply's shape, so it is not read as an empty one: the check in
+   place of a reply's rule, centred on where it runs, and the name
+   aligned with the replies' names; both in its writer's colour. */
+.dendrite-review-reply.is-seen,
+.dendrite-review-reply.is-seen[class*="is-c-"] {
+    position: relative;
+    border-left: none;
+    padding-left: 10px;
+}
+.dendrite-review-reply.is-seen .dendrite-review-check {
+    position: absolute;
+    left: 0;
+    width: 2px;
+    display: flex;
+    justify-content: center;
+}
 .dendrite-review-reply.is-seen > .dendrite-review-meta {
     color: var(--text-faint);
     font-size: var(--font-ui-smaller);
+}
+.dendrite-review-check {
+    font-weight: var(--font-bold);
+}
+.dendrite-review-reply.is-seen[class*="is-c-"] .dendrite-review-check {
+    color: var(--dendrite-review);
 }
 /* Reply to Claude, shown on pointing at the reply where there is a
    pointer. */

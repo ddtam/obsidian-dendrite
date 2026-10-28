@@ -972,6 +972,8 @@ test('a reply with no text is drawn at the end of its thread, in its ' +
     assert.ok(seen.classList.contains('is-c-purple'), 'Claude\'s colour');
     assert.equal(seen.querySelector('.dendrite-review-meta').textContent,
                  '✓ Claude · 27 Oct', 'a read mark');
+    assert.equal(seen.querySelector('.dendrite-review-check').textContent
+        .trim(), '✓', 'the check its own, to colour and place');
     assert.equal(root.querySelector('.dendrite-review-note > * > ' +
         '.dendrite-review-meta .dendrite-review-seen'), null,
     'not in the comment\'s name line');

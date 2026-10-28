@@ -2461,7 +2461,12 @@ var require_review = __commonJS({
       by.className = "dendrite-review-meta";
       const b = doc.createElement("b");
       shownAs(b, r.author || "Me", nameOf);
-      if (seen) by.append("\u2713 ");
+      if (seen) {
+        const tick = doc.createElement("span");
+        tick.className = "dendrite-review-check";
+        tick.textContent = "\u2713 ";
+        by.append(tick);
+      }
       by.append(b, ` \xB7 ${shortDate(r.date)}`);
       el.append(by);
       if (seen) {
