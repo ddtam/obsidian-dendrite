@@ -2216,18 +2216,26 @@ button.dendrite-reviewer-colour {
     gap: 6px;
     width: 100%;
 }
-/* On the Review button, how many reviews sent from programs wait to be
-   added. */
+/* The Review button while reviews sent from programs wait to be added:
+   outlined in the accent, how many in a block filling its right end. */
+.dendrite-bar-btn.is-waiting {
+    padding-right: 0;
+    overflow: hidden;
+    color: var(--text-normal);
+    box-shadow: inset 0 0 0 1px var(--interactive-accent);
+}
 .dendrite-bar-badge {
-    margin-left: 4px;
-    min-width: 16px;
-    padding: 0 4px;
-    border-radius: 8px;
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    margin: -2px 0 -2px 4px;
+    padding: 0 7px;
+    box-sizing: border-box;
     background: var(--interactive-accent);
     color: var(--text-on-accent);
-    font-size: var(--font-ui-smaller);
-    line-height: 16px;
-    text-align: center;
+    font-weight: var(--font-bold);
 }
 
 /* You, above the reviewers, set apart from them; your two names one

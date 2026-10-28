@@ -5529,13 +5529,17 @@ class DendriteView extends ItemView {
         if (changed) this.updateStatuses();
     }
 
-    /** How many reviews wait to be added, on the Review button. */
+    /**
+     * How many reviews wait to be added, on the Review button: outlined
+     * while any wait, the count in a block on its right.
+     */
     showInboxBadge() {
         const b = this.reviewBtn;
         if (!b) return;
         const old = b.querySelector('.dendrite-bar-badge');
         if (old) old.remove();
         const n = (this.inbox || []).length;
+        b.toggleClass('is-waiting', n > 0);
         if (!n) return;
         const badge = b.createSpan({ cls: 'dendrite-bar-badge',
                                      text: String(n) });
