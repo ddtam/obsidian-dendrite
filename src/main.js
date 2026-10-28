@@ -6098,12 +6098,19 @@ class DendriteView extends ItemView {
             await write(review.removeReply(body, n, arg));
             return;
         }
+        // Applied, its replies go with it, or, where they say something,
+        // can stay open as a comment on the new text.
         if (what === 'apply') {
             const after = review.removeItem(body, n, true);
-            new SuggestModal(this, id, body, after, async () => {
-                await write(after);
+            const done = (text) => async () => {
+                await write(text);
                 if (item) await this.rememberDone(item);
-            }, item && this.colourOf()(item.author || 'Reviewer')).open();
+            };
+            const replies = item ? review.keptReplies(item) : [];
+            new SuggestModal(this, id, body, after, done(after),
+                item && this.colourOf()(item.author || 'Reviewer'),
+                replies, replies.length ?
+                    done(review.applyKeeping(body, n)) : null).open();
             return;
         }
         // A Google comment on several passages comes in as one comment
@@ -9104,12 +9111,15 @@ class VersionModal extends Modal {
  * the card now and the card with it, to apply or not.
  */
 class SuggestModal extends VersionModal {
-    constructor(view, id, now, after, apply, tint = null) {
+    constructor(view, id, now, after, apply, tint = null, replies = [],
+                keep = null) {
         super(view, id);
         this.now = now;
         this.after = after;
         this.apply = apply;
         this.tint = tint;
+        this.replies = replies;
+        this.keep = keep;
         this.labels = ['the card now', 'with the change'];
     }
 
@@ -9129,6 +9139,19 @@ class SuggestModal extends VersionModal {
             'been written yet.' });
         this.showDiff(review.stripReview(this.now),
                       review.stripReview(this.after));
+        // Replies that say something are lost with it unless kept.
+        const many = this.replies.length > 1;
+        if (this.replies.length) {
+            const box = contentEl.createDiv({
+                cls: 'dendrite-suggest-replies' });
+            box.createEl('p', { text: 'Applying it removes its ' +
+                (many ? `${this.replies.length} replies:` : 'reply:') });
+            const list = box.createEl('ul');
+            for (const r of this.replies) {
+                list.createEl('li', { text: `${r.author}, ` +
+                    `${review.shortDate(r.date)}: ${r.text}` });
+            }
+        }
         const row = contentEl.createDiv({ cls: 'dendrite-version-choices' });
         const yes = row.createEl('button', { cls: 'mod-cta',
                                              text: 'Apply' });
@@ -9136,6 +9159,14 @@ class SuggestModal extends VersionModal {
             this.close();
             await this.apply();
         };
+        if (this.keep) {
+            row.createEl('button', { text: 'Apply, keep the ' +
+                (many ? 'replies' : 'reply') + ' as a comment' })
+                .onclick = async () => {
+                    this.close();
+                    await this.keep();
+                };
+        }
         row.createEl('button', { text: 'Cancel' }).onclick = () =>
             this.close();
     }

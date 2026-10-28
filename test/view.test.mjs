@@ -6014,6 +6014,43 @@ test('the diff is unified until side by side is picked, and the pick is ' +
     assert.equal(shown(), 'split', 'remembered');
 });
 
+test('applying a suggestion with replies says what goes with it, and ' +
+     'offers to keep them open as a comment on the new text', async () => {
+    const said = '%%[!reply] Claude, 2026-10-27: Drops consent.%%';
+    const card = 'Data %%{1%%will be stored%%}1 [!suggest] Joshua, ' +
+        `2026-10-20: is kept%%%%[!reply] Claude, 2026-10-26: %%${said} here.`;
+    const { view, text } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', { 'G-aaaaa': card });
+    const m = async () => {
+        await view.reviewAction('G-aaaaa', 0, 'apply');
+        return h.obsidian.lastModal;
+    };
+    const button = (d, t) => [...d.contentEl.querySelectorAll('button')]
+        .find((b) => b.textContent === t);
+    let d = await m();
+    const lost = d.contentEl.querySelector('.dendrite-suggest-replies');
+    assert.ok(lost, 'the replies it would remove are shown');
+    assert.match(lost.textContent, /removes its reply/);
+    assert.match(lost.textContent, /Claude.*Drops consent\./);
+    assert.doesNotMatch(lost.textContent, /26/, 'not the seen mark');
+    await button(d, 'Apply, keep the reply as a comment').onclick();
+    assert.equal(text(cardPath('G-aaaaa')), 'Data %%{1%%is kept%%}1 ' +
+        '[!review] Joshua, 2026-10-20: Applied. Was “will be stored”.%%' +
+        `${said} here.`);
+    await view.doUndo();
+    d = await m();
+    await button(d, 'Apply').onclick();
+    assert.equal(text(cardPath('G-aaaaa')), 'Data is kept here.');
+    await view.doUndo();
+    // Only seen marks: nothing said about them, and nothing offered.
+    await view.reviewAction('G-aaaaa', 0, 'unreply', 1);
+    d = await m();
+    assert.equal(d.contentEl.querySelector('.dendrite-suggest-replies'),
+                 null);
+    assert.equal(button(d, 'Apply, keep the reply as a comment'),
+                 undefined);
+});
+
 test('a review round is recorded beside the index, and a card whose ' +
      'printed text changed since shows it', async () => {
     const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +

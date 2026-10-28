@@ -1048,6 +1048,20 @@ body {
     margin-top: 10px;
 }
 
+.dendrite-suggest-replies {
+    margin-top: 10px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
+.dendrite-suggest-replies p {
+    margin: 0 0 4px;
+}
+
+.dendrite-suggest-replies ul {
+    margin: 0;
+}
+
 .dendrite-version-choice button.is-now {
     color: var(--dendrite-now);
     border: 1px solid var(--dendrite-now);

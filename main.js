@@ -2659,30 +2659,57 @@ var require_review = __commonJS({
     function removeItem(md, n, apply = false) {
       const it = reviewItems(md)[n];
       if (!it) return md;
-      const use = apply && it.kind === "suggest";
-      if (!it.open) {
-        const put = use ? it.text : it.passage;
-        const out = md.slice(0, it.start) + put + md.slice(it.end);
-        return use ? tidyJoin(out, it.start, it.start + put.length) : out;
-      }
-      let inner = md.slice(it.open.end, it.noteStart);
-      if (use) {
-        const { syntax } = scan(md);
-        const kept = syntax.filter(([a, b]) => a >= it.open.end && b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join("");
-        const out = md.slice(0, it.open.start) + it.text + kept + md.slice(it.end);
-        const s = it.open.start;
-        return tidyJoin(out, s, s + it.text.length + kept.length);
-      }
-      return md.slice(0, it.open.start) + inner + md.slice(it.end);
+      if (apply && it.kind === "suggest") return applied(md, it).out;
+      if (!it.open) return md.slice(0, it.start) + it.passage + md.slice(it.end);
+      return md.slice(0, it.open.start) + md.slice(it.open.end, it.noteStart) + md.slice(it.end);
     }
-    function tidyJoin(out, start, end) {
+    function applied(md, it) {
+      if (!it.open) {
+        const out2 = md.slice(0, it.start) + it.text + md.slice(it.end);
+        return tidySpan(out2, it.start, it.start + it.text.length);
+      }
+      const { syntax } = scan(md);
+      const kept = syntax.filter(([a, b]) => a >= it.open.end && b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join("");
+      const out = md.slice(0, it.open.start) + it.text + kept + md.slice(it.end);
+      const s = it.open.start;
+      return tidySpan(out, s, s + it.text.length + kept.length);
+    }
+    function keptReplies(it) {
+      return (it.replies || []).filter((x) => x.text);
+    }
+    function applyKeeping(md, n) {
+      const it = reviewItems(md)[n];
+      if (!it || it.kind !== "suggest" || !keptReplies(it).length) {
+        return removeItem(md, n, true);
+      }
+      let { out, start, end } = applied(md, it);
+      while (start < end && /\s/.test(out[start])) start++;
+      while (end > start && /\s/.test(out[end - 1])) end--;
+      const text = it.passage.trim() ? `Applied. Was \u201C${clean(it.passage)}\u201D.` : "Applied, as an addition.";
+      out = addItems(out, [{
+        kind: "review",
+        start,
+        end,
+        author: it.author,
+        date: it.date,
+        text
+      }]);
+      const k = reviewItems(out).findIndex((x) => x.kind === "review" && x.author === (clean(it.author) || "Reviewer") && x.text === text && x.start >= start - 2);
+      for (const x of keptReplies(it)) out = addReply(out, k, x);
+      return out;
+    }
+    function tidySpan(out, start, end) {
       if (out[end - 1] === " " && /^[ .,;:!?)]/.test(out.slice(end))) {
         out = out.slice(0, end - 1) + out.slice(end);
+        if (start >= end) start--;
+        end--;
       }
       if (out[start - 1] === " " && out[start] === " ") {
         out = out.slice(0, start - 1) + out.slice(start);
+        start--;
+        end--;
       }
-      return out;
+      return { out, start, end };
     }
     function editorRanges(md) {
       const items = reviewItems(md);
@@ -3187,6 +3214,8 @@ var require_review = __commonJS({
       itemText,
       addItems,
       removeItem,
+      applyKeeping,
+      keptReplies,
       stripReview,
       renderMarkdown,
       decorate,
@@ -11194,10 +11223,21 @@ var DendriteView = class extends ItemView {
     }
     if (what === "apply") {
       const after = review.removeItem(body, n, true);
-      new SuggestModal(this, id, body, after, async () => {
-        await write(after);
+      const done = (text) => async () => {
+        await write(text);
         if (item) await this.rememberDone(item);
-      }, item && this.colourOf()(item.author || "Reviewer")).open();
+      };
+      const replies = item ? review.keptReplies(item) : [];
+      new SuggestModal(
+        this,
+        id,
+        body,
+        after,
+        done(after),
+        item && this.colourOf()(item.author || "Reviewer"),
+        replies,
+        replies.length ? done(review.applyKeeping(body, n)) : null
+      ).open();
       return;
     }
     const gid = what === "resolve" && item && review.reviewKeys(item).find((k) => k.startsWith("g:"));
@@ -13984,12 +14024,14 @@ var VersionModal = class _VersionModal extends Modal {
   }
 };
 var SuggestModal = class extends VersionModal {
-  constructor(view, id, now, after, apply, tint = null) {
+  constructor(view, id, now, after, apply, tint = null, replies = [], keep = null) {
     super(view, id);
     this.now = now;
     this.after = after;
     this.apply = apply;
     this.tint = tint;
+    this.replies = replies;
+    this.keep = keep;
     this.labels = ["the card now", "with the change"];
   }
   async onOpen() {
@@ -14003,6 +14045,17 @@ var SuggestModal = class extends VersionModal {
       review.stripReview(this.now),
       review.stripReview(this.after)
     );
+    const many = this.replies.length > 1;
+    if (this.replies.length) {
+      const box = contentEl.createDiv({
+        cls: "dendrite-suggest-replies"
+      });
+      box.createEl("p", { text: "Applying it removes its " + (many ? `${this.replies.length} replies:` : "reply:") });
+      const list = box.createEl("ul");
+      for (const r of this.replies) {
+        list.createEl("li", { text: `${r.author}, ${review.shortDate(r.date)}: ${r.text}` });
+      }
+    }
     const row = contentEl.createDiv({ cls: "dendrite-version-choices" });
     const yes = row.createEl("button", {
       cls: "mod-cta",
@@ -14012,6 +14065,12 @@ var SuggestModal = class extends VersionModal {
       this.close();
       await this.apply();
     };
+    if (this.keep) {
+      row.createEl("button", { text: "Apply, keep the " + (many ? "replies" : "reply") + " as a comment" }).onclick = async () => {
+        this.close();
+        await this.keep();
+      };
+    }
     row.createEl("button", { text: "Cancel" }).onclick = () => this.close();
   }
 };

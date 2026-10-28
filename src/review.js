@@ -1306,41 +1306,82 @@ function snapOut(md, a) {
 function removeItem(md, n, apply = false) {
     const it = reviewItems(md)[n];
     if (!it) return md;
-    const use = apply && it.kind === 'suggest';
+    if (apply && it.kind === 'suggest') return applied(md, it).out;
+    if (!it.open) return md.slice(0, it.start) + it.passage +
+        md.slice(it.end);
+    // Between its markers: other comments' markers and notes are kept.
+    return md.slice(0, it.open.start) +
+        md.slice(it.open.end, it.noteStart) + md.slice(it.end);
+}
+
+/**
+ * A suggestion applied, its note and replies gone: { out, start, end },
+ * `start` to `end` its new text in `out`, with any other comments'
+ * markers and notes that were inside its passage after it.
+ */
+function applied(md, it) {
     if (!it.open) {
-        const put = use ? it.text : it.passage;
-        const out = md.slice(0, it.start) + put + md.slice(it.end);
-        return use ? tidyJoin(out, it.start, it.start + put.length) : out;
+        const out = md.slice(0, it.start) + it.text + md.slice(it.end);
+        return tidySpan(out, it.start, it.start + it.text.length);
     }
-    // Between its markers: other comments' markers and notes are kept,
-    // after its new text where it is applied.
-    let inner = md.slice(it.open.end, it.noteStart);
-    if (use) {
-        const { syntax } = scan(md);
-        const kept = syntax.filter(([a, b]) => a >= it.open.end &&
-            b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join('');
-        const out = md.slice(0, it.open.start) + it.text + kept +
-            md.slice(it.end);
-        const s = it.open.start;
-        return tidyJoin(out, s, s + it.text.length + kept.length);
+    const { syntax } = scan(md);
+    const kept = syntax.filter(([a, b]) => a >= it.open.end &&
+        b <= it.noteStart).map(([a, b]) => md.slice(a, b)).join('');
+    const out = md.slice(0, it.open.start) + it.text + kept +
+        md.slice(it.end);
+    const s = it.open.start;
+    return tidySpan(out, s, s + it.text.length + kept.length);
+}
+
+/** A comment's replies that say something: not seen marks. */
+function keptReplies(it) {
+    return (it.replies || []).filter((x) => x.text);
+}
+
+/**
+ * A card's markdown with its `n`th review comment, a suggestion, applied
+ * and, where it has replies that say something, kept open as a comment
+ * by its reviewer on the new text, saying what it replaced, with those
+ * replies under it. Seen marks are left out.
+ */
+function applyKeeping(md, n) {
+    const it = reviewItems(md)[n];
+    if (!it || it.kind !== 'suggest' || !keptReplies(it).length) {
+        return removeItem(md, n, true);
     }
-    return md.slice(0, it.open.start) + inner + md.slice(it.end);
+    let { out, start, end } = applied(md, it);
+    while (start < end && /\s/.test(out[start])) start++;
+    while (end > start && /\s/.test(out[end - 1])) end--;
+    const text = it.passage.trim() ?
+        `Applied. Was “${clean(it.passage)}”.` : 'Applied, as an addition.';
+    out = addItems(out, [{ kind: 'review', start, end, author: it.author,
+                           date: it.date, text }]);
+    const k = reviewItems(out).findIndex((x) => x.kind === 'review' &&
+        x.author === (clean(it.author) || 'Reviewer') &&
+        x.text === text && x.start >= start - 2);
+    for (const x of keptReplies(it)) out = addReply(out, k, x);
+    return out;
 }
 
 /**
  * Text a change was applied to, `start` to `end` its new text, with no
  * doubled space or space before punctuation where it joins the rest: a
  * reviewer's deletion or a passage placed without the space beside it
- * leaves one, and Apply is to be relied on to give clean text.
+ * leaves one, and Apply is to be relied on to give clean text. Returned
+ * as { out, start, end }, the new text's span moved with it.
  */
-function tidyJoin(out, start, end) {
+function tidySpan(out, start, end) {
     if (out[end - 1] === ' ' && /^[ .,;:!?)]/.test(out.slice(end))) {
         out = out.slice(0, end - 1) + out.slice(end);
+        if (start >= end) start--;
+        end--;
     }
     if (out[start - 1] === ' ' && out[start] === ' ') {
         out = out.slice(0, start - 1) + out.slice(start);
+        start--;
+        end--;
     }
-    return out;
+    return { out, start, end };
 }
 
 /**
@@ -1976,6 +2017,6 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    suggestInto,
                    firstOfComment, countComments,
                    itemText,
-                   addItems, removeItem,
+                   addItems, removeItem, applyKeeping, keptReplies,
                    stripReview, renderMarkdown, decorate,
                    shortDate };

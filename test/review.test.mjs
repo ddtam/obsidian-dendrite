@@ -1181,3 +1181,29 @@ test('pointing at a comment on a card marks its passages and dims the ' +
     assert.ok(!root.classList.contains('has-hover'));
 });
 
+
+test('a suggestion applied with its replies kept becomes a comment on ' +
+     'its new text, saying what it replaced, with the replies under it',
+() => {
+    const sug = '%%{1%%will be stored%%}1 [!suggest] Joshua, 2026-10-20: ' +
+        'is kept%%';
+    const said = '%%[!reply] Claude, 2026-10-27: Drops the consent point.%%';
+    const seen = '%%[!reply] Claude, 2026-10-26: %%';
+    const md = `Data ${sug}${seen}${said} here.`;
+    assert.deepEqual(r.keptReplies(r.reviewItems(md)[0])
+        .map((x) => x.text), ['Drops the consent point.'],
+    'a seen mark is not a reply to keep');
+    assert.equal(r.applyKeeping(md, 0), 'Data %%{1%%is kept%%}1 ' +
+        '[!review] Joshua, 2026-10-20: Applied. Was “will be stored”.%%' +
+        `${said} here.`);
+    assert.equal(r.applyKeeping(`Data ${sug}${seen} here.`, 0),
+                 'Data is kept here.', 'only seen: applied as ever');
+    const add = `Data%%[!suggest] Joshua, 2026-10-20:  safely%%${said}.`;
+    assert.equal(r.applyKeeping(add, 0), 'Data %%{1%%safely%%}1 ' +
+        '[!review] Joshua, 2026-10-20: Applied, as an addition.%%' +
+        `${said}.`);
+    const cut = `Data ${sug.replace(': is kept%%', ': %%')}${said} here.`;
+    assert.equal(r.applyKeeping(cut, 0), 'Data%%[!review] Joshua, ' +
+        '2026-10-20: Applied. Was “will be stored”.%%' + `${said} here.`,
+    'a deletion: the comment where the text was');
+});
