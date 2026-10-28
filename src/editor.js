@@ -19,8 +19,10 @@
  * features but never text, since both kinds save the same way, through
  * the view.
  */
-const { Scope } = require('obsidian');
+const { Scope, MarkdownRenderer } = require('obsidian');
+const review = require('./review.js');
 const { reviewExtension } = require('./cmreview.js');
+const { markTableCells, fillCell } = require('./tablecells.js');
 const { footnoteExtension } = require('./cmfootnotes.js');
 
 let EditorClass = null;
@@ -127,6 +129,59 @@ function obsidianEditor(app, parent, opts) {
             this.register(() => {
                 if (ws.setActiveLeaf === patched) ws.setActiveLeaf = original;
             });
+            // A table's cells are drawn apart from the editor's text, and
+            // again whenever one is left or changed: each holding a
+            // comment is drawn as the board draws it, once they settle.
+            let queued = false;
+            const mark = () => {
+                queued = false;
+                if (this._loaded) {
+                    markTableCells(this.editor.cm,
+                                   (...a) => this.drawCell(...a));
+                }
+            };
+            const win = content.ownerDocument.defaultView;
+            const watch = new win.MutationObserver(() => {
+                if (queued) return;
+                queued = true;
+                win.requestAnimationFrame(mark);
+            });
+            watch.observe(content, { childList: true, subtree: true });
+            this.register(() => watch.disconnect());
+            win.requestAnimationFrame(mark);
+        }
+
+        // A cell holding a comment, rendered as Obsidian renders a cell,
+        // as a one-cell table, from the board's text for its comments.
+        async drawCell(wrap, text, base, key) {
+            const tmp = wrap.ownerDocument.createElement('div');
+            const md = review.renderMarkdown(text, opts.colourOf);
+            await MarkdownRenderer.render(app, `| ${md} |\n| - |`, tmp,
+                opts.file ? opts.file.path : '', this);
+            const th = tmp.querySelector('th');
+            // Typed into or redrawn meanwhile: the newer drawing stands.
+            if (!th || !wrap.isConnected) return;
+            fillCell(wrap, [...th.childNodes], base, key);
+        }
+
+        // The cell being typed in is an editor of its own, made by
+        // Obsidian; it is given the review extension too, so a comment
+        // there is drawn rather than shown as its syntax.
+        editTableCell(table, cell) {
+            const was = this.tableCell;
+            const out = super.editTableCell(table, cell);
+            try {
+                if (out && out !== was && out.cm) {
+                    const { StateEffect } = require('@codemirror/state');
+                    out.cm.dispatch({ effects: StateEffect.appendConfig.of(
+                        reviewExtension(opts.colourOf, opts.nameOf,
+                                        opts.onLost)) });
+                }
+            } catch (err) {
+                console.warn('Dendrite: review comments in a table cell ' +
+                             'are shown as text.', err);
+            }
+            return out;
         }
 
         // Review comments and inline footnotes drawn in place of their
@@ -136,7 +191,7 @@ function obsidianEditor(app, parent, opts) {
             try {
                 return [...base, reviewExtension(opts.colourOf,
                                                  opts.nameOf, opts.onLost),
-                        footnoteExtension()];
+                        footnoteExtension(opts.pdfOf)];
             } catch (err) {
                 console.warn('Dendrite: review comments and footnotes ' +
                              'are shown as text in the editor.', err);

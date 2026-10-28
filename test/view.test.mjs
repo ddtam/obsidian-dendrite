@@ -6129,3 +6129,54 @@ test('a review round is recorded beside the index, and a card whose ' +
     // The Review menu records one too.
     assert.ok(menuItem(view.reviewMenu(), 'Mark as sent for review…'));
 });
+
+test('in the preview a comment on a table\'s caption marks its passage, ' +
+     'as in any card', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|t]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), '---\ndendrite_kind: ' +
+        'table\n---\n\n%%{1%%Project 1: Bayesian%%}1 [!review] Claude, ' +
+        '2026-10-28: Match 4.1.%%\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(30);
+    assert.equal(view.contentEl.querySelectorAll('.dendrite-pbubble').length,
+                 1);
+    const marks = [...view.contentEl.querySelectorAll(
+        '.dendrite-pblock mark.dendrite-review-mark')]
+        .map((m) => m.textContent).join('');
+    assert.equal(marks, 'Project 1: Bayesian');
+});
+
+test('a double click on a card puts the caret where it was clicked',
+     async () => {
+    const card = 'The cohort is [[Cohort|175 patients]] ' +
+        '%%{a1%%paired%%}a1 [!review] Aly, 2026-10-22: Sure?%% at ' +
+        'diagnosis and relapse.\n';
+    const { view } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
+        { 'G-aaaaa': card });
+    await tick(20);
+    const el = view.cardEls.get('G-aaaaa');
+    const body = el.querySelector('.dendrite-card-body');
+    // The click falls in "relapse", after its "re".
+    const doc = el.ownerDocument;
+    const walk = doc.createTreeWalker(body, 4);
+    let node = null;
+    for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+        if (t.data.includes('relapse')) node = t;
+    }
+    assert.ok(node, 'the card is drawn');
+    doc.caretRangeFromPoint = () => ({
+        startContainer: node, startOffset: node.data.indexOf('lapse') });
+    el.dispatchEvent(new h.window.MouseEvent('dblclick', { bubbles: true }));
+    await tick(20);
+    assert.equal(view.editing.id, 'G-aaaaa');
+    assert.equal(view.editing.ta.selectionStart, card.indexOf('lapse'));
+    delete doc.caretRangeFromPoint;
+});

@@ -586,6 +586,26 @@ var require_core = __commonJS({
       }
       return out;
     }
+    function footnoteNumbers(text) {
+      const inline = inlineFootnotes(text);
+      const marks = inline.map((n2, k) => ({ at: n2.from, k }));
+      const REF = /\[\^([^\]\s]+)\](?!:)/g;
+      let m;
+      while (m = REF.exec(text || "")) {
+        const at = m.index;
+        if (inline.some((n2) => n2.from <= at && at < n2.to)) continue;
+        marks.push({ at, id: m[1] });
+      }
+      marks.sort((a, b) => a.at - b.at);
+      const out = [];
+      const seen = /* @__PURE__ */ new Map();
+      let n = 0;
+      for (const x of marks) {
+        if (x.id === void 0) out[x.k] = ++n;
+        else if (!seen.has(x.id)) seen.set(x.id, ++n);
+      }
+      return out;
+    }
     function inlineToReferences(text) {
       const notes = inlineFootnotes(text);
       if (!notes.length) return text || "";
@@ -1288,6 +1308,7 @@ var require_core = __commonJS({
       footnoteBlock,
       inlineToReferences,
       inlineFootnotes,
+      footnoteNumbers,
       footnoteLabel,
       gatherFootnotes,
       INDENT,
@@ -2095,6 +2116,80 @@ var require_review = __commonJS({
         i++;
       }
       return { text, map };
+    }
+    function offsetAt(md, before, after) {
+      const { text, map } = plainMap(md);
+      const squash = (t) => t.replace(/\s+/g, " ");
+      let flat2 = "";
+      const at = [];
+      for (let i = 0; i < text.length; i++) {
+        if (/\s/.test(text[i]) && /\s/.test(text[i - 1] || "")) continue;
+        flat2 += /\s/.test(text[i]) ? " " : text[i];
+        at.push(i);
+      }
+      const b = squash(before).slice(-60);
+      const a = squash(after).slice(0, 60);
+      let best = -1;
+      let score = 0;
+      for (let p = 0; p <= flat2.length; p++) {
+        let n = 0;
+        while (n < b.length && n < p && flat2[p - 1 - n] === b[b.length - 1 - n]) n++;
+        let m = 0;
+        while (m < a.length && p + m < flat2.length && flat2[p + m] === a[m]) m++;
+        if (n + m > score) {
+          score = n + m;
+          best = p;
+        }
+      }
+      if (best < 0 || score < Math.min(4, b.length + a.length)) return null;
+      if (best < flat2.length) return map[at[best]];
+      return text.length ? map[text.length - 1] + 1 : md.length;
+    }
+    function textAround(root, node, offset) {
+      const doc = root.ownerDocument;
+      const SKIP = "sup, .dendrite-review-notes, .dendrite-review-new, .dendrite-review-lead, .dendrite-cm-suggestion, mjx-container, button, .dendrite-placeholder";
+      const BLOCK = "p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, pre, div";
+      const blockOf = (t) => t.parentElement && t.parentElement.closest(BLOCK);
+      const walk = doc.createTreeWalker(root, 4);
+      let before = "";
+      let after = "";
+      let past = false;
+      let last = null;
+      for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+        if (t.parentElement && t.parentElement.closest(SKIP)) {
+          if (t === node) past = true;
+          continue;
+        }
+        const b = blockOf(t);
+        const gap = last && b !== last ? " " : "";
+        last = b;
+        if (t === node) {
+          before += gap + t.data.slice(0, offset);
+          after += t.data.slice(offset);
+          past = true;
+        } else if (past) {
+          after += gap + t.data;
+        } else {
+          before += gap + t.data;
+        }
+        if (after.length > 80) break;
+      }
+      if (!past) return null;
+      return { before: before.slice(-80), after: after.slice(0, 80) };
+    }
+    function paragraphEnd(md, at) {
+      const BLOCK = /^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|```|~~~|\|)/;
+      let end = md.indexOf("\n", at);
+      if (end < 0) return md.length;
+      const start = md.lastIndexOf("\n", at - 1) + 1;
+      if (/^\s*\|/.test(md.slice(start, end))) return end;
+      for (; ; ) {
+        const next = md.indexOf("\n", end + 1);
+        const line = md.slice(end + 1, next < 0 ? md.length : next);
+        if (!line.trim() || BLOCK.test(line)) return end;
+        if (next < 0) return md.length;
+        end = next;
+      }
     }
     var QUOTES = {
       "\u2018": "'",
@@ -3239,6 +3334,9 @@ var require_review = __commonJS({
       oldComments,
       convertOld,
       plainMap,
+      offsetAt,
+      textAround,
+      paragraphEnd,
       normalise,
       locate,
       reviewItems,
@@ -3376,13 +3474,14 @@ var require_cmreview = __commonJS({
         }
       }
       const build = (state) => {
-        const r = review2.editorRanges(state.doc.toString());
+        const md = state.doc.toString();
+        const r = review2.editorRanges(md);
         const atomic = [];
         const all = [];
         const under = /* @__PURE__ */ new Map();
         for (const c of r.chips) {
           if (!c.first) continue;
-          const end = state.doc.lineAt(c.to).to;
+          const end = review2.paragraphEnd(md, c.to);
           if (!under.has(end)) under.set(end, []);
           under.get(end).push(c);
         }
@@ -3453,29 +3552,261 @@ var require_cmreview = __commonJS({
   }
 });
 
+// src/tablecells.js
+var require_tablecells = __commonJS({
+  "src/tablecells.js"(exports2, module2) {
+    "use strict";
+    var review2 = require_review();
+    function rowCells(line, at) {
+      const cells = [];
+      let i = 0;
+      while (i < line.length && /\s/.test(line[i])) i++;
+      if (line[i] === "|") i++;
+      let start = i;
+      const push = (end) => {
+        const raw = line.slice(start, end);
+        const lead = /^\s*/.exec(raw)[0].length;
+        cells.push({ text: raw.trim(), start: at + start + lead });
+      };
+      for (; i < line.length; i++) {
+        if (line[i] === "\\" && line[i + 1] === "|") {
+          i++;
+        } else if (line[i] === "|") {
+          push(i);
+          start = i + 1;
+        }
+      }
+      if (line.slice(start).trim()) push(line.length);
+      return cells;
+    }
+    function tableRows(text, from) {
+      const rows = [];
+      let at = from;
+      for (let k = 0; at <= text.length; k++) {
+        const end = text.indexOf("\n", at);
+        const line = text.slice(at, end < 0 ? text.length : end);
+        if (!line.trim() || !line.includes("|")) break;
+        if (k !== 1) rows.push(rowCells(line, at));
+        if (end < 0) break;
+        at = end + 1;
+      }
+      return rows;
+    }
+    function markTableCells(cm, draw) {
+      const text = cm.state.doc.toString();
+      for (const w of cm.contentDOM.querySelectorAll(".cm-table-widget")) {
+        let from;
+        try {
+          from = cm.state.doc.lineAt(cm.posAtDOM(w)).from;
+        } catch (e) {
+          continue;
+        }
+        const rows = tableRows(text, from);
+        [...w.querySelectorAll("tr")].forEach((tr, r) => {
+          [...tr.children].forEach((td, c) => {
+            const cell = rows[r] && rows[r][c];
+            const wrap = td.querySelector(":scope > .table-cell-wrapper");
+            if (!cell || !wrap || td.querySelector(".cm-editor")) return;
+            if (!/\[!(review|suggest)\]/.test(cell.text)) return;
+            const base = review2.countComments(
+              review2.reviewItems(text.slice(0, cell.start))
+            );
+            const key = `${base}:${cell.text}`;
+            const drawn = wrap.querySelector(":scope > .dendrite-cell");
+            if (drawn && drawn.dataset.key === key) return;
+            draw(wrap, cell.text, base, key);
+          });
+        });
+      }
+    }
+    function fillCell(wrap, nodes, base, key) {
+      const doc = wrap.ownerDocument;
+      const span = doc.createElement("span");
+      span.className = "dendrite-cell";
+      span.dataset.key = key;
+      span.append(...nodes);
+      for (const sup of span.querySelectorAll("sup.dendrite-review-n")) {
+        sup.textContent = String(Number(sup.textContent) + base);
+      }
+      review2.wrapPassages(span);
+      wrap.replaceChildren(span);
+    }
+    module2.exports = { rowCells, tableRows, markTableCells, fillCell };
+  }
+});
+
+// src/zotero.js
+var require_zotero = __commonJS({
+  "src/zotero.js"(exports2, module2) {
+    "use strict";
+    var core2 = require_core();
+    var PDF = /zotero:\/\/open-pdf\/library\/items\/([A-Z0-9]+)/i;
+    function citekeys(note) {
+      if (!core2.footnoteLabel(note)) return [];
+      return [...note.matchAll(/@([\w:.#$%&+?<>~/-]+)/g)].map((m) => m[1]);
+    }
+    function notesByNumber(md) {
+      const out = /* @__PURE__ */ new Map();
+      const inline = core2.inlineFootnotes(md);
+      core2.footnoteNumbers(md).forEach((n2, k) => {
+        if (n2 && inline[k]) out.set(n2, inline[k].note);
+      });
+      const defs = /* @__PURE__ */ new Map();
+      for (const m of (md || "").matchAll(/^\[\^([^\]\s]+)\]:[ \t]*(.*)$/gm)) {
+        defs.set(m[1], m[2]);
+      }
+      if (!defs.size) return out;
+      const marks = inline.map((x) => ({ at: x.from }));
+      for (const m of md.matchAll(/\[\^([^\]\s]+)\](?!:)/g)) {
+        if (!inline.some((x) => x.from <= m.index && m.index < x.to)) {
+          marks.push({ at: m.index, id: m[1] });
+        }
+      }
+      marks.sort((a, b) => a.at - b.at);
+      const seen = /* @__PURE__ */ new Set();
+      let n = 0;
+      for (const x of marks) {
+        if (x.id === void 0) {
+          n++;
+        } else if (!seen.has(x.id)) {
+          seen.add(x.id);
+          n++;
+          if (defs.has(x.id)) out.set(n, defs.get(x.id));
+        }
+      }
+      return out;
+    }
+    var PdfLinks2 = class {
+      constructor(app, property = () => "citekey") {
+        this.app = app;
+        this.property = property;
+        this.notes = null;
+        this.links = /* @__PURE__ */ new Map();
+        this.pending = /* @__PURE__ */ new Map();
+        this.onFound = () => {
+        };
+      }
+      /** The note for each citekey, from the properties Obsidian holds. */
+      index() {
+        if (this.notes) return this.notes;
+        this.notes = /* @__PURE__ */ new Map();
+        const prop = this.property();
+        for (const f of this.app.vault.getMarkdownFiles()) {
+          const fm = (this.app.metadataCache.getFileCache(f) || {}).frontmatter;
+          const key = fm && fm[prop];
+          if (typeof key === "string" && key.trim()) {
+            this.notes.set(key.trim().replace(/^@/, ""), f);
+          }
+        }
+        return this.notes;
+      }
+      /** A note changed, was renamed or deleted: looked up afresh. */
+      forget() {
+        this.notes = null;
+        this.links.clear();
+      }
+      /** Note `f` changed: looked up afresh if it is a literature note. */
+      changed(f, cache) {
+        if (!this.notes) return;
+        const fm = cache && cache.frontmatter;
+        if (fm && fm[this.property()] || [...this.notes.values()].includes(f)) this.forget();
+      }
+      get(key) {
+        if (this.links.has(key)) return this.links.get(key);
+        this.load([key]);
+        return null;
+      }
+      async load(keys) {
+        await Promise.all(keys.map((key) => {
+          if (this.links.has(key)) return null;
+          if (!this.pending.has(key)) {
+            this.pending.set(key, this.find(key).then((link) => {
+              this.pending.delete(key);
+              this.links.set(key, link);
+              if (link) this.onFound(key);
+            }));
+          }
+          return this.pending.get(key);
+        }));
+      }
+      async find(key) {
+        const f = this.index().get(key);
+        if (!f) return null;
+        try {
+          const m = PDF.exec(await this.app.vault.cachedRead(f));
+          return m ? `zotero://open-pdf/library/items/${m[1]}` : null;
+        } catch (e) {
+          return null;
+        }
+      }
+    };
+    async function linkCitations(el, md, links) {
+      if (!links || !/@/.test(md || "")) return;
+      const notes = notesByNumber(md);
+      const want = [];
+      const refs = [];
+      for (const a of el.querySelectorAll(".footnote-ref a, a.footnote-ref")) {
+        const n = Number((/\d+/.exec(a.textContent) || [])[0]);
+        const key = citekeys(notes.get(n) || "")[0];
+        if (!key) continue;
+        refs.push([a, key]);
+        want.push(key);
+      }
+      if (!refs.length) return;
+      await links.load(want);
+      for (const [a, key] of refs) {
+        const href = links.links.get(key);
+        if (!href) continue;
+        a.setAttribute("href", href);
+        a.classList.remove("footnote-link");
+        a.classList.add("dendrite-cite-pdf");
+        a.removeAttribute("target");
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          a.ownerDocument.defaultView.open(href);
+        });
+      }
+    }
+    module2.exports = { PdfLinks: PdfLinks2, citekeys, notesByNumber, linkCitations };
+  }
+});
+
 // src/cmfootnotes.js
 var require_cmfootnotes = __commonJS({
   "src/cmfootnotes.js"(exports2, module2) {
     "use strict";
     var core2 = require_core();
     var review2 = require_review();
-    function footnoteExtension() {
+    var zotero2 = require_zotero();
+    function footnoteExtension(pdfOf = () => null) {
       const { Decoration, EditorView, WidgetType } = require("@codemirror/view");
       const { StateField } = require("@codemirror/state");
       class Chip extends WidgetType {
-        constructor(label, note) {
+        constructor(label, note, href) {
           super();
           this.label = label;
           this.note = note;
+          this.href = href;
         }
         eq(other) {
-          return this.label === other.label && this.note === other.note;
+          return this.label === other.label && this.note === other.note && this.href === other.href;
         }
         toDOM(view) {
-          const el = view.dom.ownerDocument.createElement("sup");
+          const doc = view.dom.ownerDocument;
+          const el = doc.createElement("sup");
           el.className = "dendrite-cm-footnote";
-          el.textContent = this.label;
           el.title = this.note;
+          if (!this.href) {
+            el.textContent = this.label;
+            return el;
+          }
+          const a = doc.createElement("a");
+          a.className = "dendrite-cite-pdf";
+          a.href = this.href;
+          a.textContent = this.label;
+          a.addEventListener("click", (e) => e.preventDefault());
+          el.append(a);
           return el;
         }
         // A click goes through, so the cursor lands at the footnote and
@@ -3489,11 +3820,18 @@ var require_cmfootnotes = __commonJS({
         const held = review2.editorRanges(md).protect;
         const sel = state.selection.ranges;
         const out = [];
+        const numbers = core2.footnoteNumbers(md);
         core2.inlineFootnotes(md).forEach((n, k) => {
           if (held.some(([a, b]) => a < n.to && n.from < b)) return;
           if (sel.some((r) => r.from <= n.to && n.from <= r.to)) return;
-          const label = core2.footnoteLabel(n.note) || String(k + 1);
-          out.push(Decoration.replace({ widget: new Chip(label, n.note) }).range(n.from, n.to));
+          const label = `[${numbers[k] || k + 1}]`;
+          const who = core2.footnoteLabel(n.note);
+          const note = who ? `${who}: ${n.note}` : n.note;
+          const key = zotero2.citekeys(n.note)[0];
+          const href = key ? pdfOf(key) : null;
+          out.push(Decoration.replace({
+            widget: new Chip(label, note, href)
+          }).range(n.from, n.to));
         });
         return Decoration.set(out);
       };
@@ -3511,8 +3849,10 @@ var require_cmfootnotes = __commonJS({
 var require_editor = __commonJS({
   "src/editor.js"(exports2, module2) {
     "use strict";
-    var { Scope: Scope2 } = require("obsidian");
+    var { Scope: Scope2, MarkdownRenderer: MarkdownRenderer2 } = require("obsidian");
+    var review2 = require_review();
     var { reviewExtension } = require_cmreview();
+    var { markTableCells, fillCell } = require_tablecells();
     var { footnoteExtension } = require_cmfootnotes();
     var EditorClass = null;
     var resolveFailed = false;
@@ -3603,6 +3943,64 @@ var require_editor = __commonJS({
           this.register(() => {
             if (ws.setActiveLeaf === patched) ws.setActiveLeaf = original;
           });
+          let queued = false;
+          const mark = () => {
+            queued = false;
+            if (this._loaded) {
+              markTableCells(
+                this.editor.cm,
+                (...a) => this.drawCell(...a)
+              );
+            }
+          };
+          const win = content.ownerDocument.defaultView;
+          const watch = new win.MutationObserver(() => {
+            if (queued) return;
+            queued = true;
+            win.requestAnimationFrame(mark);
+          });
+          watch.observe(content, { childList: true, subtree: true });
+          this.register(() => watch.disconnect());
+          win.requestAnimationFrame(mark);
+        }
+        // A cell holding a comment, rendered as Obsidian renders a cell,
+        // as a one-cell table, from the board's text for its comments.
+        async drawCell(wrap, text, base, key) {
+          const tmp = wrap.ownerDocument.createElement("div");
+          const md = review2.renderMarkdown(text, opts.colourOf);
+          await MarkdownRenderer2.render(
+            app,
+            `| ${md} |
+| - |`,
+            tmp,
+            opts.file ? opts.file.path : "",
+            this
+          );
+          const th = tmp.querySelector("th");
+          if (!th || !wrap.isConnected) return;
+          fillCell(wrap, [...th.childNodes], base, key);
+        }
+        // The cell being typed in is an editor of its own, made by
+        // Obsidian; it is given the review extension too, so a comment
+        // there is drawn rather than shown as its syntax.
+        editTableCell(table, cell) {
+          const was = this.tableCell;
+          const out = super.editTableCell(table, cell);
+          try {
+            if (out && out !== was && out.cm) {
+              const { StateEffect } = require("@codemirror/state");
+              out.cm.dispatch({ effects: StateEffect.appendConfig.of(
+                reviewExtension(
+                  opts.colourOf,
+                  opts.nameOf,
+                  opts.onLost
+                )
+              ) });
+            }
+          } catch (err) {
+            console.warn("Dendrite: review comments in a table cell are shown as text.", err);
+          }
+          return out;
         }
         // Review comments and inline footnotes drawn in place of their
         // syntax; the editor as Obsidian makes it should that fail.
@@ -3616,7 +4014,7 @@ var require_editor = __commonJS({
                 opts.nameOf,
                 opts.onLost
               ),
-              footnoteExtension()
+              footnoteExtension(opts.pdfOf)
             ];
           } catch (err) {
             console.warn("Dendrite: review comments and footnotes are shown as text in the editor.", err);
@@ -5731,6 +6129,8 @@ var google = require_google();
 var float = require_float();
 var timing = require_timing();
 var { History, idbStore } = require_history();
+var zotero = require_zotero();
+var { PdfLinks } = zotero;
 var VIEW = "dendrite-view";
 var ROLE_ITEMS = [
   ["section", "Prints its heading only", "heading", "1"],
@@ -6003,6 +6403,13 @@ function externalLinks(el) {
 function dendriteMenu(icons = true) {
   const { Menu } = require("obsidian");
   return styleMenu(new Menu(), icons);
+}
+function clickedText(body, e) {
+  const doc = body && body.ownerDocument;
+  if (!doc || !doc.caretRangeFromPoint) return null;
+  const r = doc.caretRangeFromPoint(e.clientX, e.clientY);
+  if (!r || r.startContainer.nodeType !== 3 || !body.contains(r.startContainer)) return null;
+  return review.textAround(body, r.startContainer, r.startOffset);
 }
 function ownKeys(app, el) {
   const scope = new Scope(app.scope);
@@ -6299,7 +6706,11 @@ var DendriteView = class extends ItemView {
     });
     this.registerDomEvent(this.contentEl, "dblclick", (e) => {
       const card = e.target.closest(".dendrite-card");
-      if (card && !this.editing) this.startEdit(card.dataset.id);
+      if (!card || this.editing) return;
+      this.startEdit(card.dataset.id, false, clickedText(
+        card.querySelector(".dendrite-card-body"),
+        e
+      ));
     });
     this.registerDomEvent(
       window,
@@ -7094,6 +7505,7 @@ var DendriteView = class extends ItemView {
         f.path,
         comp
       );
+      zotero.linkCitations(out, text, this.plugin.pdfLinks);
       if (notes.length) {
         review.wrapPassages(out);
         review.decorate(
@@ -8514,7 +8926,7 @@ var DendriteView = class extends ItemView {
     ta.setSelectionRange(r.selStart, r.selEnd);
     return false;
   }
-  async startEdit(id, atStart = false) {
+  async startEdit(id, atStart = false, at = null) {
     if (this.refuseWhileArriving()) return;
     if (this.editing) {
       if (this.editing.id === id) return;
@@ -8614,7 +9026,7 @@ var DendriteView = class extends ItemView {
       card.removeClass("is-pending");
     }
     this.renderToolbar();
-    this.focusEditor(editor, atStart);
+    this.focusEditor(editor, atStart, at);
     this.showMode();
     if (this.find) this.paintFind();
   }
@@ -8627,6 +9039,7 @@ var DendriteView = class extends ItemView {
       this,
       Object.assign({
         colourOf: (who) => colours(who || "Reviewer"),
+        pdfOf: (key) => this.plugin.pdfLinks ? this.plugin.pdfLinks.get(key) : null,
         nameOf,
         onLost: (lost) => {
           const clip = (t) => t.length > 40 ? `${t.slice(0, 39).trim()}\u2026` : t;
@@ -8640,8 +9053,15 @@ var DendriteView = class extends ItemView {
     );
   }
   /** The caret into a card's new editor, at its start or its end. */
-  focusEditor(editor, atStart) {
-    editor.focus(atStart);
+  /**
+   * Focus a card's editor: at the text `at` gives, the drawn text
+   * around a click (clickedText), where it is found; else at its start
+   * or its end.
+   */
+  focusEditor(editor, atStart, at = null) {
+    const off = at && editor.kind !== "float" && editor.focusAt ? review.offsetAt(editor.value, at.before, at.after) : null;
+    if (off === null) editor.focus(atStart);
+    else editor.focusAt(off);
   }
   /** Write the editor's text to its card, keeping the frontmatter. */
   save(ed) {
@@ -9624,6 +10044,7 @@ var DendriteView = class extends ItemView {
       f.path,
       comp
     );
+    zotero.linkCitations(out, text, this.plugin.pdfLinks);
     if (notes.length) {
       review.wrapPassages(out);
       review.decorate(
@@ -12605,7 +13026,12 @@ var DendritePreview = class extends ItemView {
     this.registerDomEvent(this.contentEl, "dblclick", (e) => {
       const b = e.target.closest(".dendrite-pblock");
       if (b && !b.dataset.notes && this.file) {
-        this.plugin.focusCard(this.file, b.dataset.id, true);
+        this.plugin.focusCard(
+          this.file,
+          b.dataset.id,
+          true,
+          clickedText(b, e)
+        );
       }
     });
   }
@@ -13414,14 +13840,16 @@ var DendritePreview = class extends ItemView {
     }
     if (s.text) {
       const notes = s.cardNotes && s.cardNotes.length ? "\n\n" + core.footnoteBlock(s.cardNotes) : "";
+      const md = core.normaliseMarkdown(s.text + notes);
       await MarkdownRenderer.render(
         this.app,
-        core.normaliseMarkdown(s.text + notes),
+        md,
         b.el.createDiv(),
         path,
         b.comp
       );
       review.wrapPassages(b.el);
+      zotero.linkCitations(b.el, md, this.plugin.pdfLinks);
       b.el.toggleClass("is-notes-gathered", this.notesAt !== "card");
       if (this.notesAt !== "card") renumberRefs(b.el, s.refs || []);
     }
@@ -15152,6 +15580,20 @@ module.exports = class DendritePlugin extends Plugin {
       1e4
     ));
     this.history = new History(idbStore());
+    this.pdfLinks = new PdfLinks(this.app, () => {
+      const p = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins["obsidian-zotero-mirror"];
+      return p && p.settings && p.settings.citekeyProperty || "citekey";
+    });
+    this.registerEvent(this.app.metadataCache.on(
+      "changed",
+      (f, data, cache) => this.pdfLinks.changed(f, cache)
+    ));
+    for (const ev of ["rename", "delete"]) {
+      this.registerEvent(this.app.vault.on(
+        ev,
+        () => this.pdfLinks.forget()
+      ));
+    }
     this.registerView(VIEW, (leaf) => new DendriteView(leaf, this));
     this.registerView(PREVIEW, (leaf) => new DendritePreview(leaf, this));
     this.addCommand({
@@ -16223,7 +16665,7 @@ module.exports = class DendritePlugin extends Plugin {
     });
   }
   /** From the preview: select a card on the board, or edit it. */
-  async focusCard(file, id, edit) {
+  async focusCard(file, id, edit, at = null) {
     const leaf = this.app.workspace.getLeavesOfType(VIEW).find((l) => l.view.file === file);
     if (!leaf) {
       await this.openIndex(file, id);
@@ -16231,7 +16673,7 @@ module.exports = class DendritePlugin extends Plugin {
     }
     this.app.workspace.revealLeaf(leaf);
     const view = leaf.view;
-    if (edit) await view.startEdit(id);
+    if (edit) await view.startEdit(id, false, at);
     else await view.select(id);
   }
   /**

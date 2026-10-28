@@ -1304,3 +1304,46 @@ test('a suggestion applied with its replies kept becomes a comment on ' +
         '2026-10-20: Applied. Was “will be stored”.%%' + `${said} here.`,
     'a deletion: the comment where the text was');
 });
+
+test('a point in a card\'s drawn text is found in its markdown', () => {
+    const md = '## Aims\n\nThe cohort is [[Cohort|175 patients]] ' +
+        '%%{a1%%paired%%}a1 [!review] Aly, 2026-10-22: Sure?%% at ' +
+        'diagnosis.\n\nThe cohort is large.';
+    // The first "cohort", clicked before its "hort".
+    assert.equal(r.offsetAt(md, 'Aims The co', 'hort is 175 patients'),
+                 md.indexOf('hort'));
+    // The second one, told apart by what follows it.
+    assert.equal(r.offsetAt(md, 'diagnosis. The co', 'hort is large.'),
+                 md.lastIndexOf('hort'));
+    // In a comment's passage, and at the very end.
+    assert.equal(r.offsetAt(md, '175 patients pai', 'red at'),
+                 md.indexOf('red%%}'));
+    assert.equal(r.offsetAt(md, 'is large.', ''), md.length);
+    assert.equal(r.offsetAt(md, '', ''), null);
+    assert.equal(r.offsetAt(md, 'zzzz', 'qqqq'), null);
+});
+
+test('the drawn text around a point leaves out what the card adds', () => {
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div id="b"><p>The <mark>cohort</mark><sup ' +
+        'class="dendrite-review-n">1</sup> is paired.</p><div ' +
+        'class="dendrite-review-notes">Aly: Sure?</div><p>Next.</p>' +
+        '</div>').window.document;
+    const b = doc.getElementById('b');
+    const t = b.querySelector('p').lastChild;
+    assert.deepEqual(r.textAround(b, t, 4),
+                     { before: 'The cohort is ', after: 'paired. Next.' });
+});
+
+test('a comment\'s paragraph ends at a blank line or a new block', () => {
+    const md = 'Samples were taken\nacross two timepoints.\n\n- One\n' +
+        '- Two\n# Head\nText\n| a | b |\n| c | d |';
+    assert.equal(r.paragraphEnd(md, 3), md.indexOf('.\n\n') + 1);
+    assert.equal(r.paragraphEnd(md, md.indexOf('One')),
+                 md.indexOf('\n- Two'));
+    assert.equal(r.paragraphEnd(md, md.indexOf('Text')),
+                 md.indexOf('\n| a'));
+    assert.equal(r.paragraphEnd(md, md.indexOf('a |')),
+                 md.indexOf('\n| c'));
+    assert.equal(r.paragraphEnd(md, md.indexOf('c |')), md.length);
+});

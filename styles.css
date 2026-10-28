@@ -340,6 +340,18 @@
     overflow-wrap: break-word;
 }
 
+/* A table's cells wrap at spaces whatever the theme sets, as export
+   prints them; on a card, a table whose columns still do not fit
+   scrolls sideways inside it rather than running out of the card. */
+:is(.dendrite-md, .dendrite-cm, .dendrite-preview-doc) {
+    --table-white-space: normal;
+}
+.dendrite-md table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
 /* A footnote marker is raised without opening its line further apart
    than the others. */
 .dendrite-md sup, .dendrite-cm sup, .dendrite-preview-doc sup {
@@ -565,6 +577,25 @@
 
 .dendrite-cm .cm-editor.cm-focused {
     outline: none;
+}
+
+/* Lines as wide as the card, as the rendered text is: a theme's readable
+   line width, such as Minimal's 88%, would wrap them earlier. */
+.dendrite-cm .markdown-source-view.mod-cm6 {
+    --max-width: 100%;
+    --line-width: 100%;
+    --content-line-width: 100%;
+    --content-margin: 0;
+    --content-margin-start: 0;
+}
+
+/* A blank first or last line, which the rendered card does not show,
+   takes no room until the caret is on it, so the text does not move
+   down when the card is opened to be written in. */
+.dendrite-cm .cm-content > .cm-line:is(:first-child, :last-child):not(
+        .cm-active):has(> br:only-child) {
+    height: 0;
+    overflow: hidden;
 }
 
 /* A card's quota: a target and a bar at the left of its footer. */
@@ -1871,6 +1902,12 @@ button.dendrite-review-btn:hover {
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+    /* One width whatever it says, "3 of 28" or "999 comments", so the
+       next arrow stays under the pointer while stepping. */
+    box-sizing: border-box;
+    width: calc(7.5em + 22px);
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .dendrite-pcomments-pos:empty {
     display: none;
@@ -2408,4 +2445,11 @@ button.dendrite-reviewer-colour {
     border-radius: 50%;
     vertical-align: -0.05em;
     background: var(--dendrite-chip);
+}
+
+/* A citation linked to its paper's PDF looks as any footnote mark: the
+   link is there for a hover to preview the paper (zotero.js). */
+a.dendrite-cite-pdf {
+    color: inherit;
+    text-decoration: none;
 }

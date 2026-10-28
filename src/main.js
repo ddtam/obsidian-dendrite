@@ -37,6 +37,8 @@ const google = require('./google.js');
 const float = require('./float.js');
 const timing = require('./timing.js');
 const { History, idbStore } = require('./history.js');
+const zotero = require('./zotero.js');
+const { PdfLinks } = zotero;
 
 const VIEW = 'dendrite-view';
 
@@ -433,6 +435,19 @@ function dendriteMenu(icons = true) {
  * A box typed in on a card or bubble keeps its keys while it has the
  * focus, so Enter and the arrows are not the view's.
  */
+/**
+ * The drawn text around the point of mouse event `e` in `body`, a card's
+ * text as drawn, for review.offsetAt; null off its text.
+ */
+function clickedText(body, e) {
+    const doc = body && body.ownerDocument;
+    if (!doc || !doc.caretRangeFromPoint) return null;
+    const r = doc.caretRangeFromPoint(e.clientX, e.clientY);
+    if (!r || r.startContainer.nodeType !== 3 ||
+        !body.contains(r.startContainer)) return null;
+    return review.textAround(body, r.startContainer, r.startOffset);
+}
+
 function ownKeys(app, el) {
     const scope = new Scope(app.scope);
     el.addEventListener('focus', () => {
@@ -804,9 +819,12 @@ class DendriteView extends ItemView {
             await this.select(card.dataset.id, false);
             this.cardMenu(card, e);
         });
+        // The caret lands where the card was clicked.
         this.registerDomEvent(this.contentEl, 'dblclick', (e) => {
             const card = e.target.closest('.dendrite-card');
-            if (card && !this.editing) this.startEdit(card.dataset.id);
+            if (!card || this.editing) return;
+            this.startEdit(card.dataset.id, false, clickedText(
+                card.querySelector('.dendrite-card-body'), e));
         });
         this.registerDomEvent(window, 'beforeunload',
             () => { this.flush(); });
@@ -1686,6 +1704,7 @@ class DendriteView extends ItemView {
             await MarkdownRenderer.render(this.app,
                 notes.length ? review.renderMarkdown(text, this.colourOf()) :
                     shown, out, f.path, comp);
+            zotero.linkCitations(out, text, this.plugin.pdfLinks);
             if (notes.length) {
                 review.wrapPassages(out);
                 review.decorate(out, notes,
@@ -3186,7 +3205,7 @@ class DendriteView extends ItemView {
         return false;
     }
 
-    async startEdit(id, atStart = false) {
+    async startEdit(id, atStart = false, at = null) {
         if (this.refuseWhileArriving()) return;
         if (this.editing) {
             if (this.editing.id === id) return;
@@ -3277,7 +3296,7 @@ class DendriteView extends ItemView {
             card.removeClass('is-pending');
         }
         this.renderToolbar();
-        this.focusEditor(editor, atStart);
+        this.focusEditor(editor, atStart, at);
         this.showMode();
         // The rendered card it replaced took find's paint with it.
         if (this.find) this.paintFind();
@@ -3289,6 +3308,8 @@ class DendriteView extends ItemView {
         const nameOf = this.nameOf();
         return cardEditor(this.app, this, Object.assign({
             colourOf: (who) => colours(who || 'Reviewer'),
+            pdfOf: (key) => (this.plugin.pdfLinks ?
+                this.plugin.pdfLinks.get(key) : null),
             nameOf,
             onLost: (lost) => {
                 const clip = (t) => (t.length > 40 ?
@@ -3303,8 +3324,16 @@ class DendriteView extends ItemView {
     }
 
     /** The caret into a card's new editor, at its start or its end. */
-    focusEditor(editor, atStart) {
-        editor.focus(atStart);
+    /**
+     * Focus a card's editor: at the text `at` gives, the drawn text
+     * around a click (clickedText), where it is found; else at its start
+     * or its end.
+     */
+    focusEditor(editor, atStart, at = null) {
+        const off = at && editor.kind !== 'float' && editor.focusAt ?
+            review.offsetAt(editor.value, at.before, at.after) : null;
+        if (off === null) editor.focus(atStart);
+        else editor.focusAt(off);
     }
 
     /** Write the editor's text to its card, keeping the frontmatter. */
@@ -4334,6 +4363,7 @@ class DendriteView extends ItemView {
         await MarkdownRenderer.render(this.app,
             notes.length ? review.renderMarkdown(text, this.colourOf()) :
                 text, out, f.path, comp);
+        zotero.linkCitations(out, text, this.plugin.pdfLinks);
         if (notes.length) {
             review.wrapPassages(out);
             review.decorate(out, notes,
@@ -7470,7 +7500,8 @@ class DendritePreview extends ItemView {
         this.registerDomEvent(this.contentEl, 'dblclick', (e) => {
             const b = e.target.closest('.dendrite-pblock');
             if (b && !b.dataset.notes && this.file) {
-                this.plugin.focusCard(this.file, b.dataset.id, true);
+                this.plugin.focusCard(this.file, b.dataset.id, true,
+                                      clickedText(b, e));
             }
         });
     }
@@ -8352,10 +8383,12 @@ class DendritePreview extends ItemView {
         if (s.text) {
             const notes = s.cardNotes && s.cardNotes.length ?
                 '\n\n' + core.footnoteBlock(s.cardNotes) : '';
-            await MarkdownRenderer.render(this.app,
-                core.normaliseMarkdown(s.text + notes), b.el.createDiv(),
-                path, b.comp);
+            const md = core.normaliseMarkdown(s.text + notes);
+            await MarkdownRenderer.render(this.app, md, b.el.createDiv(),
+                                          path, b.comp);
             review.wrapPassages(b.el);
+            // Read by the card's own numbers, so before renumbering.
+            zotero.linkCitations(b.el, md, this.plugin.pdfLinks);
             // Gathered: Obsidian still draws the references, numbered from
             // 1 in this card; they take the document's numbers, and the
             // card's own list is hidden by the stylesheet.
@@ -10429,6 +10462,20 @@ module.exports = class DendritePlugin extends Plugin {
         // Versions per device, outside the vault and data.json, which
         // sync plugins copy.
         this.history = new History(idbStore());
+        // Citations linked to their PDF, from the literature notes of the
+        // Zotero Mirror plugin, by its citekey property where it sets one.
+        this.pdfLinks = new PdfLinks(this.app, () => {
+            const p = this.app.plugins && this.app.plugins.plugins &&
+                this.app.plugins.plugins['obsidian-zotero-mirror'];
+            return (p && p.settings && p.settings.citekeyProperty) ||
+                'citekey';
+        });
+        this.registerEvent(this.app.metadataCache.on('changed',
+            (f, data, cache) => this.pdfLinks.changed(f, cache)));
+        for (const ev of ['rename', 'delete']) {
+            this.registerEvent(this.app.vault.on(ev,
+                () => this.pdfLinks.forget()));
+        }
         this.registerView(VIEW, (leaf) => new DendriteView(leaf, this));
         this.registerView(PREVIEW, (leaf) => new DendritePreview(leaf, this));
         this.addCommand({
@@ -11473,7 +11520,7 @@ module.exports = class DendritePlugin extends Plugin {
     }
 
     /** From the preview: select a card on the board, or edit it. */
-    async focusCard(file, id, edit) {
+    async focusCard(file, id, edit, at = null) {
         const leaf = this.app.workspace.getLeavesOfType(VIEW)
             .find((l) => l.view.file === file);
         if (!leaf) {
@@ -11482,7 +11529,7 @@ module.exports = class DendritePlugin extends Plugin {
         }
         this.app.workspace.revealLeaf(leaf);
         const view = leaf.view;
-        if (edit) await view.startEdit(id);
+        if (edit) await view.startEdit(id, false, at);
         else await view.select(id);
     }
 

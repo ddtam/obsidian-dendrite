@@ -130,14 +130,16 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
     }
 
     const build = (state) => {
-        const r = review.editorRanges(state.doc.toString());
+        const md = state.doc.toString();
+        const r = review.editorRanges(md);
         const atomic = [];
         const all = [];
-        // Each paragraph's comments, under its last line.
+        // Each paragraph's comments, under its last line, as on the
+        // board: a line break inside the paragraph does not split it.
         const under = new Map();
         for (const c of r.chips) {
             if (!c.first) continue;
-            const end = state.doc.lineAt(c.to).to;
+            const end = review.paragraphEnd(md, c.to);
             if (!under.has(end)) under.set(end, []);
             under.get(end).push(c);
         }

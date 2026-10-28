@@ -1055,3 +1055,11 @@ test('export leaves out every comment to or from Claude, with its ' +
         '==large==%%[!review] Claude, 2026-10-27: Cite.%%.';
     assert.equal(c.stripComments(md), 'The cohort is large.');
 });
+
+test('inline footnotes are numbered as the rendered card numbers them',
+     () => {
+    const md = 'A^[[@a2020]] b[^x] c^[Plain.] d[^x] e^[[@b2021]]\n\n' +
+        '[^x]: Defined.';
+    assert.deepEqual(c.footnoteNumbers(md), [1, 3, 4]);
+    assert.deepEqual(c.footnoteNumbers('No notes.'), []);
+});

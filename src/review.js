@@ -543,6 +543,107 @@ function plainMap(md) {
     return { text, map };
 }
 
+/**
+ * Where a point in a card's drawn text falls in its markdown `md`, given
+ * the drawn text just `before` and `after` the point: the offset whose
+ * printed text (plainMap) has the most of both around it, whitespace
+ * taken as one space. Null where too little of either is found.
+ */
+function offsetAt(md, before, after) {
+    const { text, map } = plainMap(md);
+    const squash = (t) => t.replace(/\s+/g, ' ');
+    // The printed text squashed, each character's index in `text`.
+    let flat = '';
+    const at = [];
+    for (let i = 0; i < text.length; i++) {
+        if (/\s/.test(text[i]) && /\s/.test(text[i - 1] || '')) continue;
+        flat += /\s/.test(text[i]) ? ' ' : text[i];
+        at.push(i);
+    }
+    const b = squash(before).slice(-60);
+    const a = squash(after).slice(0, 60);
+    let best = -1;
+    let score = 0;
+    for (let p = 0; p <= flat.length; p++) {
+        let n = 0;
+        while (n < b.length && n < p &&
+               flat[p - 1 - n] === b[b.length - 1 - n]) n++;
+        let m = 0;
+        while (m < a.length && p + m < flat.length &&
+               flat[p + m] === a[m]) m++;
+        if (n + m > score) {
+            score = n + m;
+            best = p;
+        }
+    }
+    if (best < 0 || score < Math.min(4, b.length + a.length)) return null;
+    if (best < flat.length) return map[at[best]];
+    return text.length ? map[text.length - 1] + 1 : md.length;
+}
+
+/**
+ * The drawn text of `root` before and after a point in it, `node` and
+ * `offset` as a DOM range gives them, for offsetAt: what the card adds
+ * to its text, such as comment numbers, comments and suggested text, left
+ * out, and a space between blocks.
+ */
+function textAround(root, node, offset) {
+    const doc = root.ownerDocument;
+    const SKIP = 'sup, .dendrite-review-notes, .dendrite-review-new, ' +
+        '.dendrite-review-lead, .dendrite-cm-suggestion, mjx-container, ' +
+        'button, .dendrite-placeholder';
+    const BLOCK = 'p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, ' +
+        'pre, div';
+    const blockOf = (t) => t.parentElement && t.parentElement.closest(BLOCK);
+    const walk = doc.createTreeWalker(root, 4);
+    let before = '';
+    let after = '';
+    let past = false;
+    let last = null;
+    for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+        if (t.parentElement && t.parentElement.closest(SKIP)) {
+            if (t === node) past = true;
+            continue;
+        }
+        const b = blockOf(t);
+        const gap = last && b !== last ? ' ' : '';
+        last = b;
+        if (t === node) {
+            before += gap + t.data.slice(0, offset);
+            after += t.data.slice(offset);
+            past = true;
+        } else if (past) {
+            after += gap + t.data;
+        } else {
+            before += gap + t.data;
+        }
+        if (after.length > 80) break;
+    }
+    if (!past) return null;
+    return { before: before.slice(-80), after: after.slice(0, 80) };
+}
+
+/**
+ * Where the paragraph holding offset `at` of `md` ends, as markdown runs
+ * one on: through the lines after it until a blank one or one that
+ * starts a block of its own, such as a heading, a list item, a quote, a
+ * table row or a code fence. A list item or table row is its own block.
+ */
+function paragraphEnd(md, at) {
+    const BLOCK = /^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>|```|~~~|\|)/;
+    let end = md.indexOf('\n', at);
+    if (end < 0) return md.length;
+    const start = md.lastIndexOf('\n', at - 1) + 1;
+    if (/^\s*\|/.test(md.slice(start, end))) return end;
+    for (;;) {
+        const next = md.indexOf('\n', end + 1);
+        const line = md.slice(end + 1, next < 0 ? md.length : next);
+        if (!line.trim() || BLOCK.test(line)) return end;
+        if (next < 0) return md.length;
+        end = next;
+    }
+}
+
 // ---- Finding a passage in the cards ------------------------------------
 
 const QUOTES = { '‘': '\'', '’': '\'', '“': '"', '”': '"', '–': '-',
@@ -2087,7 +2188,7 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    passagesLost, changeAsComment, alignWords, mapThrough,
                    passageEls,
                    oldComments, convertOld,
-                   plainMap,
+                   plainMap, offsetAt, textAround, paragraphEnd,
                    normalise, locate, reviewItems, alreadyIn,
                    noteLink, reviewKeys, needsLink, addLink,
                    commentActions, commentMenu, googleData, googleOf,

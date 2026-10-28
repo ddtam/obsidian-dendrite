@@ -789,6 +789,32 @@ function inlineFootnotes(text) {
 }
 
 /**
+ * The number each inline footnote of `text` is drawn with, as Obsidian
+ * numbers a note's footnotes: in reading order, inline ones and [^id]
+ * references together, a reference repeated keeping its first number.
+ */
+function footnoteNumbers(text) {
+    const inline = inlineFootnotes(text);
+    const marks = inline.map((n, k) => ({ at: n.from, k }));
+    const REF = /\[\^([^\]\s]+)\](?!:)/g;
+    let m;
+    while ((m = REF.exec(text || ''))) {
+        const at = m.index;
+        if (inline.some((n) => n.from <= at && at < n.to)) continue;
+        marks.push({ at, id: m[1] });
+    }
+    marks.sort((a, b) => a.at - b.at);
+    const out = [];
+    const seen = new Map();
+    let n = 0;
+    for (const x of marks) {
+        if (x.id === undefined) out[x.k] = ++n;
+        else if (!seen.has(x.id)) seen.set(x.id, ++n);
+    }
+    return out;
+}
+
+/**
  * Inline footnotes, ^[text], made into numbered ones, so they are
  * numbered in reading order with the rest and can be gathered with them.
  * Used by the preview only; export leaves inline footnotes to Pandoc.
@@ -1768,7 +1794,8 @@ module.exports = {
     withKinds, floatLabels, countManuscript,
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,
-    inlineToReferences, inlineFootnotes, footnoteLabel, gatherFootnotes,
+    inlineToReferences, inlineFootnotes, footnoteNumbers,
+    footnoteLabel, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
     lineDiff, charDiff, printedOnly,
     deriveLabel, stripComments, validPrefix, newId, withPrefix,
