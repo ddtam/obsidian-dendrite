@@ -4383,7 +4383,15 @@ test('the preview can show review comments as bubbles beside the text, ' +
     view.highlight('G-ccccc');
     assert.deepEqual(view.bubbleFocus(bubbles()), { index: 2, at: 'card' },
                      'a card clicked since takes over');
-    view.highlight('G-bbbbb');
+    assert.ok(!bubbles().some((x) => x.hasClass('is-current')),
+              'the comment gone to is no longer marked');
+    assert.equal(label(), '3 comments');
+    await nav('Next comment').onclick();
+    assert.equal(label(), '3 of 3', 'stepping starts from the card');
+    view.highlight('G-ccccc');
+    assert.equal(label(), '3 of 3', 'its own card keeps it');
+    await nav('Next comment').onclick();
+    assert.equal(label(), '1 of 3');
     assert.ok(bubbles()[0].hasClass('is-current'));
     // Its passage in the text is marked as the one gone to; hovering a
     // bubble marks its passage too.
@@ -5783,9 +5791,42 @@ test('a reply written to a card shows in the preview\'s bubble, though ' +
         cardPath('G-aaaaa')), card.replace('many.%%',
         'many.%%%%[!reply] Claude, 2026-10-27: %%'));
     await tick(500);
-    assert.equal(view.contentEl.querySelector('.dendrite-pbubble ' +
-        '.dendrite-review-reply.is-seen').textContent,
-        '✓ Claude · 27 Oct');
+    const seen = view.contentEl.querySelector('.dendrite-pbubble ' +
+        '.dendrite-review-reply.is-seen');
+    assert.equal([...seen.childNodes].filter((x) =>
+        !x.classList || !x.classList.contains('dendrite-review-acts'))
+        .map((x) => x.textContent).join(''), '✓ Claude · 27 Oct');
+});
+
+test('in the preview, Claude\'s reply is answered for Claude only, as on ' +
+     'the board', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'The ==cohort==%%' +
+        '[!review] Joshua, 2026-10-23: Why?%%%%[!reply] Claude, ' +
+        '2026-10-24: Fine as is.%% is large.');
+    const sent = [];
+    const plugin = { settings: { headingTop: 1 }, focusCard() {},
+                     reviewFromPreview: async (...a) => sent.push(a) };
+    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await view.onOpen();
+    await view.setState({ file: INDEX, showComments: true });
+    await tick(30);
+    const bubble = view.contentEl.querySelector('.dendrite-pbubble');
+    const to = bubble.querySelector('.dendrite-review-reply ' +
+        '.dendrite-review-acts button');
+    assert.equal(to.textContent, 'Reply to Claude');
+    to.click();
+    const box = bubble.querySelector('.dendrite-review-reply-box');
+    assert.equal(box.value, '@Claude ');
+    box.value += 'Why not the other?';
+    await bubble.querySelector('.dendrite-review-reply-form .mod-cta')
+        .onclick();
+    assert.deepEqual(sent.map((a) => a.slice(1)),
+                     [['G-aaaaa', 0, 'reply', '@Claude Why not the other?']]);
 });
 
 test('threads: each open comment of a manuscript with its card, passage ' +

@@ -7985,9 +7985,31 @@ class DendritePreview extends ItemView {
     async stepComment(d) {
         const list = this.reviewList;
         if (!list.length) return;
-        this.reviewAt = this.reviewAt < 0 ? (d > 0 ? 0 : list.length - 1) :
+        this.reviewAt = this.reviewAt < 0 ? this.stepFrom(d) :
             (this.reviewAt + d + list.length) % list.length;
         await this.goComment();
+    }
+
+    /**
+     * Where stepping by `d` starts with no comment gone to: the first
+     * comment at or after the selected card, or the last before it, in
+     * reading order; with no card selected, the first or the last.
+     */
+    stepFrom(d) {
+        const list = this.reviewList;
+        const order = this.doc ? [...this.doc.querySelectorAll(
+            '.dendrite-pblock')].map((el) => el.dataset.id) : [];
+        const at = order.indexOf(this.active);
+        if (at < 0) return d > 0 ? 0 : list.length - 1;
+        const pos = (x) => order.indexOf(x.id);
+        if (d > 0) {
+            const k = list.findIndex((x) => pos(x) >= at);
+            return k < 0 ? 0 : k;
+        }
+        for (let k = list.length - 1; k >= 0; k--) {
+            if (pos(list[k]) <= at) return k;
+        }
+        return list.length - 1;
     }
 
     /** Whether an element is wholly within the preview's view. */
@@ -8096,10 +8118,33 @@ class DendritePreview extends ItemView {
             }
             // Its replies, under it, a seen mark among them; one taken
             // back from the board.
+            const send = async (t) => {
+                if (this.plugin.reviewFromPreview) {
+                    await this.plugin.reviewFromPreview(this.file, id, n,
+                                                        'reply', t);
+                }
+            };
             for (const r of it.replies || []) {
-                el.appendChild(review.replyRow(el.ownerDocument, r,
-                    (who) => this.names.get(who),
+                const reply = el.appendChild(review.replyRow(
+                    el.ownerDocument, r, (who) => this.names.get(who),
                     (who) => this.colours && this.colours.get(who)));
+                // Claude's reply answered as on the board: for Claude
+                // only, never sent to the reviewer.
+                if (r.author !== 'Claude') continue;
+                const doc = el.ownerDocument;
+                const bar = doc.createElement('span');
+                bar.className = 'dendrite-review-acts';
+                const btn = bar.appendChild(doc.createElement('button'));
+                btn.className = 'dendrite-review-btn';
+                btn.textContent = 'Reply to Claude';
+                btn.title = 'For Claude only: not sent to the reviewer';
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    review.replyBox(el, send, (box) => ownKeys(this.app, box),
+                                    '@Claude ');
+                    this.scheduleBubbles();
+                });
+                reply.prepend(bar);
             }
             const row = el.createDiv({ cls: 'dendrite-pbubble-btns' });
             el.addEventListener('contextmenu', (e) => {
@@ -8131,12 +8176,7 @@ class DendritePreview extends ItemView {
             answer.title = 'Answer this comment';
             answer.addEventListener('click', (e) => {
                 e.stopPropagation();
-                review.replyBox(el, async (t) => {
-                    if (this.plugin.reviewFromPreview) {
-                        await this.plugin.reviewFromPreview(this.file, id, n,
-                                                            'reply', t);
-                    }
-                }, (box) => ownKeys(this.app, box));
+                review.replyBox(el, send, (box) => ownKeys(this.app, box));
                 this.scheduleBubbles();
             });
         }
@@ -8432,6 +8472,13 @@ class DendritePreview extends ItemView {
         this.active = id;
         for (const [bid, b] of this.blocks) {
             b.el.toggleClass('is-active', bid === id);
+        }
+        // Another card selected: the comment stepped to is no longer the
+        // one being read, so none is marked, and stepping starts here.
+        const cur = this.reviewList && this.reviewList[this.reviewAt];
+        if (cur && !(cur.parts || [cur]).some((p) => p.id === id)) {
+            this.reviewAt = -1;
+            this.showPos();
         }
         this.drawWhenIdle();
         this.fadeBubbles();

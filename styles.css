@@ -558,6 +558,13 @@
     font-family: var(--font-text);
 }
 
+/* No room kept for a scrollbar the card never shows: CodeMirror's own
+   style makes the scroller scroll sideways, and Obsidian then keeps a
+   stable gutter, which narrowed the text 15 px against the drawn card. */
+.dendrite-cm .markdown-source-view.mod-cm6 .cm-scroller {
+    scrollbar-gutter: auto;
+}
+
 .dendrite-cm .cm-sizer,
 .dendrite-cm .cm-contentContainer,
 .dendrite-cm .cm-content,
