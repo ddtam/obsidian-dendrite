@@ -3640,7 +3640,7 @@ var require_zotero = __commonJS({
   "src/zotero.js"(exports2, module2) {
     "use strict";
     var core2 = require_core();
-    var PDF = /zotero:\/\/open-pdf\/library\/items\/([A-Z0-9]+)/i;
+    var PDF = /zotero:\/\/open-pdf\/(?:library|groups\/\d+)\/items\/([A-Z0-9]+)/i;
     function citekeys(note) {
       if (!core2.footnoteLabel(note)) return [];
       return [...note.matchAll(/@([\w:.#$%&+?<>~/-]+)/g)].map((m) => m[1]);
@@ -3676,12 +3676,15 @@ var require_zotero = __commonJS({
       }
       return out;
     }
+    var RETRY_MS = 6e4;
     var PdfLinks2 = class {
-      constructor(app, property = () => "citekey") {
+      constructor(app, property = () => "citekey", mirror = () => null) {
         this.app = app;
         this.property = property;
+        this.mirror = mirror;
         this.notes = null;
         this.links = /* @__PURE__ */ new Map();
+        this.missed = /* @__PURE__ */ new Map();
         this.pending = /* @__PURE__ */ new Map();
         this.onFound = () => {
         };
@@ -3704,6 +3707,13 @@ var require_zotero = __commonJS({
       forget() {
         this.notes = null;
         this.links.clear();
+        this.missed.clear();
+      }
+      /** Whether a key's answer is known: a link, or none found lately. */
+      known(key) {
+        if (!this.links.has(key)) return false;
+        if (this.links.get(key)) return true;
+        return Date.now() - (this.missed.get(key) || 0) < RETRY_MS;
       }
       /** Note `f` changed: looked up afresh if it is a literature note. */
       changed(f, cache) {
@@ -3712,29 +3722,37 @@ var require_zotero = __commonJS({
         if (fm && fm[this.property()] || [...this.notes.values()].includes(f)) this.forget();
       }
       get(key) {
-        if (this.links.has(key)) return this.links.get(key);
+        if (this.known(key)) return this.links.get(key);
         this.load([key]);
         return null;
       }
       async load(keys) {
         await Promise.all(keys.map((key) => {
-          if (this.links.has(key)) return null;
+          if (this.known(key)) return null;
           if (!this.pending.has(key)) {
             this.pending.set(key, this.find(key).then((link) => {
               this.pending.delete(key);
               this.links.set(key, link);
               if (link) this.onFound(key);
+              else this.missed.set(key, Date.now());
+            }, () => {
+              this.pending.delete(key);
             }));
           }
           return this.pending.get(key);
         }));
       }
       async find(key) {
+        const m = this.mirror();
+        if (m && typeof m.pdfLinkFor === "function") {
+          const link = await m.pdfLinkFor(key);
+          return link ? String(link).replace(/[?#].*$/, "") : null;
+        }
         const f = this.index().get(key);
         if (!f) return null;
         try {
-          const m = PDF.exec(await this.app.vault.cachedRead(f));
-          return m ? `zotero://open-pdf/library/items/${m[1]}` : null;
+          const pdf = PDF.exec(await this.app.vault.cachedRead(f));
+          return pdf ? pdf[0] : null;
         } catch (e) {
           return null;
         }
@@ -15627,10 +15645,11 @@ module.exports = class DendritePlugin extends Plugin {
       1e4
     ));
     this.history = new History(idbStore());
+    const mirror = () => this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins["obsidian-zotero-mirror"] || null;
     this.pdfLinks = new PdfLinks(this.app, () => {
-      const p = this.app.plugins && this.app.plugins.plugins && this.app.plugins.plugins["obsidian-zotero-mirror"];
+      const p = mirror();
       return p && p.settings && p.settings.citekeyProperty || "citekey";
-    });
+    }, mirror);
     this.registerEvent(this.app.metadataCache.on(
       "changed",
       (f, data, cache) => this.pdfLinks.changed(f, cache)

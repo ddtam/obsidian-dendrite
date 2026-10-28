@@ -10509,14 +10509,15 @@ module.exports = class DendritePlugin extends Plugin {
         // Versions per device, outside the vault and data.json, which
         // sync plugins copy.
         this.history = new History(idbStore());
-        // Citations linked to their PDF, from the literature notes of the
-        // Zotero Mirror plugin, by its citekey property where it sets one.
+        // Citations linked to their PDF: asked of the Zotero Mirror plugin
+        // where it can say, else found in its literature notes.
+        const mirror = () => (this.app.plugins && this.app.plugins.plugins &&
+            this.app.plugins.plugins['obsidian-zotero-mirror']) || null;
         this.pdfLinks = new PdfLinks(this.app, () => {
-            const p = this.app.plugins && this.app.plugins.plugins &&
-                this.app.plugins.plugins['obsidian-zotero-mirror'];
+            const p = mirror();
             return (p && p.settings && p.settings.citekeyProperty) ||
                 'citekey';
-        });
+        }, mirror);
         this.registerEvent(this.app.metadataCache.on('changed',
             (f, data, cache) => this.pdfLinks.changed(f, cache)));
         for (const ev of ['rename', 'delete']) {

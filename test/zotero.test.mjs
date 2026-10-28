@@ -70,3 +70,37 @@ test('a citation becomes a link to its paper\'s PDF, its note read once',
     links.changed({ path: 'x.md' }, { frontmatter: { citekey: 'k' } });
     assert.equal(links.links.size, 0);
 });
+
+test('the Zotero Mirror plugin is asked where it can say, a paper it ' +
+     'finds no PDF for asked again later', async () => {
+    const asked = [];
+    let found = false;
+    const mirror = { pdfLinkFor: async (key) => {
+        asked.push(key);
+        if (key === 'group2022') {
+            return 'zotero://open-pdf/groups/42/items/GRP00001';
+        }
+        return found ? 'zotero://open-pdf/library/items/PDF00001?page=3' :
+            null;
+    } };
+    const links = new z.PdfLinks(app([]), () => 'citekey', () => mirror);
+    await links.load(['urbut2019', 'group2022']);
+    assert.equal(links.get('group2022'),
+                 'zotero://open-pdf/groups/42/items/GRP00001');
+    assert.equal(links.get('urbut2019'), null);
+    await links.load(['urbut2019']);
+    assert.deepEqual(asked, ['urbut2019', 'group2022'],
+                     'none found lately: not asked again at once');
+    // A minute on, as when Zotero has been opened since.
+    links.missed.set('urbut2019', Date.now() - 61000);
+    found = true;
+    await links.load(['urbut2019']);
+    assert.equal(links.get('urbut2019'),
+                 'zotero://open-pdf/library/items/PDF00001',
+                 'its page left off, so the paper opens at its start');
+    // Without the plugin's lookup, its literature notes are read.
+    const plain = new z.PdfLinks(app([]), () => 'citekey', () => ({}));
+    await plain.load(['metzner2025']);
+    assert.equal(plain.get('metzner2025'),
+                 'zotero://open-pdf/library/items/AB12CD34');
+});

@@ -4,12 +4,15 @@
 // any zotero://open-pdf link. A citation's key is looked up in the vault's
 // literature notes, by their citekey property, and the note's first link
 // to its PDF is taken, without its page or highlight, so the link opens
-// the paper itself. Only what is drawn changes: a card's text keeps its
-// [@key], and export reads it as before.
+// the paper itself. Where the Zotero Mirror plugin offers pdfLinkFor,
+// it is asked instead: it looks in the same notes and then asks Zotero,
+// so a paper with no note, as most cited papers are, has its link too.
+// Only what is drawn changes: a card's text keeps its [@key], and export
+// reads it as before.
 
 const core = require('./core.js');
 
-const PDF = /zotero:\/\/open-pdf\/library\/items\/([A-Z0-9]+)/i;
+const PDF = /zotero:\/\/open-pdf\/(?:library|groups\/\d+)\/items\/([A-Z0-9]+)/i;
 
 /** The citekeys of a footnote made only of citations, else none. */
 function citekeys(note) {
@@ -54,17 +57,24 @@ function notesByNumber(md) {
     return out;
 }
 
+// How long a paper found to have no PDF is taken as having none before
+// it is asked again: Zotero may have been closed, or the paper added.
+const RETRY_MS = 60000;
+
 /**
- * The PDF links of the vault's literature notes. `get(key)` answers at
- * once, from what is known, and looks up a key not yet known, calling
- * `onFound` when it learns one; `load(keys)` waits for them.
+ * The PDF links of cited papers. `get(key)` answers at once, from what
+ * is known, and looks up a key not yet known, calling `onFound` when it
+ * learns one; `load(keys)` waits for them. `mirror()` is the Zotero
+ * Mirror plugin, or null.
  */
 class PdfLinks {
-    constructor(app, property = () => 'citekey') {
+    constructor(app, property = () => 'citekey', mirror = () => null) {
         this.app = app;
         this.property = property;
+        this.mirror = mirror;
         this.notes = null;
         this.links = new Map();
+        this.missed = new Map();
         this.pending = new Map();
         this.onFound = () => {};
     }
@@ -89,6 +99,14 @@ class PdfLinks {
     forget() {
         this.notes = null;
         this.links.clear();
+        this.missed.clear();
+    }
+
+    /** Whether a key's answer is known: a link, or none found lately. */
+    known(key) {
+        if (!this.links.has(key)) return false;
+        if (this.links.get(key)) return true;
+        return Date.now() - (this.missed.get(key) || 0) < RETRY_MS;
     }
 
     /** Note `f` changed: looked up afresh if it is a literature note. */
@@ -100,31 +118,37 @@ class PdfLinks {
     }
 
     get(key) {
-        if (this.links.has(key)) return this.links.get(key);
+        if (this.known(key)) return this.links.get(key);
         this.load([key]);
         return null;
     }
 
     async load(keys) {
         await Promise.all(keys.map((key) => {
-            if (this.links.has(key)) return null;
+            if (this.known(key)) return null;
             if (!this.pending.has(key)) {
                 this.pending.set(key, this.find(key).then((link) => {
                     this.pending.delete(key);
                     this.links.set(key, link);
                     if (link) this.onFound(key);
-                }));
+                    else this.missed.set(key, Date.now());
+                }, () => { this.pending.delete(key); }));
             }
             return this.pending.get(key);
         }));
     }
 
     async find(key) {
+        const m = this.mirror();
+        if (m && typeof m.pdfLinkFor === 'function') {
+            const link = await m.pdfLinkFor(key);
+            return link ? String(link).replace(/[?#].*$/, '') : null;
+        }
         const f = this.index().get(key);
         if (!f) return null;
         try {
-            const m = PDF.exec(await this.app.vault.cachedRead(f));
-            return m ? `zotero://open-pdf/library/items/${m[1]}` : null;
+            const pdf = PDF.exec(await this.app.vault.cachedRead(f));
+            return pdf ? pdf[0] : null;
         } catch (e) {
             return null;
         }

@@ -2454,9 +2454,13 @@ button.dendrite-reviewer-colour {
     background: var(--dendrite-chip);
 }
 
-/* A citation linked to its paper's PDF looks as any footnote mark: the
-   link is there for a hover to preview the paper (zotero.js). */
+/* A citation linked to its paper's PDF in the accent colour, as a link,
+   so it is found to hover for a preview of the paper (zotero.js). */
 a.dendrite-cite-pdf {
-    color: inherit;
+    color: var(--text-accent);
     text-decoration: none;
+}
+a.dendrite-cite-pdf:hover {
+    color: var(--text-accent-hover);
+    text-decoration: underline;
 }
