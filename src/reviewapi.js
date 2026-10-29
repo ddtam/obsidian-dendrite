@@ -10,14 +10,15 @@
 //   POST /dendrite/review        { manuscript, title?, items: [...] }
 //   GET  /dendrite/review/<id>   the review's state
 //   GET  /dendrite/threads?manuscript=<prefix>[&author=<name>]
-//        [&awaiting=<name>][&card=<id>]
+//        [&awaiting=<name>][&card=<id>][&resolved=1]
 //        the manuscript's open comments, each with its id and replies, and
 //        the text of their cards, so a reviewer can read them in context
 //        and what was answered; `author=me` is the
 //        writer's own, and `awaiting` keeps those waiting for that name:
 //        not answered by them, or replied to since by a reviewer, by the
 //        writer on their own comment, or as `@<name> ...`; and `card`
-//        keeps to that card and those under it; read only
+//        keeps to that card and those under it; `resolved=1` adds the
+//        comments dealt with, from the manuscript's review log; read only
 //   POST /dendrite/reply         { manuscript, thread, text, author? }
 //        a reply written under the comment whose id is `thread`, at
 //        once, as `author`, Claude if not given; up to 500 characters.
@@ -26,7 +27,9 @@
 //        of ids, in place of `thread` for several at once. With
 //        `replace: true`, it takes the place of the writer's replies at
 //        the end of the thread, a seen mark taking them back, and is
-//        refused where someone has replied since
+//        refused where someone has replied since. With `resolve: true`,
+//        a reply suggesting the writer resolve the comment, its text
+//        saying why; refused on a suggested change
 //   POST /dendrite/suggest       { manuscript, items: [{ card, quote,
 //        replace, before?, after?, author? }] }
 //        suggested changes, each written at once where its quote is
@@ -101,7 +104,8 @@ async function handle(opts, req, res) {
         }
         const q = (k) => url.searchParams.get(k) || null;
         const out = await opts.threads(prefix, { author: q('author'),
-            awaiting: q('awaiting'), card: q('card') });
+            awaiting: q('awaiting'), card: q('card'),
+            resolved: !!q('resolved') });
         return send(res, out.status, out.json);
     }
     const m = /^\/dendrite\/review\/([\w-]+)$/.exec(url.pathname);

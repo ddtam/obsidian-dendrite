@@ -886,8 +886,12 @@ test('the review endpoint answers GET /dendrite/threads with the ' +
         assert.deepEqual(await call('/dendrite/threads?manuscript=G' +
             '&author=Claude&card=G-aaaaa', auth),
             [200, { manuscript: 'G', threads: [] }]);
-        assert.deepEqual(asked, [['G', { author: 'Claude', awaiting: null,
-                                         card: 'G-aaaaa' }]]);
+        await call('/dendrite/threads?manuscript=G&resolved=1', auth);
+        assert.deepEqual(asked, [
+            ['G', { author: 'Claude', awaiting: null, card: 'G-aaaaa',
+                    resolved: false }],
+            ['G', { author: null, awaiting: null, card: null,
+                    resolved: true }]]);
         assert.equal((await call('/dendrite/threads?manuscript=G'))[0], 401);
         assert.equal((await call('/dendrite/threads', auth))[0], 400,
                      'which manuscript');
@@ -1346,4 +1350,39 @@ test('a comment\'s paragraph ends at a blank line or a new block', () => {
     assert.equal(r.paragraphEnd(md, md.indexOf('a |')),
                  md.indexOf('\n| c'));
     assert.equal(r.paragraphEnd(md, md.indexOf('c |')), md.length);
+});
+
+test('a reply suggesting the writer resolve a comment: written with its ' +
+     'mark, read back as one, drawn as one, and the comment\'s Resolve ' +
+     'lit until someone replies after it', () => {
+    const md = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%% is ' +
+        'large.';
+    const out = r.addReply(md, 0, { author: 'Claude', date: '2026-10-29',
+        text: 'Methods now gives 42.', resolve: true });
+    assert.match(out, /%%\[!reply\] Claude, 2026-10-29: \[resolve\] Methods/);
+    const it = r.reviewItems(out)[0];
+    assert.deepEqual(it.replies, [{ author: 'Claude', date: '2026-10-29',
+        text: 'Methods now gives 42.', resolve: true }]);
+    assert.ok(r.readyToResolve(it));
+    const [act] = r.commentActions(it);
+    assert.equal(act[0], 'resolve');
+    assert.equal(act[3], true, 'lit');
+    assert.match(act[2], /Claude thinks this is done/);
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div></div>').window.document;
+    const row = r.replyRow(doc, it.replies[0]);
+    assert.ok(row.classList.contains('is-resolve'));
+    assert.match(row.textContent, /suggests resolving/);
+    assert.match(row.textContent, /Methods now gives 42\./);
+    // With no reason: still a suggestion, not a read mark.
+    const bare = r.reviewItems(r.addReply(md, 0, { author: 'Claude',
+        date: '2026-10-29', text: '', resolve: true }))[0];
+    assert.ok(r.readyToResolve(bare));
+    assert.ok(!r.replyRow(doc, bare.replies[0]).classList
+        .contains('is-seen'));
+    // Answered since: no longer standing.
+    const after = r.reviewItems(r.addReply(out, 0, { author: 'Me',
+        date: '2026-10-29', text: 'Not yet.' }))[0];
+    assert.ok(!r.readyToResolve(after));
+    assert.equal(r.commentActions(after)[0][3], undefined);
 });

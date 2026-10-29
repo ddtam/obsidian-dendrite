@@ -26,6 +26,7 @@ const menuItem = (menu, title) => {
 const submenuOf = (menu, title) =>
     menu.items.find((i) => i.title === title).submenu;
 const INDEX = 'W/Grant/Grant.md';
+const LOG = 'W/Grant/review-log.jsonl';
 
 // The app the settings tab is given: only the vault's name is read.
 const SETTINGS_APP = { vault: { getName: () => 'Vault' } };
@@ -4203,8 +4204,9 @@ test('a pulled comment keeps its Google Docs link on the card, and one ' +
     await view.reviewAction('G-aaaaa', 0, 'resolve');
     assert.equal(text(cardPath('G-aaaaa')),
                  'The cohort is composed of paired samples.');
-    assert.match(read(INDEX), /dendrite_review_done:[^]*g:AAA1/,
-                 'remembered on the index');
+    assert.match(read(LOG), /"g:AAA1"/, 'remembered in the review log');
+    assert.doesNotMatch(read(INDEX), /dendrite_review_done/,
+                        'not on the index');
     // Pulled again, the coauthor having edited the comment's text.
     view.plugin.gdocReview = async () => {
         const r = pulled();
@@ -4928,10 +4930,9 @@ test('a comment deleted here leaves the card and is not remembered, so a ' +
     await tick(10);
     assert.equal(text(cardPath('G-aaaaa')), 'The cohort and ==size==' +
         '%%[!review] Joshua Bridgers, 2026-10-22: How many?%%.');
-    assert.doesNotMatch(read(INDEX), /dendrite_review_done/,
-                        'deleted: nothing remembered');
+    assert.equal(read(LOG), undefined, 'deleted: nothing remembered');
     await view.reviewAction('G-aaaaa', 0, 'resolve');
-    assert.match(read(INDEX), /dendrite_review_done/, 'resolved: remembered');
+    assert.match(read(LOG), /"action":"resolve"/, 'resolved: remembered');
     view.plugin.gdocReview = async () => ({ title: 'RAC', resolved: 0,
         items: ['Wrong card?', 'How many?'].map((t, k) => ({
             kind: 'comment', author: 'Joshua Bridgers', date: '2026-10-22',
@@ -6220,4 +6221,106 @@ test('a double click on a card puts the caret where it was clicked',
     assert.equal(view.editing.id, 'G-aaaaa');
     assert.equal(view.editing.ta.selectionStart, card.indexOf('lapse'));
     delete doc.caretRangeFromPoint;
+});
+
+test('a comment resolved or a suggestion dismissed goes in the review ' +
+     'log beside the index, the keys once kept on the index moving there ' +
+     'too; threads give them to a reviewer, not one opened again by undo',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const { app, view, read, text } = await open('---\ndendrite_prefix: G' +
+        '\ndendrite_review_done:\n  - c:0ld\n---\n- [[G-aaaaa|a]]\n',
+        { 'G-aaaaa': 'The ==cohort==%%[!review] Claude, 2026-10-23: Say ' +
+              'how many.%%%%[!reply] Derek Tam, 2026-10-24: In ' +
+              'Methods.%% is ==large==%%[!suggest] Claude, 2026-10-23: ' +
+              'big%%.' });
+    await view.reviewAction('G-aaaaa', 0, 'resolve');
+    await view.reviewAction('G-aaaaa', 0, 'dismiss');
+    assert.equal(text(cardPath('G-aaaaa')), 'The cohort is large.');
+    assert.doesNotMatch(read(INDEX), /dendrite_review_done/,
+                        'off the index');
+    const lines = read(LOG).trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((e) => [e.action, e.card, e.text]),
+        [[null, undefined, undefined], ['resolve', 'G-aaaaa', 'Say how many.'],
+         ['dismiss', 'G-aaaaa', 'big']]);
+    assert.deepEqual(lines[0].keys, ['c:0ld'], 'the old keys, kept');
+    assert.deepEqual(lines[1].replies, [
+        { author: 'Derek Tam', date: '2026-10-24', text: 'In Methods.' }]);
+    const done = await view.reviewDone();
+    assert.ok(done.includes('c:0ld') && lines[1].keys.every((k) =>
+        done.includes(k)), 'both still known as dealt with');
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.openViews = () => [view];
+    assert.equal((await p.threadsFor('G')).json.resolved, undefined,
+                 'only when asked');
+    const got = (await p.threadsFor('G', { resolved: true })).json;
+    assert.deepEqual(got.resolved.map((e) => [e.action, e.kind, e.passage,
+        e.author, e.text, e.replies.length]), [
+        ['resolve', 'comment', 'cohort', 'Claude', 'Say how many.', 1],
+        ['dismiss', 'suggestion', 'large', 'Claude', 'big', 0]]);
+    assert.ok(got.resolved.every((e) => !('keys' in e)));
+    // The suggestion back in its card, as by an undo: open again, so
+    // not given as dealt with.
+    await app.vault.modify(view.cardFile('G-aaaaa'), 'The cohort is ' +
+        '==large==%%[!suggest] Claude, 2026-10-23: big%%.');
+    const again = (await p.threadsFor('G', { resolved: true })).json;
+    assert.deepEqual(again.resolved.map((e) => e.action), ['resolve']);
+});
+
+test('the review log: its path beside the index, a line cut short left ' +
+     'out, the newest entry for each comment', () => {
+    const log = require('../src/reviewlog.js');
+    assert.equal(log.logPath('W/Grant/Grant.md'), 'W/Grant/review-log.jsonl');
+    assert.equal(log.logPath('Grant.md'), 'review-log.jsonl');
+    const a = { at: '1', action: 'resolve', text: 'A', keys: ['c:a'] };
+    const b = { at: '2', action: 'dismiss', text: 'B', keys: ['s:b'] };
+    const a2 = { ...a, at: '3' };
+    const text = [a, b, a2].map(log.line).join('') + '{"at":"4","act';
+    const entries = log.parse(text);
+    assert.equal(entries.length, 3);
+    assert.deepEqual(log.settled(entries).map((e) => e.at), ['2', '3']);
+    assert.deepEqual(log.settled(entries, new Set(['s:b']))
+        .map((e) => e.at), ['3']);
+    assert.deepEqual([...log.keysOf([...entries,
+        { action: null, keys: ['c:0ld'] }])], ['c:a', 's:b', 'c:0ld']);
+});
+
+test('Claude can suggest resolving a comment through the reply endpoint, ' +
+     'never a suggested change; the card shows it and lights Resolve',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const { app, view, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|a]]\n',
+        { 'G-aaaaa': 'The ==cohort==%%[!review] Aly, 2026-10-23: How ' +
+              'many?%% is ==large==%%[!suggest] Claude, 2026-10-23: ' +
+              'big%%.' });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.openViews = () => [view];
+    const [comment, change] = (await p.threadsFor('G')).json.threads;
+    assert.equal((await p.replyTo({ manuscript: 'G', thread: comment.id,
+        resolve: true, seen: true })).status, 400, 'not both');
+    const out = await p.replyTo({ manuscript: 'G', resolve: true,
+        threads: [comment.id, change.id], text: 'Methods gives 42.' });
+    assert.equal(out.status, 201);
+    assert.deepEqual(out.json.done, [comment.id]);
+    assert.deepEqual(out.json.refused.map((x) => x.id), [change.id]);
+    assert.match(out.json.refused[0].reason, /applied or dismissed/);
+    assert.match(text(cardPath('G-aaaaa')), new RegExp('How many\\?%%' +
+        '%%\\[!reply\\] Claude, [\\d-]+: \\[resolve\\] Methods gives ' +
+        '42\\.%%'));
+    const again = (await p.threadsFor('G')).json.threads[0];
+    assert.deepEqual(again.replies.map((x) => [x.text, x.resolve]),
+                     [['Methods gives 42.', true]]);
+    view.invalidate('G-aaaaa');
+    await view.renderCard('G-aaaaa');
+    const note = view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-note');
+    const btn = [...note.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Resolve');
+    assert.ok(btn.classList.contains('is-suggested'), 'Resolve lit');
+    assert.ok(note.querySelector('.dendrite-review-reply.is-resolve'));
 });

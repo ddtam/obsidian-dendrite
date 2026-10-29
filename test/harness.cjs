@@ -182,6 +182,9 @@ function makeApp() {
             // its metadata changed.
             setTimeout(() => meta.trigger('changed', f), 0);
         },
+        async append(f, data) {
+            await vault.modify(f, text.get(f.path) + data);
+        },
         async process(f, fn) {
             const out = fn(text.get(f.path));
             await vault.modify(f, out);

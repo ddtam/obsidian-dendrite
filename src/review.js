@@ -968,18 +968,35 @@ function without(md, s, e, syntax) {
 }
 const REPLY = /%%\[!reply\]\s*([\s\S]*?)%%/g;
 const HEAD = /^(.*?),\s*(\d{4}-\d{2}-\d{2}):\s?([\s\S]*)$/;
+// A reply opening so suggests the writer resolve the comment.
+const RESOLVE = /^\[resolve\]\s*/;
 
-/** The replies written after a comment: [{ author, date, text }]. */
+/**
+ * The replies written after a comment: [{ author, date, text }], and
+ * `resolve: true` on one suggesting the comment be resolved.
+ */
 function readReplies(chunk) {
     const out = [];
     REPLY.lastIndex = 0;
     let m;
     while ((m = REPLY.exec(chunk || ''))) {
         const h = HEAD.exec(m[1].replace(/^\s+/, ''));
-        out.push({ author: h ? h[1] : '', date: h ? h[2] : '',
-                   text: (h ? h[3] : m[1]).trim() });
+        const text = (h ? h[3] : m[1]).trim();
+        const r = { author: h ? h[1] : '', date: h ? h[2] : '',
+                    text: text.replace(RESOLVE, '') };
+        if (RESOLVE.test(text)) r.resolve = true;
+        out.push(r);
     }
     return out;
+}
+
+/**
+ * Whether a comment's last reply suggests it be resolved: its reviewer
+ * or Claude thinks the edits answer it, and nobody has replied since.
+ */
+function readyToResolve(it) {
+    const rs = (it && it.kind !== 'suggest' && it.replies) || [];
+    return !!(rs.length && rs[rs.length - 1].resolve);
 }
 
 /**
@@ -1011,8 +1028,10 @@ function reviewItems(md) {
 function addReply(md, n, reply) {
     const it = reviewItems(md)[n];
     if (!it) return md;
+    const said = reply.resolve ?
+        `[resolve] ${clean(reply.text)}`.trim() : clean(reply.text);
     const note = `%%[!reply] ${clean(reply.author) || 'Me'}, ` +
-        `${reply.date}: ${clean(reply.text)}%%`;
+        `${reply.date}: ${said}%%`;
     return md.slice(0, it.end) + note + md.slice(it.end);
 }
 
@@ -1098,9 +1117,9 @@ function fillAddressed(el, text, colourOf = null) {
 function replyRow(doc, r, nameOf = null, colourOf = null) {
     const el = doc.createElement('div');
     const rc = colourOf && colourOf(r.author || 'Me');
-    const seen = !String(r.text || '').trim();
+    const seen = !r.resolve && !String(r.text || '').trim();
     el.className = 'dendrite-review-reply' + (seen ? ' is-seen' : '') +
-        (rc ? ` is-c-${rc}` : '');
+        (r.resolve ? ' is-resolve' : '') + (rc ? ` is-c-${rc}` : '');
     const by = doc.createElement('div');
     by.className = 'dendrite-review-meta';
     const b = doc.createElement('b');
@@ -1113,8 +1132,14 @@ function replyRow(doc, r, nameOf = null, colourOf = null) {
         tick.textContent = '✓ ';
         by.append(tick);
     }
-    by.append(b, ` · ${shortDate(r.date)}`);
+    by.append(b, r.resolve ? ' suggests resolving' : '',
+              ` · ${shortDate(r.date)}`);
     el.append(by);
+    if (r.resolve) {
+        el.title = `${b.textContent} thinks the edits answer this ` +
+            'comment; Resolve it if you agree';
+        if (!String(r.text || '').trim()) return el;
+    }
     if (seen) {
         el.title = `${b.textContent} read this on ${shortDate(r.date)} ` +
             'and had nothing to add';
@@ -1930,10 +1955,17 @@ function assignColours(map, names) {
  * a pull does not bring it back.
  */
 function commentActions(it) {
-    return it.kind === 'suggest' ?
-        [['apply', 'Apply…', ''], ['dismiss', 'Dismiss', '']] :
-        [['resolve', 'Resolve', 'Dealt with: taken out, and not brought ' +
-          'back by a pull']];
+    if (it.kind === 'suggest') {
+        return [['apply', 'Apply…', ''], ['dismiss', 'Dismiss', '']];
+    }
+    if (readyToResolve(it)) {
+        const r = it.replies[it.replies.length - 1];
+        return [['resolve', 'Resolve', `${r.author || 'Claude'} thinks ` +
+                 'this is done. Dealt with: taken out, and not brought ' +
+                 'back by a pull', true]];
+    }
+    return [['resolve', 'Resolve', 'Dealt with: taken out, and not ' +
+             'brought back by a pull']];
 }
 
 /**
@@ -2138,9 +2170,10 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
             const bar = doc.createElement('span');
             bar.className = 'dendrite-review-acts';
             main.prepend(bar);
-            for (const [what, label, tip] of buttons) {
+            for (const [what, label, tip, lit] of buttons) {
                 const btn = doc.createElement('button');
-                btn.className = 'dendrite-review-btn';
+                btn.className = 'dendrite-review-btn' +
+                    (lit ? ' is-suggested' : '');
                 btn.textContent = label;
                 if (tip) btn.title = tip;
                 btn.addEventListener('click', (e) => {
@@ -2195,6 +2228,7 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    REVIEWER_COLOURS, colourCss, reviewerColours, colourList,
                    assignColours, reviewerEntries, entryList,
                    addReply, removeReply, replyBox, threadId,
+                   readyToResolve,
                    threadIds, forReviewers, replyRow,
                    addressed, awaits, replaceReplies, fillAddressed,
                    suggestInto,

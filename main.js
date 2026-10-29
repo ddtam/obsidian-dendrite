@@ -2458,19 +2458,27 @@ var require_review = __commonJS({
     }
     var REPLY = /%%\[!reply\]\s*([\s\S]*?)%%/g;
     var HEAD = /^(.*?),\s*(\d{4}-\d{2}-\d{2}):\s?([\s\S]*)$/;
+    var RESOLVE = /^\[resolve\]\s*/;
     function readReplies(chunk) {
       const out = [];
       REPLY.lastIndex = 0;
       let m;
       while (m = REPLY.exec(chunk || "")) {
         const h = HEAD.exec(m[1].replace(/^\s+/, ""));
-        out.push({
+        const text = (h ? h[3] : m[1]).trim();
+        const r = {
           author: h ? h[1] : "",
           date: h ? h[2] : "",
-          text: (h ? h[3] : m[1]).trim()
-        });
+          text: text.replace(RESOLVE, "")
+        };
+        if (RESOLVE.test(text)) r.resolve = true;
+        out.push(r);
       }
       return out;
+    }
+    function readyToResolve(it) {
+      const rs = it && it.kind !== "suggest" && it.replies || [];
+      return !!(rs.length && rs[rs.length - 1].resolve);
     }
     function reviewItems(md) {
       const { items, syntax } = scan(md);
@@ -2493,7 +2501,8 @@ var require_review = __commonJS({
     function addReply(md, n, reply) {
       const it = reviewItems(md)[n];
       if (!it) return md;
-      const note = `%%[!reply] ${clean(reply.author) || "Me"}, ${reply.date}: ${clean(reply.text)}%%`;
+      const said = reply.resolve ? `[resolve] ${clean(reply.text)}`.trim() : clean(reply.text);
+      const note = `%%[!reply] ${clean(reply.author) || "Me"}, ${reply.date}: ${said}%%`;
       return md.slice(0, it.end) + note + md.slice(it.end);
     }
     function threadId(it) {
@@ -2550,8 +2559,8 @@ var require_review = __commonJS({
     function replyRow(doc, r, nameOf = null, colourOf = null) {
       const el = doc.createElement("div");
       const rc = colourOf && colourOf(r.author || "Me");
-      const seen = !String(r.text || "").trim();
-      el.className = "dendrite-review-reply" + (seen ? " is-seen" : "") + (rc ? ` is-c-${rc}` : "");
+      const seen = !r.resolve && !String(r.text || "").trim();
+      el.className = "dendrite-review-reply" + (seen ? " is-seen" : "") + (r.resolve ? " is-resolve" : "") + (rc ? ` is-c-${rc}` : "");
       const by = doc.createElement("div");
       by.className = "dendrite-review-meta";
       const b = doc.createElement("b");
@@ -2562,8 +2571,16 @@ var require_review = __commonJS({
         tick.textContent = "\u2713 ";
         by.append(tick);
       }
-      by.append(b, ` \xB7 ${shortDate(r.date)}`);
+      by.append(
+        b,
+        r.resolve ? " suggests resolving" : "",
+        ` \xB7 ${shortDate(r.date)}`
+      );
       el.append(by);
+      if (r.resolve) {
+        el.title = `${b.textContent} thinks the edits answer this comment; Resolve it if you agree`;
+        if (!String(r.text || "").trim()) return el;
+      }
       if (seen) {
         el.title = `${b.textContent} read this on ${shortDate(r.date)} and had nothing to add`;
         return el;
@@ -3107,7 +3124,14 @@ var require_review = __commonJS({
       return { map: out, added };
     }
     function commentActions(it) {
-      return it.kind === "suggest" ? [["apply", "Apply\u2026", ""], ["dismiss", "Dismiss", ""]] : [["resolve", "Resolve", "Dealt with: taken out, and not brought back by a pull"]];
+      if (it.kind === "suggest") {
+        return [["apply", "Apply\u2026", ""], ["dismiss", "Dismiss", ""]];
+      }
+      if (readyToResolve(it)) {
+        const r = it.replies[it.replies.length - 1];
+        return [["resolve", "Resolve", `${r.author || "Claude"} thinks this is done. Dealt with: taken out, and not brought back by a pull`, true]];
+      }
+      return [["resolve", "Resolve", "Dealt with: taken out, and not brought back by a pull"]];
     }
     function commentMenu(it) {
       return [...commentActions(it).map(([what, label]) => [what, label, false]), ["delete", "Delete from Dendrite", true]];
@@ -3277,9 +3301,9 @@ var require_review = __commonJS({
           const bar = doc.createElement("span");
           bar.className = "dendrite-review-acts";
           main.prepend(bar);
-          for (const [what, label, tip] of buttons) {
+          for (const [what, label, tip, lit] of buttons) {
             const btn = doc.createElement("button");
-            btn.className = "dendrite-review-btn";
+            btn.className = "dendrite-review-btn" + (lit ? " is-suggested" : "");
             btn.textContent = label;
             if (tip) btn.title = tip;
             btn.addEventListener("click", (e) => {
@@ -3360,6 +3384,7 @@ var require_review = __commonJS({
       removeReply,
       replyBox,
       threadId,
+      readyToResolve,
       threadIds,
       forReviewers,
       replyRow,
@@ -5943,6 +5968,69 @@ var require_history = __commonJS({
   }
 });
 
+// src/reviewlog.js
+var require_reviewlog = __commonJS({
+  "src/reviewlog.js"(exports2, module2) {
+    "use strict";
+    var review2 = require_review();
+    var NAME = "review-log.jsonl";
+    function logPath(indexPath) {
+      const i = indexPath.lastIndexOf("/");
+      return i < 0 ? NAME : indexPath.slice(0, i + 1) + NAME;
+    }
+    function entry(it, action, card, at) {
+      const { text, url } = review2.noteLink(it.text || "");
+      return {
+        at,
+        action,
+        card,
+        kind: it.kind === "suggest" ? "suggestion" : "comment",
+        author: it.author || "",
+        date: it.date || "",
+        passage: it.passage || "",
+        text: it.kind === "suggest" ? it.text : text.trim(),
+        link: it.kind === "suggest" ? null : url || null,
+        replies: it.replies || [],
+        keys: review2.reviewKeys(it)
+      };
+    }
+    function line(e) {
+      return JSON.stringify(e) + "\n";
+    }
+    function parse(text) {
+      const out = [];
+      for (const l of (text || "").split("\n")) {
+        if (!l.trim()) continue;
+        try {
+          const e = JSON.parse(l);
+          if (e && typeof e === "object") out.push(e);
+        } catch (err) {
+        }
+      }
+      return out;
+    }
+    function keysOf(entries) {
+      const keys = /* @__PURE__ */ new Set();
+      for (const e of entries) {
+        for (const k of Array.isArray(e.keys) ? e.keys : []) keys.add(k);
+      }
+      return keys;
+    }
+    function settled(entries, openKeys = /* @__PURE__ */ new Set()) {
+      const out = /* @__PURE__ */ new Map();
+      for (const e of entries) {
+        if (!e.action || e.text === void 0) continue;
+        const keys = Array.isArray(e.keys) ? e.keys : [];
+        if (keys.some((k) => openKeys.has(k))) continue;
+        out.delete(keys[0]);
+        out.set(keys[0], e);
+      }
+      return [...out.values()];
+    }
+    module2.exports = { NAME, logPath, entry, line, parse, keysOf, settled };
+  }
+});
+
 // src/reviewapi.js
 var require_reviewapi = __commonJS({
   "src/reviewapi.js"(exports2, module2) {
@@ -6007,7 +6095,8 @@ var require_reviewapi = __commonJS({
         const out = await opts.threads(prefix, {
           author: q("author"),
           awaiting: q("awaiting"),
-          card: q("card")
+          card: q("card"),
+          resolved: !!q("resolved")
         });
         return send(res, out.status, out.json);
       }
@@ -6148,6 +6237,7 @@ var float = require_float();
 var timing = require_timing();
 var { History, idbStore } = require_history();
 var zotero = require_zotero();
+var reviewlog = require_reviewlog();
 var { PdfLinks } = zotero;
 var VIEW = "dendrite-view";
 var ROLE_ITEMS = [
@@ -6440,8 +6530,12 @@ function ownKeys(app, el) {
 }
 var MAX_REPLY = 500;
 var REFUSED = -2;
+var NOT_COMMENT = -3;
 function withReply(body, n, reply) {
   const { replace, ...r } = reply;
+  if (r.resolve && (review.reviewItems(body)[n] || {}).kind === "suggest") {
+    return false;
+  }
   return replace ? review.replaceReplies(body, n, r.author, r) : review.addReply(body, n, r);
 }
 function localDay(d = /* @__PURE__ */ new Date()) {
@@ -11057,22 +11151,51 @@ var DendriteView = class extends ItemView {
   }
   /**
    * Keys of the review comments and changes resolved, applied or
-   * dismissed in this manuscript, kept on its index.
+   * dismissed in this manuscript: those in its review log, and those
+   * kept on the index before there was one.
    */
-  reviewDone() {
+  async reviewDone() {
+    if (!this.file) return [];
+    const keys = reviewlog.keysOf(
+      await readReviewLog(this.app, this.file)
+    );
+    for (const k of this.legacyDone()) keys.add(k);
+    return [...keys];
+  }
+  /** The keys kept on the index before the review log, as text. */
+  legacyDone() {
     const fm = this.file && this.app.metadataCache.getFileCache(this.file)?.frontmatter;
     const d = fm && fm.dendrite_review_done;
     return Array.isArray(d) ? d.map(String) : [];
   }
-  /** Remember a comment or change as dealt with, by its keys. */
-  async rememberDone(item) {
+  /**
+   * Log a comment or change of card `card` as dealt with by `action`.
+   * Keys kept on the index from before go into the log first, and off
+   * the index once they are in it.
+   */
+  async rememberDone(item, action, card) {
     if (!this.file) return;
-    const keys = review.reviewKeys(item);
-    await this.app.fileManager.processFrontMatter(this.file, (fm) => {
-      const had = Array.isArray(fm.dendrite_review_done) ? fm.dendrite_review_done.map(String) : [];
-      const all = [...had.filter((k) => !keys.includes(k)), ...keys];
-      fm.dendrite_review_done = all.slice(-1e3);
-    });
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    const legacy = this.legacyDone();
+    const lines = [];
+    if (legacy.length) {
+      lines.push({
+        at,
+        action: null,
+        keys: legacy,
+        from: "dendrite_review_done"
+      });
+    }
+    lines.push(reviewlog.entry(item, action, card, at));
+    await appendReviewLog(this.app, this.file, lines);
+    if (legacy.length) {
+      await this.app.fileManager.processFrontMatter(
+        this.file,
+        (fm) => {
+          delete fm.dendrite_review_done;
+        }
+      );
+    }
   }
   /** Every old version kept in a stack, with its whole text. */
   async oldVersionCards() {
@@ -11189,7 +11312,7 @@ var DendriteView = class extends ItemView {
   async reviewModal(name, items, inbox = null) {
     const cards = await this.reviewCards();
     const old = await this.oldVersionCards();
-    const doneKeys = new Set(this.reviewDone());
+    const doneKeys = new Set(await this.reviewDone());
     const bodies = /* @__PURE__ */ new Map();
     const body = async (id) => {
       if (!bodies.has(id)) {
@@ -11648,6 +11771,7 @@ var DendriteView = class extends ItemView {
       const n2 = review.threadIds(review.reviewItems(body2)).indexOf(tid);
       if (n2 < 0) return n2;
       const out2 = withReply(body2, n2, reply);
+      if (out2 === false) return NOT_COMMENT;
       if (out2 === null) return REFUSED;
       ed.editor.update(out2);
       ed.dirty = true;
@@ -11661,6 +11785,7 @@ var DendriteView = class extends ItemView {
     const n = review.threadIds(review.reviewItems(body)).indexOf(tid);
     if (n < 0) return n;
     const out = withReply(body, n, reply);
+    if (out === false) return NOT_COMMENT;
     if (out === null) return REFUSED;
     await this.reviewAction(id, n, "text", out);
     return n;
@@ -11734,7 +11859,7 @@ var DendriteView = class extends ItemView {
       const after = review.removeItem(body, n, true);
       const done = (text) => async () => {
         await write(text);
-        if (item) await this.rememberDone(item);
+        if (item) await this.rememberDone(item, "apply", id);
       };
       const replies = item ? review.keptReplies(item) : [];
       new SuggestModal(
@@ -11752,11 +11877,13 @@ var DendriteView = class extends ItemView {
     const gid = what === "resolve" && item && review.reviewKeys(item).find((k) => k.startsWith("g:"));
     if (gid) {
       await this.resolveEverywhere(gid);
-      await this.rememberDone(item);
+      await this.rememberDone(item, what, id);
       return;
     }
     await write(review.removeItem(body, n));
-    if (item && what !== "delete") await this.rememberDone(item);
+    if (item && what !== "delete") {
+      await this.rememberDone(item, what, id);
+    }
   }
   async setStatus(id, status) {
     const f = this.cardFile(id);
@@ -13669,8 +13796,9 @@ var DendritePreview = class extends ItemView {
           )
         } : null);
       });
-      for (const [what, label, tip] of review.commentActions(it)) {
+      for (const [what, label, tip, lit] of review.commentActions(it)) {
         const btn = row.createEl("button", { text: label });
+        if (lit) btn.addClass("is-suggested");
         if (tip) btn.title = tip;
         btn.onclick = async (e) => {
           if (e && e.stopPropagation) e.stopPropagation();
@@ -15542,6 +15670,23 @@ timing.wrap(DendritePreview.prototype, "preview", [
   "highlight"
 ]);
 var TIMINGS = "timings.jsonl";
+async function readReviewLog(app, index) {
+  const f = app.vault.getAbstractFileByPath(reviewlog.logPath(index.path));
+  return f instanceof TFile ? reviewlog.parse(await app.vault.read(f)) : [];
+}
+var logWrites = /* @__PURE__ */ new Map();
+function appendReviewLog(app, index, entries) {
+  const path = reviewlog.logPath(index.path);
+  const text = entries.map(reviewlog.line).join("");
+  const run = async () => {
+    const f = app.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) await app.vault.append(f, text);
+    else await app.vault.create(path, text);
+  };
+  const next = (logWrites.get(path) || Promise.resolve()).then(run, run);
+  logWrites.set(path, next);
+  return next;
+}
 module.exports = class DendritePlugin extends Plugin {
   onunload() {
     this.stopReviewApi();
@@ -16079,12 +16224,15 @@ module.exports = class DendritePlugin extends Plugin {
    * any name the writer signs with; with `awaiting`, only those that
    * wait for that name's answer (review.awaits); and
    * with `card`, only that card's and those of the cards under it.
+   * With `resolved`, also those dealt with, from the review log, each
+   * as it was when it was: what a reviewer should not raise again.
    * Read only, for a reviewer to read what was answered.
    */
   async threadsFor(prefix, {
     author = null,
     awaiting = null,
-    card = null
+    card = null,
+    resolved = false
   } = {}) {
     const file = this.indexWithPrefix(prefix);
     if (!file) {
@@ -16103,7 +16251,9 @@ module.exports = class DendritePlugin extends Plugin {
     }
     const threads = [];
     const cards = {};
-    for (const n of top ? [top, ...core.allNodes(top)] : all) {
+    const open = /* @__PURE__ */ new Set();
+    const within = top ? [top, ...core.allNodes(top)] : all;
+    for (const n of within) {
       const f = app.metadataCache.getFirstLinkpathDest(n.id, file.path);
       if (!(f instanceof TFile)) continue;
       const body = core.splitFrontmatter(
@@ -16112,6 +16262,7 @@ module.exports = class DendritePlugin extends Plugin {
       const items = review.reviewItems(body);
       const ids = review.threadIds(items);
       for (const [k, it] of items.entries()) {
+        for (const key of review.reviewKeys(it)) open.add(key);
         if (author && !who.has(it.author)) continue;
         const replies = it.replies || [];
         if (awaiting && !review.awaits(
@@ -16134,11 +16285,15 @@ module.exports = class DendritePlugin extends Plugin {
         });
       }
     }
-    return { status: 200, json: {
-      manuscript: prefixOf(app, file),
-      threads,
-      cards
-    } };
+    const json = { manuscript: prefixOf(app, file), threads, cards };
+    if (resolved) {
+      const ids = new Set(within.map((n) => n.id));
+      json.resolved = reviewlog.settled(
+        await readReviewLog(app, file),
+        open
+      ).filter((e) => (!card || ids.has(e.card)) && (!author || who.has(e.author))).map(({ keys, ...e }) => e);
+    }
+    return { status: 200, json };
   }
   /** The names the writer signs with: the reply name, and Me. */
   selfNames() {
@@ -16162,10 +16317,10 @@ module.exports = class DendritePlugin extends Plugin {
       return bad(404, `no manuscript has the prefix ${data.manuscript}`);
     }
     const said = String(data.text || "").trim();
-    if (data.seen && said) {
+    if (data.seen && (said || data.resolve)) {
       return bad(400, "either seen, with no text, or a reply");
     }
-    if (!data.seen && !said) return bad(400, "no text");
+    if (!data.seen && !data.resolve && !said) return bad(400, "no text");
     if (said.length > MAX_REPLY) {
       return bad(400, `${said.length} characters; a reply is up to ${MAX_REPLY}. Say only what the writer needs before acting on the comment.`);
     }
@@ -16176,6 +16331,7 @@ module.exports = class DendritePlugin extends Plugin {
       text: data.seen ? "" : said,
       replace: !!data.replace
     };
+    if (data.resolve) reply.resolve = true;
     const view = this.openViews().find((v) => v.file === file);
     const done = [];
     const missing = [];
@@ -16189,12 +16345,16 @@ module.exports = class DendritePlugin extends Plugin {
       const n = !(f instanceof TFile) ? -1 : await (view ? view.replyFrom(card, tid, reply) : this.replyInFile(f, tid, reply));
       if (n === REFUSED) {
         refused.push({ id, reason: "someone has replied since; send a new reply instead" });
+      } else if (n === NOT_COMMENT) {
+        refused.push({ id, reason: "a suggested change is applied or dismissed, not resolved" });
       } else (n < 0 ? missing : done).push(id);
     }
     if (!done.length && !refused.length) {
       return bad(404, `no open comment ${missing.join(", ")}; it may have been resolved or changed`);
     }
-    if (!data.seen && done.length) {
+    if (data.resolve && done.length) {
+      new Notice(`Dendrite: ${reply.author} suggests resolving ${done.length} comment${done.length === 1 ? "" : "s"}, on ${done.map((x) => x.split("/")[0]).join(", ")}.`);
+    } else if (!data.seen && done.length) {
       new Notice(`Dendrite: ${reply.author} replied on ${done.map((x) => x.split("/")[0]).join(", ")}.`);
     }
     return { status: 201, json: { done, missing, refused } };
@@ -16260,8 +16420,9 @@ module.exports = class DendritePlugin extends Plugin {
       const { fm, body } = core.splitFrontmatter(data);
       n = review.threadIds(review.reviewItems(body)).indexOf(tid);
       const out = n < 0 ? null : withReply(body, n, reply);
-      if (n >= 0 && out === null) n = REFUSED;
-      return out === null ? data : fm + out;
+      if (n >= 0 && out === false) n = NOT_COMMENT;
+      else if (n >= 0 && out === null) n = REFUSED;
+      return typeof out !== "string" ? data : fm + out;
     });
     return n;
   }

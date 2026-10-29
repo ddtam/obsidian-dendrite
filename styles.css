@@ -565,6 +565,15 @@
     scrollbar-gutter: auto;
 }
 
+/* Lines break where the drawn card breaks them. CodeMirror wraps with
+   break-spaces, where the space after a line's last word must fit in the
+   line, so a word ending within a character of the edge went down a line;
+   in the drawn card that space hangs past the edge. With pre-wrap it
+   hangs here too: line breaks matched at every card width tried. */
+.dendrite-cm .cm-content.cm-lineWrapping {
+    white-space: pre-wrap;
+}
+
 .dendrite-cm .cm-sizer,
 .dendrite-cm .cm-contentContainer,
 .dendrite-cm .cm-content,
@@ -1565,6 +1574,20 @@ button.dendrite-review-btn {
 }
 button.dendrite-review-btn:hover {
     color: var(--text-normal);
+}
+/* Resolve, when the last reply suggests it: the next step, in accent. */
+button.dendrite-review-btn.is-suggested,
+.dendrite-pbubble-btns button.is-suggested {
+    color: var(--text-on-accent);
+    background: var(--interactive-accent);
+    border-radius: var(--radius-s);
+}
+button.dendrite-review-btn.is-suggested:hover,
+.dendrite-pbubble-btns button.is-suggested:hover {
+    background: var(--interactive-accent-hover);
+}
+.dendrite-review-reply.is-resolve > .dendrite-review-meta {
+    font-style: italic;
 }
 .dendrite-review-rows {
     display: flex;

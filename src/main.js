@@ -38,6 +38,7 @@ const float = require('./float.js');
 const timing = require('./timing.js');
 const { History, idbStore } = require('./history.js');
 const zotero = require('./zotero.js');
+const reviewlog = require('./reviewlog.js');
 const { PdfLinks } = zotero;
 
 const VIEW = 'dendrite-view';
@@ -471,8 +472,19 @@ const REFUSED = -2;
  * with `replace`, in place of its writer's last replies; null where
  * that cannot be done.
  */
+// A suggestion to resolve sent on a suggested change, which is applied
+// or dismissed instead.
+const NOT_COMMENT = -3;
+
+/**
+ * A card's body with `reply` under its `n`th comment; null where it is
+ * refused as a replacement, false where it suggests resolving a change.
+ */
 function withReply(body, n, reply) {
     const { replace, ...r } = reply;
+    if (r.resolve && (review.reviewItems(body)[n] || {}).kind === 'suggest') {
+        return false;
+    }
     return replace ? review.replaceReplies(body, n, r.author, r) :
         review.addReply(body, n, r);
 }
@@ -5457,26 +5469,45 @@ class DendriteView extends ItemView {
 
     /**
      * Keys of the review comments and changes resolved, applied or
-     * dismissed in this manuscript, kept on its index.
+     * dismissed in this manuscript: those in its review log, and those
+     * kept on the index before there was one.
      */
-    reviewDone() {
+    async reviewDone() {
+        if (!this.file) return [];
+        const keys = reviewlog.keysOf(
+            await readReviewLog(this.app, this.file));
+        for (const k of this.legacyDone()) keys.add(k);
+        return [...keys];
+    }
+
+    /** The keys kept on the index before the review log, as text. */
+    legacyDone() {
         const fm = this.file &&
             this.app.metadataCache.getFileCache(this.file)?.frontmatter;
         const d = fm && fm.dendrite_review_done;
         return Array.isArray(d) ? d.map(String) : [];
     }
 
-    /** Remember a comment or change as dealt with, by its keys. */
-    async rememberDone(item) {
+    /**
+     * Log a comment or change of card `card` as dealt with by `action`.
+     * Keys kept on the index from before go into the log first, and off
+     * the index once they are in it.
+     */
+    async rememberDone(item, action, card) {
         if (!this.file) return;
-        const keys = review.reviewKeys(item);
-        await this.app.fileManager.processFrontMatter(this.file, (fm) => {
-            const had = Array.isArray(fm.dendrite_review_done) ?
-                fm.dendrite_review_done.map(String) : [];
-            const all = [...had.filter((k) => !keys.includes(k)), ...keys];
-            // The latest, enough for any review round.
-            fm.dendrite_review_done = all.slice(-1000);
-        });
+        const at = new Date().toISOString();
+        const legacy = this.legacyDone();
+        const lines = [];
+        if (legacy.length) {
+            lines.push({ at, action: null, keys: legacy,
+                         from: 'dendrite_review_done' });
+        }
+        lines.push(reviewlog.entry(item, action, card, at));
+        await appendReviewLog(this.app, this.file, lines);
+        if (legacy.length) {
+            await this.app.fileManager.processFrontMatter(this.file,
+                (fm) => { delete fm.dendrite_review_done; });
+        }
     }
 
     /** Every old version kept in a stack, with its whole text. */
@@ -5619,7 +5650,7 @@ class DendriteView extends ItemView {
     async reviewModal(name, items, inbox = null) {
         const cards = await this.reviewCards();
         const old = await this.oldVersionCards();
-        const doneKeys = new Set(this.reviewDone());
+        const doneKeys = new Set(await this.reviewDone());
         const bodies = new Map();
         const body = async (id) => {
             if (!bodies.has(id)) {
@@ -6071,6 +6102,7 @@ class DendriteView extends ItemView {
                 .indexOf(tid);
             if (n < 0) return n;
             const out = withReply(body, n, reply);
+            if (out === false) return NOT_COMMENT;
             if (out === null) return REFUSED;
             ed.editor.update(out);
             ed.dirty = true;
@@ -6084,6 +6116,7 @@ class DendriteView extends ItemView {
         const n = review.threadIds(review.reviewItems(body)).indexOf(tid);
         if (n < 0) return n;
         const out = withReply(body, n, reply);
+        if (out === false) return NOT_COMMENT;
         if (out === null) return REFUSED;
         await this.reviewAction(id, n, 'text', out);
         return n;
@@ -6157,7 +6190,7 @@ class DendriteView extends ItemView {
             const after = review.removeItem(body, n, true);
             const done = (text) => async () => {
                 await write(text);
-                if (item) await this.rememberDone(item);
+                if (item) await this.rememberDone(item, 'apply', id);
             };
             const replies = item ? review.keptReplies(item) : [];
             new SuggestModal(this, id, body, after, done(after),
@@ -6172,13 +6205,15 @@ class DendriteView extends ItemView {
             .find((k) => k.startsWith('g:'));
         if (gid) {
             await this.resolveEverywhere(gid);
-            await this.rememberDone(item);
+            await this.rememberDone(item, what, id);
             return;
         }
         await write(review.removeItem(body, n));
         // Deleted, as misplaced, it is not remembered: a pull offers it
         // again, to be placed where it belongs.
-        if (item && what !== 'delete') await this.rememberDone(item);
+        if (item && what !== 'delete') {
+            await this.rememberDone(item, what, id);
+        }
     }
 
     async setStatus(id, status) {
@@ -8161,8 +8196,10 @@ class DendritePreview extends ItemView {
                                                                 who, to),
                 } : null);
             });
-            for (const [what, label, tip] of review.commentActions(it)) {
+            for (const [what, label, tip, lit] of
+                review.commentActions(it)) {
                 const btn = row.createEl('button', { text: label });
+                if (lit) btn.addClass('is-suggested');
                 if (tip) btn.title = tip;
                 btn.onclick = async (e) => {
                     if (e && e.stopPropagation) e.stopPropagation();
@@ -10406,6 +10443,33 @@ timing.wrap(DendritePreview.prototype, 'preview', ['refresh',
 
 const TIMINGS = 'timings.jsonl';
 
+/** The review log of the manuscript whose index is `index`. */
+async function readReviewLog(app, index) {
+    const f = app.vault.getAbstractFileByPath(reviewlog.logPath(index.path));
+    return f instanceof TFile ? reviewlog.parse(await app.vault.read(f)) : [];
+}
+
+// Each review log's writes, in turn: two comments resolved together
+// cannot both make the log, or append to it at once.
+const logWrites = new Map();
+
+/**
+ * Add `entries` to the review log of the manuscript whose index is
+ * `index`, made if there is none.
+ */
+function appendReviewLog(app, index, entries) {
+    const path = reviewlog.logPath(index.path);
+    const text = entries.map(reviewlog.line).join('');
+    const run = async () => {
+        const f = app.vault.getAbstractFileByPath(path);
+        if (f instanceof TFile) await app.vault.append(f, text);
+        else await app.vault.create(path, text);
+    };
+    const next = (logWrites.get(path) || Promise.resolve()).then(run, run);
+    logWrites.set(path, next);
+    return next;
+}
+
 module.exports = class DendritePlugin extends Plugin {
     onunload() {
         this.stopReviewApi();
@@ -10934,10 +10998,12 @@ module.exports = class DendritePlugin extends Plugin {
      * any name the writer signs with; with `awaiting`, only those that
      * wait for that name's answer (review.awaits); and
      * with `card`, only that card's and those of the cards under it.
+     * With `resolved`, also those dealt with, from the review log, each
+     * as it was when it was: what a reviewer should not raise again.
      * Read only, for a reviewer to read what was answered.
      */
     async threadsFor(prefix, { author = null, awaiting = null,
-                               card = null } = {}) {
+                               card = null, resolved = false } = {}) {
         const file = this.indexWithPrefix(prefix);
         if (!file) {
             return { status: 404, json: {
@@ -10955,7 +11021,11 @@ module.exports = class DendritePlugin extends Plugin {
         const threads = [];
         // The text of each card with a thread, for reading it in context.
         const cards = {};
-        for (const n of top ? [top, ...core.allNodes(top)] : all) {
+        // Keys of every comment open now, so one resolved and brought
+        // back, as by an undo, is not also given as resolved.
+        const open = new Set();
+        const within = top ? [top, ...core.allNodes(top)] : all;
+        for (const n of within) {
             const f = app.metadataCache.getFirstLinkpathDest(n.id, file.path);
             if (!(f instanceof TFile)) continue;
             const body = core.splitFrontmatter(
@@ -10963,6 +11033,7 @@ module.exports = class DendritePlugin extends Plugin {
             const items = review.reviewItems(body);
             const ids = review.threadIds(items);
             for (const [k, it] of items.entries()) {
+                for (const key of review.reviewKeys(it)) open.add(key);
                 if (author && !who.has(it.author)) continue;
                 const replies = it.replies || [];
                 if (awaiting && !review.awaits(it, awaiting,
@@ -10977,8 +11048,16 @@ module.exports = class DendritePlugin extends Plugin {
                     replies });
             }
         }
-        return { status: 200, json: { manuscript: prefixOf(app, file),
-                                      threads, cards } };
+        const json = { manuscript: prefixOf(app, file), threads, cards };
+        if (resolved) {
+            const ids = new Set(within.map((n) => n.id));
+            json.resolved = reviewlog.settled(
+                await readReviewLog(app, file), open)
+                .filter((e) => (!card || ids.has(e.card)) &&
+                    (!author || who.has(e.author)))
+                .map(({ keys, ...e }) => e);
+        }
+        return { status: 200, json };
     }
 
     /** The names the writer signs with: the reply name, and Me. */
@@ -11006,10 +11085,10 @@ module.exports = class DendritePlugin extends Plugin {
                        `${data.manuscript}`);
         }
         const said = String(data.text || '').trim();
-        if (data.seen && said) {
+        if (data.seen && (said || data.resolve)) {
             return bad(400, 'either seen, with no text, or a reply');
         }
-        if (!data.seen && !said) return bad(400, 'no text');
+        if (!data.seen && !data.resolve && !said) return bad(400, 'no text');
         if (said.length > MAX_REPLY) {
             return bad(400, `${said.length} characters; a reply is up to ` +
                        `${MAX_REPLY}. Say only what the writer needs ` +
@@ -11021,6 +11100,7 @@ module.exports = class DendritePlugin extends Plugin {
                             'Claude',
                         date: localDay(), text: data.seen ? '' : said,
                         replace: !!data.replace };
+        if (data.resolve) reply.resolve = true;
         const view = this.openViews().find((v) => v.file === file);
         const done = [];
         const missing = [];
@@ -11035,13 +11115,21 @@ module.exports = class DendritePlugin extends Plugin {
             if (n === REFUSED) {
                 refused.push({ id, reason: 'someone has replied since; ' +
                     'send a new reply instead' });
+            } else if (n === NOT_COMMENT) {
+                refused.push({ id, reason: 'a suggested change is applied ' +
+                    'or dismissed, not resolved' });
             } else (n < 0 ? missing : done).push(id);
         }
         if (!done.length && !refused.length) {
             return bad(404, `no open comment ${missing.join(', ')}; it may ` +
                        'have been resolved or changed');
         }
-        if (!data.seen && done.length) {
+        if (data.resolve && done.length) {
+            new Notice(`Dendrite: ${reply.author} suggests resolving ` +
+                       `${done.length} comment${done.length === 1 ? '' :
+                           's'}, on ` +
+                       `${done.map((x) => x.split('/')[0]).join(', ')}.`);
+        } else if (!data.seen && done.length) {
             new Notice(`Dendrite: ${reply.author} replied on ` +
                        `${done.map((x) => x.split('/')[0]).join(', ')}.`);
         }
@@ -11116,8 +11204,9 @@ module.exports = class DendritePlugin extends Plugin {
             const { fm, body } = core.splitFrontmatter(data);
             n = review.threadIds(review.reviewItems(body)).indexOf(tid);
             const out = n < 0 ? null : withReply(body, n, reply);
-            if (n >= 0 && out === null) n = REFUSED;
-            return out === null ? data : fm + out;
+            if (n >= 0 && out === false) n = NOT_COMMENT;
+            else if (n >= 0 && out === null) n = REFUSED;
+            return typeof out !== 'string' ? data : fm + out;
         });
         return n;
     }
