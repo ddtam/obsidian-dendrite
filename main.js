@@ -2798,6 +2798,44 @@ var require_review = __commonJS({
         text: s.replace
       }]) };
     }
+    function findSuggestion(md, sel) {
+      const author = clean(sel.author) || "Claude";
+      const quote = String(sel.quote || "");
+      const was = sel.was === void 0 || sel.was === null ? null : flat(String(sel.was));
+      let list = reviewItems(md).map((x2, n2) => ({ x: x2, n: n2 })).filter(({ x: x2 }) => x2.kind === "suggest" && x2.author === author && flat(x2.passage || "") === flat(quote) && (was === null || flat(x2.text || "") === was));
+      if (list.length > 1 && (sel.before || sel.after)) {
+        const at = locate({
+          kind: "suggest",
+          quote,
+          before: sel.before,
+          after: sel.after
+        }, [{ id: "card", text: md }]);
+        if (at && at.how === "exact") {
+          list = list.filter(({ x: x2 }) => x2.start <= at.start && at.end <= x2.end);
+        }
+      }
+      if (!list.length) {
+        return { reason: `no pending suggestion by ${author} on "${quote}"` };
+      }
+      if (list.length > 1) {
+        return { reason: `${list.length} pending suggestions by ${author} on "${quote}"; send was, what it suggests, or before or after` };
+      }
+      const { x, n } = list[0];
+      if ((x.replies || []).length) {
+        return { reason: "someone has replied to it since; reply instead" };
+      }
+      return { n, it: x };
+    }
+    function reviseSuggestion(md, n, text, date) {
+      const it = reviewItems(md)[n];
+      if (!it || it.kind !== "suggest") return md;
+      const seg = md.slice(it.start, it.end);
+      const h = seg.search(/\[!suggest\]/);
+      const close = h < 0 ? -1 : seg.indexOf("%%", h);
+      if (close < 0) return md;
+      const head = `[!suggest] ${clean(it.author) || "Reviewer"}, ${date}: ` + clean(text, true);
+      return md.slice(0, it.start + h) + head + md.slice(it.start + close);
+    }
     var ROW = /^\[row (above|below)\]\s*/;
     function rowSuggestion(it) {
       if (!it || it.kind !== "suggest" || it.passage) return null;
@@ -3582,6 +3620,8 @@ var require_review = __commonJS({
       fillLinked,
       rowSuggestion,
       suggestionText,
+      findSuggestion,
+      reviseSuggestion,
       threadIds,
       forReviewers,
       replyRow,
@@ -6280,7 +6320,8 @@ var require_reviewapi = __commonJS({
       const take = {
         "/dendrite/review": opts.submit,
         "/dendrite/reply": opts.reply,
-        "/dendrite/suggest": opts.suggest
+        "/dendrite/suggest": opts.suggest,
+        "/dendrite/revise": opts.revise
       }[url.pathname];
       if (take && req.method === "POST") {
         if (!/^application\/json\b/.test(req.headers["content-type"] || "")) {
@@ -11504,7 +11545,7 @@ var DendriteView = class extends ItemView {
     if (this.inbox.length) {
       m.addSeparator();
       for (const entry of this.inbox) {
-        m.addItem((i) => i.setTitle(`${entry.title}: ${entry.items.length} from ` + reviewAuthors(entry.items)).onClick(() => this.openInbox(entry)));
+        m.addItem((i) => i.setTitle(`${entry.title}: ${entry.items.length} ${entry.kind === "revise" ? "changes " : ""}from ` + reviewAuthors(entry.items)).onClick(() => this.openInbox(entry)));
       }
     }
     if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
@@ -11553,7 +11594,73 @@ var DendriteView = class extends ItemView {
   }
   /** Show a submitted review's comments to add, or ignore it. */
   async openInbox(entry) {
+    if (entry.kind === "revise") {
+      const rows = [];
+      for (const item of entry.items) {
+        const f = this.cardFile(item.card);
+        const got = !f ? { reason: `no card ${item.card}` } : item.current === void 0 ? { reason: "not found when it was sent" } : review.findSuggestion(
+          core.splitFrontmatter(
+            await this.app.vault.read(f)
+          ).body,
+          { ...item, was: item.current }
+        );
+        rows.push({
+          item,
+          it: got.it || null,
+          reason: got.reason,
+          use: !got.reason
+        });
+      }
+      const modal = new ReviseModal(this, entry, rows);
+      modal.open();
+      return modal;
+    }
     return this.reviewModal(entry.title, entry.items, entry);
+  }
+  /**
+   * Accepted changes to suggestions, `rows` as ReviseModal has them:
+   * each suggestion found again and its text changed or taken out, a
+   * card at a time, one undo step each, and each change logged.
+   */
+  async applyRevisions(rows) {
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    const logged = [];
+    const byCard = /* @__PURE__ */ new Map();
+    for (const row of rows) {
+      if (!byCard.has(row.item.card)) byCard.set(row.item.card, []);
+      byCard.get(row.item.card).push(row.item);
+    }
+    for (const [id, items] of byCard) {
+      const f = this.cardFile(id);
+      if (!f) continue;
+      let md = core.splitFrontmatter(await this.app.vault.read(f)).body;
+      const was = md;
+      for (const item of items) {
+        const got = review.findSuggestion(
+          md,
+          { ...item, was: item.current }
+        );
+        if (got.reason) continue;
+        const e = reviewlog.entry(got.it, item.withdraw ? "withdraw" : "revise", id, at);
+        if (item.withdraw) {
+          md = review.removeItem(md, got.n);
+        } else {
+          md = review.reviseSuggestion(
+            md,
+            got.n,
+            item.replace,
+            localDay()
+          );
+          e.to = item.replace;
+        }
+        logged.push(e);
+      }
+      if (md !== was) await this.reviewAction(id, 0, "text", md);
+    }
+    if (logged.length && this.file) {
+      await appendReviewLog(this.app, this.file, logged);
+    }
+    return logged.length;
   }
   /** A submitted review added or ignored: not offered again. */
   async takeInbox(entry, state) {
@@ -12396,7 +12503,7 @@ var DendriteView = class extends ItemView {
       for (const entry of this.inbox) {
         const s = this.statusEl.createSpan({
           cls: "dendrite-status-chip is-revise",
-          text: `review: ${entry.items.length} from ` + reviewAuthors(entry.items)
+          text: `${entry.kind === "revise" ? "revisions" : "review"}: ${entry.items.length} from ` + reviewAuthors(entry.items)
         });
         s.setAttr("aria-label", `${entry.title}, submitted ${entry.received.slice(0, 10)}. Click to see its comments and choose which to add; nothing is written until you do`);
         s.onclick = () => this.openInbox(entry);
@@ -15070,6 +15177,76 @@ var SuggestModal = class extends VersionModal {
     row.createEl("button", { text: "Cancel" }).onclick = () => this.close();
   }
 };
+var ReviseModal = class extends Modal {
+  constructor(view, entry, rows) {
+    super(view.app);
+    this.view = view;
+    this.entry = entry;
+    this.rows = rows;
+  }
+  onOpen() {
+    const { contentEl, view, rows, entry } = this;
+    this.modalEl.addClass("dendrite-wide");
+    this.titleEl.setText(entry.title);
+    contentEl.createEl("p", { text: `${reviewAuthors(entry.items)} asks to change ${rows.length} of its pending suggestion${rows.length === 1 ? "" : "s"}. Nothing is written until you accept; each card changed is one step for Ctrl+Z on the board.` });
+    const list = contentEl.createDiv({ cls: "dendrite-review-rows" });
+    const count = () => rows.filter((x) => x.use).length;
+    let go = null;
+    for (const row of rows) {
+      const { item } = row;
+      const c = view.colourOf()(item.author);
+      const el = list.createDiv({ cls: "dendrite-review-row is-suggest" + (c ? ` is-c-${c}` : "") });
+      const box = el.createEl("input", { type: "checkbox" });
+      box.checked = row.use;
+      box.disabled = !!row.reason;
+      box.onchange = () => {
+        row.use = box.checked;
+        go.setText(`Accept ${count()}`);
+      };
+      const main = el.createDiv({ cls: "dendrite-review-main" });
+      const meta = main.createDiv({ cls: "dendrite-review-meta" });
+      review.shownAs(meta.createEl("b"), item.author, view.nameOf());
+      meta.appendText(` \xB7 card ${core.shortId(item.card)} \xB7 ` + (item.withdraw ? "withdraw" : "revise"));
+      if (item.quote) {
+        main.createDiv({
+          cls: "dendrite-review-quote",
+          text: `\u201C${item.quote}\u201D`
+        });
+      }
+      const now = row.it ? review.suggestionText(row.it) : item.current !== void 0 ? `Suggests: ${item.current}` : "";
+      main.createDiv({
+        cls: "dendrite-review-text",
+        text: item.withdraw ? `Withdraw: ${now}` : `${now} \u2192 ${item.replace.trim() || "(delete the passage)"}`
+      });
+      if (row.reason) {
+        main.createDiv({
+          cls: "dendrite-review-where is-missing",
+          text: `Cannot be changed: ${row.reason}.`
+        });
+      }
+    }
+    const buttons = contentEl.createDiv(
+      { cls: "dendrite-version-choices" }
+    );
+    go = buttons.createEl("button", {
+      cls: "mod-cta",
+      text: `Accept ${count()}`
+    });
+    go.onclick = async () => {
+      this.close();
+      await view.applyRevisions(rows.filter((x) => x.use));
+      await view.takeInbox(entry, "added");
+    };
+    buttons.createEl("button", { text: "Ignore these" }).onclick = async () => {
+      this.close();
+      await view.takeInbox(entry, "ignored");
+    };
+    buttons.createEl("button", { text: "Cancel" }).onclick = () => this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var ReviewImportModal = class extends Modal {
   constructor(view, name, rows, inbox = null) {
     super(view.app);
@@ -16289,7 +16466,8 @@ module.exports = class DendritePlugin extends Plugin {
       status: (id) => this.reviewStatus(id),
       threads: (m, opts) => this.threadsFor(m, opts),
       reply: (d) => this.replyTo(d),
-      suggest: (d) => this.suggestTo(d)
+      suggest: (d) => this.suggestTo(d),
+      revise: (d) => this.submitRevision(d)
     });
     try {
       try {
@@ -16321,6 +16499,7 @@ module.exports = class DendritePlugin extends Plugin {
       threads: `${base}/threads`,
       reply: `${base}/reply`,
       suggest: `${base}/suggest`,
+      revise: `${base}/revise`,
       key: s.reviewApiKey,
       vault: this.app.vault.getName(),
       pid: process.pid
@@ -16531,6 +16710,105 @@ module.exports = class DendritePlugin extends Plugin {
       manuscript: current,
       found,
       already,
+      missing
+    } };
+  }
+  /**
+   * Queue changes a reviewer asks to its own pending suggestions, for
+   * the manuscript's board, where each is accepted or not; nothing is
+   * written to a card here. `data`: { manuscript, title?, author?,
+   * items: [{ card, quote, was?, before?, after?, replace } or { card,
+   * quote, ..., withdraw: true }] }. Answers as submitReview does,
+   * each item not found among `missing` with its reason.
+   */
+  async submitRevision(data) {
+    const bad = (status, error) => ({ status, json: { error } });
+    if (!data || typeof data !== "object" || !Array.isArray(data.items) || !data.items.length) {
+      return bad(400, "send { manuscript, items: [{ card, quote, replace } or { card, quote, withdraw: true }] }");
+    }
+    const prefix = String(data.manuscript || "").trim();
+    const file = prefix && this.indexWithPrefix(prefix);
+    if (!file) return bad(404, `no manuscript has the prefix ${prefix}`);
+    const current = prefixOf(this.app, file);
+    const root = core.parseIndex(core.splitFrontmatter(
+      await this.app.vault.cachedRead(file)
+    ).body).root;
+    const ids = core.allNodes(root).map((n) => n.id);
+    const items = [];
+    const missing = [];
+    let found = 0;
+    for (const [k, x] of data.items.entries()) {
+      const n = k + 1;
+      const id = x && cardNamed(ids, String(x.card || ""));
+      const f = id && this.app.metadataCache.getFirstLinkpathDest(
+        id,
+        file.path
+      );
+      const item = {
+        card: id || String(x && x.card || ""),
+        quote: String(x && x.quote || ""),
+        was: x && x.was !== void 0 ? String(x.was) : null,
+        before: x && x.before,
+        after: x && x.after,
+        withdraw: !!(x && x.withdraw),
+        replace: x && typeof x.replace === "string" ? x.replace : null,
+        author: String(x && x.author || data.author || "").trim() || "Claude"
+      };
+      items.push(item);
+      let reason = null;
+      if (!(f instanceof TFile)) reason = `no card ${item.card}`;
+      else if (!item.withdraw && item.replace === null) {
+        reason = "no replace: the new text, or withdraw: true";
+      } else {
+        const got = review.findSuggestion(core.splitFrontmatter(
+          await this.app.vault.read(f)
+        ).body, item);
+        if (got.reason) reason = got.reason;
+        else item.current = got.it.text;
+      }
+      if (reason) {
+        missing.push({
+          n,
+          card: item.card,
+          quote: item.quote,
+          reason
+        });
+      } else found++;
+    }
+    const title = String(data.title || "").trim() || "Changes to suggestions";
+    const key = String(require_docx().crc32(Buffer.from(
+      JSON.stringify([current, "revise", items]),
+      "utf8"
+    )));
+    const queue = this.settings.reviewQueue = this.settings.reviewQueue || [];
+    let entry = queue.find((r) => r.key === key && r.state === "pending");
+    if (!entry && found) {
+      entry = {
+        id: Math.random().toString(16).slice(2, 10),
+        key,
+        kind: "revise",
+        received: (/* @__PURE__ */ new Date()).toISOString(),
+        manuscript: current,
+        title,
+        items,
+        state: "pending"
+      };
+      queue.push(entry);
+      await this.saveSettings();
+      stickyNotice(
+        `review:${file.path}:${entry.id}`,
+        `Dendrite: ${reviewAuthors(items)} asks to change ${found} of its suggestions in ${file.basename}. Click "revisions" on its board's bar to choose which to accept.`
+      );
+      for (const v of this.openViews()) v.refreshInbox();
+    }
+    if (!entry) {
+      return { status: 404, json: { error: "none of these is a pending suggestion that can be changed", missing } };
+    }
+    return { status: 202, json: {
+      id: entry.id,
+      state: entry.state,
+      manuscript: current,
+      found,
       missing
     } };
   }

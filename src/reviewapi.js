@@ -39,6 +39,14 @@
 //        a table row beside the row named by its first cell or whole
 //        text, applied as a line of its own
 //
+//   POST /dendrite/revise        { manuscript, title?, items: [{ card,
+//        quote, was?, before?, after?, replace } or { card, quote, ...,
+//        withdraw: true }] }
+//        changes to the sender's own pending suggestions, queued as a
+//        review is, each accepted or not on the board; one replied to
+//        is refused. Answers { id, state, found, missing }, and
+//        GET /dendrite/review/<id> its state
+//
 // Every request carries `Authorization: Bearer <key>`. A request with an
 // Origin header comes from a web page and is refused, and no CORS header
 // is ever sent, so a page cannot reach it through the browser.
@@ -79,7 +87,8 @@ async function handle(opts, req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
     const take = { '/dendrite/review': opts.submit,
                    '/dendrite/reply': opts.reply,
-                   '/dendrite/suggest': opts.suggest }[url.pathname];
+                   '/dendrite/suggest': opts.suggest,
+                   '/dendrite/revise': opts.revise }[url.pathname];
     if (take && req.method === 'POST') {
         if (!/^application\/json\b/.test(req.headers['content-type'] ||
                                          '')) {

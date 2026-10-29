@@ -1460,6 +1460,61 @@ function suggestInto(md, id, s) {
         end: at.end, author, date: s.date, text: s.replace }]) };
 }
 
+/**
+ * A reviewer's own pending suggestion in a card's markdown, `sel` {
+ * quote, the passage it is on; was?, what it suggests; before?, after?;
+ * author }: { n, it }, or { reason } there is none to change. One that
+ * anyone has replied to is not changed, since the reply is about it.
+ */
+function findSuggestion(md, sel) {
+    const author = clean(sel.author) || 'Claude';
+    const quote = String(sel.quote || '');
+    const was = sel.was === undefined || sel.was === null ? null :
+        flat(String(sel.was));
+    let list = reviewItems(md).map((x, n) => ({ x, n })).filter(({ x }) =>
+        x.kind === 'suggest' && x.author === author &&
+        flat(x.passage || '') === flat(quote) &&
+        (was === null || flat(x.text || '') === was));
+    if (list.length > 1 && (sel.before || sel.after)) {
+        const at = locate({ kind: 'suggest', quote, before: sel.before,
+                            after: sel.after }, [{ id: 'card', text: md }]);
+        if (at && at.how === 'exact') {
+            list = list.filter(({ x }) => x.start <= at.start &&
+                at.end <= x.end);
+        }
+    }
+    if (!list.length) {
+        return { reason: `no pending suggestion by ${author} on ` +
+                         `"${quote}"` };
+    }
+    if (list.length > 1) {
+        return { reason: `${list.length} pending suggestions by ${author} ` +
+                         `on "${quote}"; send was, what it suggests, or ` +
+                         'before or after' };
+    }
+    const { x, n } = list[0];
+    if ((x.replies || []).length) {
+        return { reason: 'someone has replied to it since; reply instead' };
+    }
+    return { n, it: x };
+}
+
+/**
+ * A card's markdown with its `n`th review item, a suggestion, now
+ * suggesting `text`, dated `date`; its passage and place as they were.
+ */
+function reviseSuggestion(md, n, text, date) {
+    const it = reviewItems(md)[n];
+    if (!it || it.kind !== 'suggest') return md;
+    const seg = md.slice(it.start, it.end);
+    const h = seg.search(/\[!suggest\]/);
+    const close = h < 0 ? -1 : seg.indexOf('%%', h);
+    if (close < 0) return md;
+    const head = `[!suggest] ${clean(it.author) || 'Reviewer'}, ${date}: ` +
+        clean(text, true);
+    return md.slice(0, it.start + h) + head + md.slice(it.start + close);
+}
+
 // A suggested table row: a suggestion with no passage at the end of the
 // row it goes beside, its cells after this, between escaped pipes, so
 // the table stays whole until it is applied as a line of its own.
@@ -2486,6 +2541,7 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    addReply, removeReply, replyBox, threadId,
                    readyToResolve, draftKey, restoreDraft, foldable,
                    fillLinked, rowSuggestion, suggestionText,
+                   findSuggestion, reviseSuggestion,
                    threadIds, forReviewers, replyRow,
                    addressed, awaits, replaceReplies, fillAddressed,
                    suggestInto,

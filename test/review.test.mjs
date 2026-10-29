@@ -1571,3 +1571,32 @@ test('a new table row is suggested after or before a row named by its ' +
     assert.equal(r.suggestInto(out.md, 'G-x', s).reason,
                  'already suggested');
 });
+
+test('a reviewer\'s own pending suggestion is found by its passage, and ' +
+     'its text changed in place or the suggestion taken out; never one ' +
+     'replied to or another reviewer\'s', () => {
+    const md = 'Storage of ==6.0==%%[!suggest] Claude, 2026-10-28: ' +
+        '18.0%% TB and ==54.5==%%[!suggest] Claude, 2026-10-28: 83.1%%' +
+        '%%[!reply] Me, 2026-10-29: Why?%% TB, ==55==%%[!suggest] Aly, ' +
+        '2026-10-28: 84%% in all.';
+    const f = r.findSuggestion(md, { quote: '6.0', author: 'Claude' });
+    assert.equal(f.n, 0);
+    const out = r.reviseSuggestion(md, f.n, '17.1', '2026-10-29');
+    assert.equal(out, md.replace('Claude, 2026-10-28: 18.0',
+                                 'Claude, 2026-10-29: 17.1'));
+    assert.equal(r.removeItem(md, f.n), md.replace(
+        '==6.0==%%[!suggest] Claude, 2026-10-28: 18.0%%', '6.0'));
+    assert.match(r.findSuggestion(md, { quote: '54.5', author: 'Claude' })
+        .reason, /replied to/);
+    assert.match(r.findSuggestion(md, { quote: '55', author: 'Claude' })
+        .reason, /no pending suggestion/);
+    assert.match(r.findSuggestion(md, { quote: '9.9', author: 'Claude' })
+        .reason, /no pending suggestion/);
+    // By what it suggests, where the passage alone does not say which.
+    const two = 'A ==x==%%[!suggest] Claude, 2026-10-28: y%% and ==x==' +
+        '%%[!suggest] Claude, 2026-10-28: z%%.';
+    assert.match(r.findSuggestion(two, { quote: 'x', author: 'Claude' })
+        .reason, /2 pending/);
+    assert.equal(r.findSuggestion(two, { quote: 'x', was: 'z',
+                                         author: 'Claude' }).n, 1);
+});

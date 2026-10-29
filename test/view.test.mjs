@@ -6375,3 +6375,59 @@ test('a link to a card in a comment, by its short id, is a link on the ' +
     await tick(10);
     assert.equal(view.active, 'G-bbbbb');
 });
+
+/** Today where the tests run, as Dendrite dates a note. */
+function localToday(d = new Date()) {
+    const two = (x) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`;
+}
+
+test('a revision or withdrawal of Claude\'s own suggestions waits in the ' +
+     'inbox, changes nothing until accepted, and is logged when it is',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'Storage of ==6.0==%%[!suggest] Claude, 2026-10-28: 18.0%% ' +
+        'TB and ==54.5==%%[!suggest] Claude, 2026-10-28: 83.1%% TB.';
+    const B = 'Total ==55==%%[!suggest] Claude, 2026-10-28: 84%%%%' +
+        '[!reply] Me, 2026-10-29: No.%% TB.';
+    const { app, view, text, read } = await open('---\ndendrite_prefix: ' +
+        'G\n---\n- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': A, 'G-bbbbb': B });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.saveSettings = async () => {};
+    p.openViews = () => [view];
+    view.plugin.reviewQueue = () => p.reviewQueue();
+    view.plugin.settleReview = (id, s) => p.settleReview(id, s);
+    const out = await p.submitRevision({ manuscript: 'G', items: [
+        { card: 'aaaaa', quote: '6.0', replace: '17.1' },
+        { card: 'aaaaa', quote: '54.5', withdraw: true },
+        { card: 'bbbbb', quote: '55', replace: '83' },
+        { card: 'aaaaa', quote: '9.9', replace: '1' }] });
+    assert.equal(out.status, 202);
+    assert.equal(out.json.found, 2);
+    assert.deepEqual(out.json.missing.map((m) => m.n), [3, 4]);
+    assert.match(out.json.missing[0].reason, /replied to/);
+    assert.equal(text(cardPath('G-aaaaa')), A, 'nothing written yet');
+    const entry = p.reviewQueue()[0];
+    assert.equal(entry.kind, 'revise');
+    assert.equal((await p.reviewStatus(entry.id)).json.state, 'pending');
+    view.refreshInbox();
+    const modal = await view.openInbox(entry);
+    const boxes = [...modal.contentEl.querySelectorAll(
+        'input[type=checkbox]')];
+    assert.deepEqual(boxes.map((b) => [b.checked, b.disabled]),
+        [[true, false], [true, false], [false, true], [false, true]]);
+    assert.match(modal.contentEl.textContent, /18\.0.*→.*17\.1/);
+    assert.match(modal.contentEl.textContent, /Withdraw/);
+    await modal.contentEl.querySelector('.mod-cta').onclick();
+    await tick(10);
+    assert.equal(text(cardPath('G-aaaaa')), 'Storage of ==6.0==' +
+        `%%[!suggest] Claude, ${localToday()}: 17.1%% TB and 54.5 TB.`);
+    assert.equal(text(cardPath('G-bbbbb')), B, 'the one replied to stays');
+    const lines = read(LOG).trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(lines.map((e) => [e.action, e.text, e.to]),
+        [['revise', '18.0', '17.1'], ['withdraw', '83.1', undefined]]);
+    assert.equal((await p.reviewStatus(entry.id)).json.state, 'added');
+});
