@@ -3129,7 +3129,13 @@ var require_review = __commonJS({
       }
       if (readyToResolve(it)) {
         const r = it.replies[it.replies.length - 1];
-        return [["resolve", "Resolve", `${r.author || "Claude"} thinks this is done. Dealt with: taken out, and not brought back by a pull`, true]];
+        const who = r.author || "Claude";
+        return [[
+          "resolve",
+          "Resolve",
+          `${who} thinks this is done. Dealt with: taken out, and not brought back by a pull`,
+          who
+        ]];
       }
       return [["resolve", "Resolve", "Dealt with: taken out, and not brought back by a pull"]];
     }
@@ -3301,9 +3307,10 @@ var require_review = __commonJS({
           const bar = doc.createElement("span");
           bar.className = "dendrite-review-acts";
           main.prepend(bar);
-          for (const [what, label, tip, lit] of buttons) {
+          for (const [what, label, tip, by] of buttons) {
             const btn = doc.createElement("button");
-            btn.className = "dendrite-review-btn" + (lit ? " is-suggested" : "");
+            const bc = by && colourOf && colourOf(by);
+            btn.className = "dendrite-review-btn" + (by ? " is-suggested" : "") + (bc ? ` is-c-${bc}` : "");
             btn.textContent = label;
             if (tip) btn.title = tip;
             btn.addEventListener("click", (e) => {
@@ -13796,9 +13803,11 @@ var DendritePreview = class extends ItemView {
           )
         } : null);
       });
-      for (const [what, label, tip, lit] of review.commentActions(it)) {
+      for (const [what, label, tip, by] of review.commentActions(it)) {
         const btn = row.createEl("button", { text: label });
-        if (lit) btn.addClass("is-suggested");
+        const bc = by && this.colours && this.colours.get(by);
+        if (by) btn.addClass("is-suggested");
+        if (bc) btn.addClass(`is-c-${bc}`);
         if (tip) btn.title = tip;
         btn.onclick = async (e) => {
           if (e && e.stopPropagation) e.stopPropagation();

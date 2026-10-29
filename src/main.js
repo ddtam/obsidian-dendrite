@@ -8196,10 +8196,12 @@ class DendritePreview extends ItemView {
                                                                 who, to),
                 } : null);
             });
-            for (const [what, label, tip, lit] of
+            for (const [what, label, tip, by] of
                 review.commentActions(it)) {
                 const btn = row.createEl('button', { text: label });
-                if (lit) btn.addClass('is-suggested');
+                const bc = by && this.colours && this.colours.get(by);
+                if (by) btn.addClass('is-suggested');
+                if (bc) btn.addClass(`is-c-${bc}`);
                 if (tip) btn.title = tip;
                 btn.onclick = async (e) => {
                     if (e && e.stopPropagation) e.stopPropagation();

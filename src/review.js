@@ -1950,7 +1950,9 @@ function assignColours(map, names) {
 }
 
 /**
- * A review item's buttons, as [action, label, tooltip]: a suggestion
+ * A review item's buttons, as [action, label, tooltip, by?]: `by` the
+ * name of whoever suggests resolving the comment, lit in their colour; a
+ * suggestion
  * applied or dismissed; a comment resolved, dealt with and remembered so
  * a pull does not bring it back.
  */
@@ -1960,9 +1962,10 @@ function commentActions(it) {
     }
     if (readyToResolve(it)) {
         const r = it.replies[it.replies.length - 1];
-        return [['resolve', 'Resolve', `${r.author || 'Claude'} thinks ` +
-                 'this is done. Dealt with: taken out, and not brought ' +
-                 'back by a pull', true]];
+        const who = r.author || 'Claude';
+        return [['resolve', 'Resolve', `${who} thinks this is done. ` +
+                 'Dealt with: taken out, and not brought back by a pull',
+                 who]];
     }
     return [['resolve', 'Resolve', 'Dealt with: taken out, and not ' +
              'brought back by a pull']];
@@ -2170,10 +2173,11 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
             const bar = doc.createElement('span');
             bar.className = 'dendrite-review-acts';
             main.prepend(bar);
-            for (const [what, label, tip, lit] of buttons) {
+            for (const [what, label, tip, by] of buttons) {
                 const btn = doc.createElement('button');
+                const bc = by && colourOf && colourOf(by);
                 btn.className = 'dendrite-review-btn' +
-                    (lit ? ' is-suggested' : '');
+                    (by ? ' is-suggested' : '') + (bc ? ` is-c-${bc}` : '');
                 btn.textContent = label;
                 if (tip) btn.title = tip;
                 btn.addEventListener('click', (e) => {

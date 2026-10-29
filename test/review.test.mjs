@@ -1366,7 +1366,7 @@ test('a reply suggesting the writer resolve a comment: written with its ' +
     assert.ok(r.readyToResolve(it));
     const [act] = r.commentActions(it);
     assert.equal(act[0], 'resolve');
-    assert.equal(act[3], true, 'lit');
+    assert.equal(act[3], 'Claude', 'lit, by whom');
     assert.match(act[2], /Claude thinks this is done/);
     const { JSDOM } = require('jsdom');
     const doc = new JSDOM('<div></div>').window.document;

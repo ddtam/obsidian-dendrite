@@ -1575,16 +1575,24 @@ button.dendrite-review-btn {
 button.dendrite-review-btn:hover {
     color: var(--text-normal);
 }
-/* Resolve, when the last reply suggests it: the next step, in accent. */
+/* Resolve, when the last reply suggests it: the next step, in the
+   colour of whoever suggests it, or the text colour for one with none. */
 button.dendrite-review-btn.is-suggested,
 .dendrite-pbubble-btns button.is-suggested {
-    color: var(--text-on-accent);
-    background: var(--interactive-accent);
+    --dendrite-lit: var(--text-normal);
+    color: var(--dendrite-lit);
+    border: 1px solid var(--dendrite-lit);
+    background: none;
     border-radius: var(--radius-s);
+    font-weight: var(--font-semibold);
+}
+button.dendrite-review-btn.is-suggested[class*="is-c-"],
+.dendrite-pbubble-btns button.is-suggested[class*="is-c-"] {
+    --dendrite-lit: var(--dendrite-review);
 }
 button.dendrite-review-btn.is-suggested:hover,
 .dendrite-pbubble-btns button.is-suggested:hover {
-    background: var(--interactive-accent-hover);
+    background: color-mix(in srgb, var(--dendrite-lit) 15%, transparent);
 }
 .dendrite-review-reply.is-resolve > .dendrite-review-meta {
     font-style: italic;

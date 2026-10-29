@@ -6322,5 +6322,9 @@ test('Claude can suggest resolving a comment through the reply endpoint, ' +
     const btn = [...note.querySelectorAll('button')]
         .find((b) => b.textContent === 'Resolve');
     assert.ok(btn.classList.contains('is-suggested'), 'Resolve lit');
-    assert.ok(note.querySelector('.dendrite-review-reply.is-resolve'));
+    const row = note.querySelector('.dendrite-review-reply.is-resolve');
+    const colour = (el) => [...el.classList].find((c) =>
+        c.startsWith('is-c-'));
+    assert.ok(colour(row), 'Claude has a colour here');
+    assert.equal(colour(btn), colour(row), 'lit in Claude\'s colour');
 });
