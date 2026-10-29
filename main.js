@@ -3128,8 +3128,15 @@ var require_review = __commonJS({
         author: x.author,
         kind: x.kind
       }));
-      const protect = [...hide, ...chips.map((c) => [c.from, c.to])].sort((a, b) => a[0] - b[0]);
-      return { hide, chips, marks, protect };
+      const rows = tableRowsIn(md).map((t) => [t.start, t.end]);
+      const out = ([a, b]) => !rows.some(([s, e]) => a <= e && b >= s);
+      const keep = {
+        hide: hide.filter(out),
+        chips: chips.filter((c) => out([c.from, c.to])),
+        marks: marks.filter((m) => out([m.from, m.to]))
+      };
+      const protect = [...keep.hide, ...keep.chips.map((c) => [c.from, c.to])].sort((a, b) => a[0] - b[0]);
+      return { ...keep, protect };
     }
     function passagesLost(before, after) {
       const key = (x) => `${x.kind}\0${x.author}\0${x.date}\0` + x.text;

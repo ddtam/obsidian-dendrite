@@ -1891,9 +1891,20 @@ function editorRanges(md) {
     const marks = items.filter((x) => x.open).map((x) => ({
         from: x.open.end, to: x.noteStart, author: x.author,
         kind: x.kind }));
-    const protect = [...hide, ...chips.map((c) => [c.from, c.to])]
+    // A table's rows are left alone, though their comments are counted:
+    // Obsidian draws a table as one piece and edits each cell in an
+    // editor of its own, which draws and holds the cell's comments
+    // (editor.js). Drawn or held here as well, a cell's change copied
+    // back was split around the held pieces, doubling its comment, and
+    // the table was drawn again under the cell being typed in.
+    const rows = tableRowsIn(md).map((t) => [t.start, t.end]);
+    const out = ([a, b]) => !rows.some(([s, e]) => a <= e && b >= s);
+    const keep = { hide: hide.filter(out),
+                   chips: chips.filter((c) => out([c.from, c.to])),
+                   marks: marks.filter((m) => out([m.from, m.to])) };
+    const protect = [...keep.hide, ...keep.chips.map((c) => [c.from, c.to])]
         .sort((a, b) => a[0] - b[0]);
-    return { hide, chips, marks, protect };
+    return { ...keep, protect };
 }
 
 /**

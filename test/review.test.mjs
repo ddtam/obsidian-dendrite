@@ -1600,3 +1600,24 @@ test('a reviewer\'s own pending suggestion is found by its passage, and ' +
     assert.equal(r.findSuggestion(two, { quote: 'x', was: 'z',
                                          author: 'Claude' }).n, 1);
 });
+
+test('the card editor leaves a table\'s comments to the table: nothing ' +
+     'drawn or held in its rows, where Obsidian edits each cell in an ' +
+     'editor of its own, and numbering still counts them', () => {
+    const md = '%%{1%%Team%%}1 [!review] Aly, 2026-10-23: Why?%% sizes.\n\n' +
+        '| Team | %%{3%%Multiomic Evidence Model%%}3 [!review] Claude, ' +
+        '2026-10-29: Use one title.%% | Total |\n| --- | --: | --: |\n' +
+        '| Members | 3 | 3 |\n\nAfter ==it==%%[!review] Aly, 2026-10-23: ' +
+        'And?%%.';
+    const e = r.editorRanges(md);
+    const t0 = md.indexOf('| Team');
+    const t1 = md.indexOf('\n\nAfter');
+    const inside = ([a, b]) => a < t1 && b > t0;
+    assert.deepEqual(e.chips.map((c) => c.n), [1, 3],
+                     'the table\'s comment keeps its number, 2');
+    for (const [k, list] of Object.entries({ hide: e.hide,
+        protect: e.protect, chips: e.chips.map((c) => [c.from, c.to]),
+        marks: e.marks.map((m) => [m.from, m.to]) })) {
+        assert.ok(!list.some(inside), `no ${k} in the table`);
+    }
+});
