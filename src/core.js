@@ -530,19 +530,52 @@ function floatText(body, kind, label) {
 }
 
 /**
- * Links to table and figure cards given their number as the link's
- * text, `[[id|Table 1]]`; a link with its own text keeps it. A card's
- * short id alone, `[[14px4]]`, is taken as its full name.
+ * How a link to each card of `nodes` prints: `section 4.3.1`, the
+ * number of the section it falls under, or, where sections are not
+ * numbered, that section's heading in quotes; none for a card under no
+ * heading.
  */
-function floatRefs(text, floats) {
-    if (!floats.size || !text) return text;
+function sectionRefs(nodes, bodyOf, numbers) {
+    const out = new Map();
+    const walk = (list, under) => {
+        for (const n of list) {
+            const first = stripComments(bodyOf(n.id) || '').trim()
+                .split('\n')[0].trim();
+            const h = HEADING.exec(first);
+            let mine = under;
+            if (numbers && numbers.has(n.id)) {
+                mine = `section ${numbers.get(n.id).replace(/\.$/, '')}`;
+            } else if (!numbers && h) {
+                mine = `“${h[2].trim()}”`;
+            }
+            if (mine) out.set(n.id, mine);
+            walk(n.children, mine);
+        }
+    };
+    walk(nodes, null);
+    return out;
+}
+
+/**
+ * Links to cards given text a reader can follow: a table or figure its
+ * number, `[[id|Table 1]]`, any other card its section (sectionRefs). A
+ * link with its own text keeps it. A card's short id, `[[14px4]]`, is
+ * taken as its full name. Links to anything else are left alone.
+ */
+function floatRefs(text, floats, refs = new Map()) {
+    if ((!floats.size && !refs.size) || !text) return text;
+    const ids = new Set([...floats.keys(), ...refs.keys()]);
     const byShort = new Map();
-    for (const id of floats.keys()) byShort.set(shortId(id), id);
-    return text.replace(/\[\[([^\]|#]+)\]\]/g, (all, name) => {
-        const n = name.trim();
-        const id = floats.has(n) ? n : byShort.get(n);
-        return id ? `[[${id}|${floats.get(id)}]]` : all;
-    });
+    for (const id of ids) byShort.set(shortId(id), id);
+    return text.replace(/(?<!!)\[\[([^\]|#]+)(\|[^\]]*)?\]\]/g,
+        (all, name, alias) => {
+            const n = name.trim();
+            const id = ids.has(n) ? n : byShort.get(n);
+            if (!id) return all;
+            if (alias) return `[[${id}${alias}]]`;
+            const label = floats.get(id) || refs.get(id);
+            return label ? `[[${id}|${label}]]` : all;
+        });
 }
 
 /**
@@ -607,9 +640,10 @@ function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf,
         for (const c of node.children) walk(c, depth + 1);
     };
     for (const n of nodes) walk(n, 0);
+    const refs = sectionRefs(nodes, bodyOf, numbers);
     for (const s of segs) {
-        s.text = floatRefs(s.text, floats);
-        s.left = floatRefs(s.left, floats);
+        s.text = floatRefs(s.text, floats, refs);
+        s.left = floatRefs(s.left, floats, refs);
     }
     return segs;
 }

@@ -500,6 +500,24 @@ function cardRef(view, doc, id, label, go) {
     return a;
 }
 
+/**
+ * Obsidian's page preview for the links in a card's text inside `el`, as
+ * a note's own links have it; a link to a card made by cardRef has its
+ * own.
+ */
+function hoverLinks(view, el) {
+    view.registerDomEvent(el, 'mouseover', (e) => {
+        const a = e.target.closest &&
+            e.target.closest('a.internal-link:not(.dendrite-card-ref)');
+        if (!a || (e.relatedTarget && a.contains(e.relatedTarget))) return;
+        const href = a.getAttribute('data-href') || a.getAttribute('href');
+        if (!href) return;
+        view.app.workspace.trigger('hover-link', { event: e,
+            source: HOVER_SOURCE, hoverParent: view, targetEl: a,
+            linktext: href, sourcePath: view.file ? view.file.path : '' });
+    });
+}
+
 /** The card among `ids` a link names, by its id or short id, or null. */
 function cardNamed(ids, target) {
     const t = String(target || '').trim();
@@ -794,6 +812,7 @@ class DendriteView extends ItemView {
         this.contentEl.addClass('dendrite');
         this.contentEl.tabIndex = 0;
         keepEscape(this);
+        hoverLinks(this, this.contentEl);
         this.observer = new IntersectionObserver(
             (entries) => this.onVisible(entries),
             { root: null, rootMargin: '600px 200px' });
@@ -2664,8 +2683,16 @@ class DendriteView extends ItemView {
         if (link) {
             e.preventDefault();
             const href = link.getAttr('data-href') || link.getAttr('href');
-            this.app.workspace.openLinkText(href, this.file.path,
-                                            Keymap.isModEvent(e));
+            const mod = e.ctrlKey || e.metaKey || Keymap.isModEvent(e);
+            // A card of this manuscript is gone to on the board; with
+            // Ctrl, its note opens, as any other link's does.
+            const id = !mod && cardNamed(this.byId.keys(),
+                                         String(href).split(/[#|]/)[0]);
+            if (id) {
+                this.select(id);
+                return;
+            }
+            this.app.workspace.openLinkText(href, this.file.path, mod);
             return;
         }
         if (e.target.closest('.dendrite-toolbar, textarea, .dendrite-cm, ' +
@@ -7753,6 +7780,25 @@ class DendritePreview extends ItemView {
         // marks its passages.
         this.doc.addEventListener('mouseover', (e) =>
             this.hoverComment(this.commentAt(e.target)));
+        hoverLinks(this, this.doc);
+        // A link in the text to a card goes to it on the board; with
+        // Ctrl, or to anything else, the note opens.
+        this.doc.addEventListener('click', (e) => {
+            const a = e.target.closest &&
+                e.target.closest('a.internal-link:not(.dendrite-card-ref)');
+            if (!a) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const href = a.getAttribute('data-href') ||
+                a.getAttribute('href');
+            const mod = e.ctrlKey || e.metaKey || Keymap.isModEvent(e);
+            const id = !mod && cardNamed(this.segs.keys(),
+                                         String(href).split(/[#|]/)[0]);
+            if (id) this.plugin.focusCard(this.file, id, false);
+            else if (this.file) {
+                this.app.workspace.openLinkText(href, this.file.path, mod);
+            }
+        }, true);
         // A wheel over the text moves the text at its own pace, the
         // comment column hurrying through a crowded run; over the
         // comments, the usual scroll moves them, and the text keeps pace.

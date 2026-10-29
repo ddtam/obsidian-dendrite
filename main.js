@@ -364,15 +364,41 @@ var require_core = __commonJS({
       const parts = kind === "table" ? [head, content] : [content, head];
       return parts.filter(Boolean).join("\n\n");
     }
-    function floatRefs(text, floats) {
-      if (!floats.size || !text) return text;
+    function sectionRefs(nodes, bodyOf, numbers) {
+      const out = /* @__PURE__ */ new Map();
+      const walk = (list, under) => {
+        for (const n of list) {
+          const first = stripComments(bodyOf(n.id) || "").trim().split("\n")[0].trim();
+          const h = HEADING.exec(first);
+          let mine = under;
+          if (numbers && numbers.has(n.id)) {
+            mine = `section ${numbers.get(n.id).replace(/\.$/, "")}`;
+          } else if (!numbers && h) {
+            mine = `\u201C${h[2].trim()}\u201D`;
+          }
+          if (mine) out.set(n.id, mine);
+          walk(n.children, mine);
+        }
+      };
+      walk(nodes, null);
+      return out;
+    }
+    function floatRefs(text, floats, refs = /* @__PURE__ */ new Map()) {
+      if (!floats.size && !refs.size || !text) return text;
+      const ids = /* @__PURE__ */ new Set([...floats.keys(), ...refs.keys()]);
       const byShort = /* @__PURE__ */ new Map();
-      for (const id of floats.keys()) byShort.set(shortId(id), id);
-      return text.replace(/\[\[([^\]|#]+)\]\]/g, (all, name) => {
-        const n = name.trim();
-        const id = floats.has(n) ? n : byShort.get(n);
-        return id ? `[[${id}|${floats.get(id)}]]` : all;
-      });
+      for (const id of ids) byShort.set(shortId(id), id);
+      return text.replace(
+        /(?<!!)\[\[([^\]|#]+)(\|[^\]]*)?\]\]/g,
+        (all, name, alias) => {
+          const n = name.trim();
+          const id = ids.has(n) ? n : byShort.get(n);
+          if (!id) return all;
+          if (alias) return `[[${id}${alias}]]`;
+          const label = floats.get(id) || refs.get(id);
+          return label ? `[[${id}|${label}]]` : all;
+        }
+      );
     }
     function exportSegments(nodes, bodyOf, headingTop, numbers, roleOf, opts = {}) {
       const kindOf = opts.kindOf || (() => null);
@@ -437,9 +463,10 @@ var require_core = __commonJS({
         for (const c of node.children) walk(c, depth + 1);
       };
       for (const n of nodes) walk(n, 0);
+      const refs = sectionRefs(nodes, bodyOf, numbers);
       for (const s of segs) {
-        s.text = floatRefs(s.text, floats);
-        s.left = floatRefs(s.left, floats);
+        s.text = floatRefs(s.text, floats, refs);
+        s.left = floatRefs(s.left, floats, refs);
       }
       return segs;
     }
@@ -6813,6 +6840,22 @@ function cardRef(view, doc, id, label, go) {
   });
   return a;
 }
+function hoverLinks(view, el) {
+  view.registerDomEvent(el, "mouseover", (e) => {
+    const a = e.target.closest && e.target.closest("a.internal-link:not(.dendrite-card-ref)");
+    if (!a || e.relatedTarget && a.contains(e.relatedTarget)) return;
+    const href = a.getAttribute("data-href") || a.getAttribute("href");
+    if (!href) return;
+    view.app.workspace.trigger("hover-link", {
+      event: e,
+      source: HOVER_SOURCE,
+      hoverParent: view,
+      targetEl: a,
+      linktext: href,
+      sourcePath: view.file ? view.file.path : ""
+    });
+  });
+}
 function cardNamed(ids, target) {
   const t = String(target || "").trim();
   const low = t.toLowerCase();
@@ -7023,6 +7066,7 @@ var DendriteView = class extends ItemView {
     this.contentEl.addClass("dendrite");
     this.contentEl.tabIndex = 0;
     keepEscape(this);
+    hoverLinks(this, this.contentEl);
     this.observer = new IntersectionObserver(
       (entries) => this.onVisible(entries),
       { root: null, rootMargin: "600px 200px" }
@@ -8789,11 +8833,16 @@ var DendriteView = class extends ItemView {
     if (link) {
       e.preventDefault();
       const href = link.getAttr("data-href") || link.getAttr("href");
-      this.app.workspace.openLinkText(
-        href,
-        this.file.path,
-        Keymap.isModEvent(e)
+      const mod = e.ctrlKey || e.metaKey || Keymap.isModEvent(e);
+      const id = !mod && cardNamed(
+        this.byId.keys(),
+        String(href).split(/[#|]/)[0]
       );
+      if (id) {
+        this.select(id);
+        return;
+      }
+      this.app.workspace.openLinkText(href, this.file.path, mod);
       return;
     }
     if (e.target.closest(".dendrite-toolbar, textarea, .dendrite-cm, button, .dendrite-quota, .dendrite-id, .dendrite-float-edit")) {
@@ -13656,6 +13705,23 @@ var DendritePreview = class extends ItemView {
     notes.addClass("dendrite-bar-gap-before");
     this.doc = el.createDiv({ cls: "dendrite-preview-doc markdown-preview-view markdown-rendered" });
     this.doc.addEventListener("mouseover", (e) => this.hoverComment(this.commentAt(e.target)));
+    hoverLinks(this, this.doc);
+    this.doc.addEventListener("click", (e) => {
+      const a = e.target.closest && e.target.closest("a.internal-link:not(.dendrite-card-ref)");
+      if (!a) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const href = a.getAttribute("data-href") || a.getAttribute("href");
+      const mod = e.ctrlKey || e.metaKey || Keymap.isModEvent(e);
+      const id = !mod && cardNamed(
+        this.segs.keys(),
+        String(href).split(/[#|]/)[0]
+      );
+      if (id) this.plugin.focusCard(this.file, id, false);
+      else if (this.file) {
+        this.app.workspace.openLinkText(href, this.file.path, mod);
+      }
+    }, true);
     this.doc.addEventListener("wheel", (e) => {
       const knots = this.showComments && this.commentKnots;
       if (!knots || e.ctrlKey || !e.deltaY || e.target.closest(".dendrite-pgutter")) return;

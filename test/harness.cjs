@@ -262,6 +262,7 @@ function makeApp() {
         },
     };
     const opened = [];
+    const linksOpened = [];
     const app = {
         vault, metadataCache, scope: {},
         fileManager: {
@@ -320,9 +321,9 @@ function makeApp() {
             on() { return {}; },
             getLeavesOfType() { return []; },
             requestSaveLayout() {},
-            openLinkText() {},
+            openLinkText(...a) { linksOpened.push(a); },
         },
-        opened,
+        opened, linksOpened,
     };
     return app;
 }
@@ -464,9 +465,14 @@ const obsidian = {
                 /&lt;(mark|span|sup) class="(dendrite-review-[^"]*)"&gt;/g,
                 '<$1 class="$2">').replace(/&lt;\/(mark|span|sup)&gt;/g,
                 '</$1>');
+            // A link as Obsidian draws one: its text, its target kept.
+            const linked = html.replace(
+                /(^|[^!])\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g,
+                (all, pre, to, alias) => `${pre}<a class="internal-link" ` +
+                    `data-href="${to}" href="${to}">${alias || to}</a>`);
             // Each paragraph a <p>, as Obsidian draws them, the blank
             // line between kept as text.
-            el.innerHTML = html.split(/(\n\s*\n)/).map((x, k) =>
+            el.innerHTML = linked.split(/(\n\s*\n)/).map((x, k) =>
                 k % 2 ? x : `<p>${x}</p>`).join('');
         },
     },

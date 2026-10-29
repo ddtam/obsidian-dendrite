@@ -1063,3 +1063,40 @@ test('inline footnotes are numbered as the rendered card numbers them',
     assert.deepEqual(c.footnoteNumbers(md), [1, 3, 4]);
     assert.deepEqual(c.footnoteNumbers('No notes.'), []);
 });
+
+test('a link to a card prints as the section it falls under, or its own ' +
+     'text where it has some; a link to anything else is left alone',
+     () => {
+    const root = c.makeRoot();
+    const mk = (id, parent) => {
+        const n = c.makeNode(id, id, null);
+        c.appendChild(parent, n);
+        return n;
+    };
+    const m = mk('G-mmmmm', root);
+    const d = mk('G-ddddd', m);
+    mk('G-sssss', d);
+    mk('G-ppppp', m);
+    const bodies = {
+        'G-mmmmm': '# Methods',
+        'G-ddddd': '# Data storage',
+        'G-sssss': 'The files are listed here.',
+        'G-ppppp': 'Files are in [[G-sssss]], kept as in [[ddddd|the ' +
+            'storage plan]], see [[Other note]] and [[mmmmm]].',
+    };
+    const roleOf = () => null;
+    const nums = c.sectionNumbers(root.children,
+        (id) => /^#/.test(bodies[id]), roleOf);
+    const p = (n) => c.exportSegments(root.children, (id) => bodies[id], 1,
+        n, roleOf).find((s) => s.id === 'G-ppppp').text;
+    assert.equal(p(nums), 'Files are in [[G-sssss|section 1.1]], kept as ' +
+        'in [[G-ddddd|the storage plan]], see [[Other note]] and ' +
+        '[[G-mmmmm|section 1]].');
+    // Unnumbered: the section's heading, quoted.
+    assert.equal(p(null), 'Files are in [[G-sssss|“Data storage”]], kept ' +
+        'as in [[G-ddddd|the storage plan]], see [[Other note]] and ' +
+        '[[G-mmmmm|“Methods”]].');
+    assert.equal(require('../src/pandoc.js').toPandoc(p(nums), () => null),
+        'Files are in section 1.1, kept as in the storage plan, see Other ' +
+        'note and section 1.');
+});

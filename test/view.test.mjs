@@ -6431,3 +6431,33 @@ test('a revision or withdrawal of Claude\'s own suggestions waits in the ' +
         [['revise', '18.0', '17.1'], ['withdraw', '83.1', undefined]]);
     assert.equal((await p.reviewStatus(entry.id)).json.state, 'added');
 });
+
+test('a link in a card\'s text to another card of the manuscript goes to ' +
+     'that card on the board; Ctrl-click, or a link to anything else, ' +
+     'opens the note as before', async () => {
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': 'Listed in [[G-bbbbb]], [[bbbbb|the table]] and ' +
+              '[[Other note]].', 'G-bbbbb': 'Table.' });
+    view.invalidate('G-aaaaa');
+    await view.renderCard('G-aaaaa');
+    const links = [...view.cardEls.get('G-aaaaa')
+        .querySelectorAll('a.internal-link')];
+    assert.equal(links.length, 3);
+    const click = (a, mod = false) => a.dispatchEvent(
+        new h.window.MouseEvent('click', { bubbles: true, cancelable: true,
+                                           ctrlKey: mod }));
+    click(links[1]);
+    await tick(10);
+    assert.equal(view.active, 'G-bbbbb', 'by its short id');
+    assert.equal(app.linksOpened.length, 0, 'no note opened');
+    await view.select('G-aaaaa');
+    click(links[0]);
+    await tick(10);
+    assert.equal(view.active, 'G-bbbbb', 'by its full name');
+    click(links[2]);
+    assert.deepEqual(app.linksOpened.map((a) => a[0]), ['Other note']);
+    click(links[0], true);
+    assert.deepEqual(app.linksOpened.map((a) => a[0]),
+                     ['Other note', 'G-bbbbb'], 'Ctrl-click opens it');
+});
