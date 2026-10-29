@@ -459,6 +459,57 @@ function ownKeys(app, el) {
     });
 }
 
+/**
+ * Stop any Escape pressed inside `view` at its own edge. Obsidian takes
+ * an Escape nothing stopped, in a view that is not a note, as leaving
+ * for the last note's tab, which would take the writer off the board
+ * and away from what they were typing; Escape here only ever closes or
+ * leaves something within the view.
+ */
+function keepEscape(view) {
+    view.registerDomEvent(view.containerEl, 'keydown', (e) => {
+        if (e.key === 'Escape') e.preventDefault();
+    });
+}
+
+// Dendrite's links in Obsidian's page preview settings.
+const HOVER_SOURCE = 'dendrite';
+
+/**
+ * A link to card `id` in a comment, labelled `label`: a click calls
+ * `go`, and pointing at it shows the card in Obsidian's page preview.
+ */
+function cardRef(view, doc, id, label, go) {
+    const a = doc.createElement('a');
+    a.className = 'internal-link dendrite-card-ref';
+    a.dataset.href = id;
+    a.textContent = label;
+    a.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        go();
+    });
+    for (const ev of ['mousedown', 'pointerdown', 'dblclick']) {
+        a.addEventListener(ev, (e) => e.stopPropagation());
+    }
+    a.addEventListener('mouseover', (e) => {
+        view.app.workspace.trigger('hover-link', { event: e,
+            source: HOVER_SOURCE, hoverParent: view, targetEl: a,
+            linktext: id, sourcePath: view.file ? view.file.path : '' });
+    });
+    return a;
+}
+
+/** The card among `ids` a link names, by its id or short id, or null. */
+function cardNamed(ids, target) {
+    const t = String(target || '').trim();
+    const low = t.toLowerCase();
+    for (const id of ids) {
+        if (id === t || core.shortId(id).toLowerCase() === low) return id;
+    }
+    return null;
+}
+
 /** Today's date where the writer is, as 2026-10-24. */
 // The longest reply a program may send: a reply says what the writer
 // needs before acting on the comment, and no more.
@@ -467,11 +518,6 @@ const MAX_REPLY = 500;
 // A program's reply that was to replace its own and could not.
 const REFUSED = -2;
 
-/**
- * A card's markdown with a program's reply under its `n`th comment, or,
- * with `replace`, in place of its writer's last replies; null where
- * that cannot be done.
- */
 // A suggestion to resolve sent on a suggested change, which is applied
 // or dismissed instead.
 const NOT_COMMENT = -3;
@@ -747,6 +793,7 @@ class DendriteView extends ItemView {
     async onOpen() {
         this.contentEl.addClass('dendrite');
         this.contentEl.tabIndex = 0;
+        keepEscape(this);
         this.observer = new IntersectionObserver(
             (entries) => this.onVisible(entries),
             { root: null, rootMargin: '600px 200px' });
@@ -1723,7 +1770,7 @@ class DendriteView extends ItemView {
                     (n, what, arg) => this.reviewAction(id, n, what, arg),
                     (n, e, k) => this.commentMenu(id, n, e, k),
                     this.colourOf(), (el) => ownKeys(this.app, el),
-                    this.nameOf());
+                    this.nameOf(), id, this.cardLinker());
                 externalLinks(out);
             }
         } else if (!kind) {
@@ -3314,6 +3361,18 @@ class DendriteView extends ItemView {
         if (this.find) this.paintFind();
     }
 
+    /**
+     * How a [[link]] in a comment is drawn on the board and in its
+     * editor: to one of the manuscript's cards, a link that goes to it.
+     */
+    cardLinker() {
+        return (doc, target, alias) => {
+            const id = cardNamed(this.byId.keys(), target);
+            return id ? cardRef(this, doc, id, alias || target,
+                                () => this.select(id)) : null;
+        };
+    }
+
     /** A card's editor: Obsidian's, unless the settings say not. */
     newEditor(handlers) {
         const colours = this.colourOf();
@@ -3322,6 +3381,7 @@ class DendriteView extends ItemView {
             colourOf: (who) => colours(who || 'Reviewer'),
             pdfOf: (key) => (this.plugin.pdfLinks ?
                 this.plugin.pdfLinks.get(key) : null),
+            linkOf: this.cardLinker(),
             nameOf,
             onLost: (lost) => {
                 const clip = (t) => (t.length > 40 ?
@@ -4382,7 +4442,7 @@ class DendriteView extends ItemView {
                 (n, what, arg) => this.reviewAction(id, n, what, arg),
                 (n, e, k) => this.commentMenu(id, n, e, k),
                 this.colourOf(), (el) => ownKeys(this.app, el),
-                this.nameOf());
+                this.nameOf(), id, this.cardLinker());
             externalLinks(out);
         }
     }
@@ -7502,8 +7562,24 @@ class DendritePreview extends ItemView {
         return super.setState(state, result);
     }
 
+    /**
+     * How a [[link]] in a comment is drawn in the preview: to one of the
+     * manuscript's cards, a link that selects it on the board.
+     */
+    cardLinker() {
+        return (doc, target, alias) => {
+            const id = cardNamed(this.segs.keys(), target);
+            return id ? cardRef(this, doc, id, alias || target, () =>
+                this.plugin.focusCard(this.file, id, false)) : null;
+        };
+    }
+
     async onOpen() {
         this.contentEl.addClass('dendrite-preview');
+        keepEscape(this);
+        // Escape with nothing in the preview to close stops here too.
+        this.scope = new Scope(this.app.scope);
+        this.scope.register([], 'Escape', () => false);
         this.observer = new IntersectionObserver(
             (entries) => this.onVisible(entries),
             { root: null, rootMargin: '800px 0px' });
@@ -8144,12 +8220,10 @@ class DendritePreview extends ItemView {
             const shown = el.createDiv({ cls: 'dendrite-pbubble-text' });
             if (it.kind !== 'suggest') {
                 review.fillAddressed(shown, text,
-                    (who) => this.colours && this.colours.get(who));
+                    (who) => this.colours && this.colours.get(who),
+                    this.cardLinker());
             } else {
-                shown.textContent = !it.text.trim() ?
-                    'Suggests deleting this.' :
-                    it.passage ? `Suggests: ${it.text.trim()}` :
-                    `Suggests adding: ${it.text.trim()}`;
+                shown.textContent = review.suggestionText(it);
             }
             // Its replies, under it, a seen mark among them; one taken
             // back from the board.
@@ -8162,7 +8236,8 @@ class DendritePreview extends ItemView {
             for (const r of it.replies || []) {
                 const reply = el.appendChild(review.replyRow(
                     el.ownerDocument, r, (who) => this.names.get(who),
-                    (who) => this.colours && this.colours.get(who)));
+                    (who) => this.colours && this.colours.get(who),
+                    this.cardLinker()));
                 // Claude's reply answered as on the board: for Claude
                 // only, never sent to the reviewer.
                 if (r.author !== 'Claude') continue;
@@ -8176,7 +8251,7 @@ class DendritePreview extends ItemView {
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     review.replyBox(el, send, (box) => ownKeys(this.app, box),
-                                    '@Claude ');
+                                    '@Claude ', review.draftKey(id, it));
                     this.scheduleBubbles();
                 });
                 reply.prepend(bar);
@@ -8215,9 +8290,14 @@ class DendritePreview extends ItemView {
             answer.title = 'Answer this comment';
             answer.addEventListener('click', (e) => {
                 e.stopPropagation();
-                review.replyBox(el, send, (box) => ownKeys(this.app, box));
+                review.replyBox(el, send, (box) => ownKeys(this.app, box),
+                                '', review.draftKey(id, it));
                 this.scheduleBubbles();
             });
+            review.restoreDraft(el, it, id, send,
+                                (box) => ownKeys(this.app, box));
+            review.foldable(el, meta, it, false,
+                            () => this.scheduleBubbles());
         }
         // In reading order, as they are gone through.
         const order = new Map(this.reviewList.map((x, k) =>
@@ -10589,6 +10669,12 @@ module.exports = class DendritePlugin extends Plugin {
         for (const ev of ['rename', 'delete']) {
             this.registerEvent(this.app.vault.on(ev,
                 () => this.pdfLinks.forget()));
+        }
+        // Links to cards in comments show in the page preview, as
+        // Obsidian's own links do.
+        if (this.registerHoverLinkSource) {
+            this.registerHoverLinkSource(HOVER_SOURCE,
+                { display: 'Dendrite', defaultMod: false });
         }
         this.registerView(VIEW, (leaf) => new DendriteView(leaf, this));
         this.registerView(PREVIEW, (leaf) => new DendritePreview(leaf, this));

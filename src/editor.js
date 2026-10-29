@@ -175,7 +175,7 @@ function obsidianEditor(app, parent, opts) {
                     const { StateEffect } = require('@codemirror/state');
                     out.cm.dispatch({ effects: StateEffect.appendConfig.of(
                         reviewExtension(opts.colourOf, opts.nameOf,
-                                        opts.onLost)) });
+                                        opts.onLost, opts.linkOf)) });
                 }
             } catch (err) {
                 console.warn('Dendrite: review comments in a table cell ' +
@@ -190,7 +190,8 @@ function obsidianEditor(app, parent, opts) {
             const base = super.buildLocalExtensions();
             try {
                 return [...base, reviewExtension(opts.colourOf,
-                                                 opts.nameOf, opts.onLost),
+                                                 opts.nameOf, opts.onLost,
+                                                 opts.linkOf),
                         footnoteExtension(opts.pdfOf)];
             } catch (err) {
                 console.warn('Dendrite: review comments and footnotes ' +

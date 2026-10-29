@@ -1090,23 +1090,94 @@ function awaits(it, name, self) {
         to(r));
 }
 
+// A link in a comment, [[o5yps]] or [[o5yps|its text]].
+const WIKILINK = /\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g;
+
 /**
- * `text` into `el`, a reader it opens by addressing, `@Claude`, in that
- * reader's colour.
+ * `text` appended to `el`, each [[link]] in it as the element
+ * `linkOf(doc, target, alias)` makes, or as written where it makes none.
  */
-function fillAddressed(el, text, colourOf = null) {
+function fillLinked(el, text, linkOf = null) {
+    const doc = el.ownerDocument;
+    let at = 0;
+    WIKILINK.lastIndex = 0;
+    let m;
+    while (linkOf && (m = WIKILINK.exec(text))) {
+        const a = linkOf(doc, m[1].trim(), m[2] && m[2].trim());
+        if (!a) continue;
+        if (m.index > at) el.append(text.slice(at, m.index));
+        el.append(a);
+        at = m.index + m[0].length;
+    }
+    if (at < text.length) el.append(text.slice(at));
+}
+
+/**
+ * `text` into `el`, a reader it opens by addressing, `@Claude`, in bold
+ * and no reviewer's colour, so it is not read as that reader's own; its
+ * [[links]] made by `linkOf`, as fillLinked.
+ */
+function fillAddressed(el, text, colourOf = null, linkOf = null) {
     const { to, text: rest } = addressed({ text });
+    el.textContent = '';
     if (!to) {
-        el.textContent = text;
+        fillLinked(el, text, linkOf);
         return;
     }
     const doc = el.ownerDocument;
     const at = doc.createElement('span');
-    const c = colourOf && colourOf(to);
-    at.className = 'dendrite-review-to' + (c ? ` is-c-${c}` : '');
+    at.className = 'dendrite-review-to';
     at.textContent = `@${to}`;
-    el.textContent = '';
-    el.append(at, ` ${rest}`);
+    el.append(at, ' ');
+    fillLinked(el, rest, linkOf);
+}
+
+// Threads folded or opened by hand, by thread id, kept for the session,
+// so a card drawn again or opened in the editor keeps them so.
+const folds = new Map();
+
+/**
+ * Let comment `it`'s callout `note` fold to the first line of its text,
+ * a count of the replies before the latest, and the latest in full, the
+ * one usually to act on, by a toggle at the start of `meta`, its name
+ * line; folded at first if `byDefault`, unless folded or opened by hand
+ * before. Call it once the replies are drawn. A thread with nothing to
+ * hide has no toggle. `onToggle(folded)` is told of each change, as for
+ * a redraw.
+ */
+function foldable(note, meta, it, byDefault = false, onToggle = null) {
+    const earlier = Math.max(0, (it.replies || []).length - 1);
+    if (!earlier && String(it.text || '').length <= 140) return;
+    const rows = note.querySelectorAll('.dendrite-review-reply');
+    if (rows.length) rows[rows.length - 1].classList.add('is-latest');
+    const key = threadId(it);
+    const doc = note.ownerDocument;
+    const btn = doc.createElement('span');
+    btn.className = 'dendrite-review-fold';
+    btn.setAttribute('role', 'button');
+    btn.title = 'Fold or unfold this thread';
+    const count = doc.createElement('span');
+    count.className = 'dendrite-review-count';
+    count.textContent = earlier ?
+        ` · ${earlier} earlier repl${earlier === 1 ? 'y' : 'ies'}` : '';
+    meta.prepend(btn);
+    meta.append(count);
+    const set = (f) => {
+        note.classList.toggle('is-folded', f);
+        btn.textContent = f ? '▸' : '▾';
+    };
+    set(folds.has(key) ? folds.get(key) : byDefault);
+    btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const f = !note.classList.contains('is-folded');
+        folds.set(key, f);
+        set(f);
+        if (onToggle) onToggle(f);
+    });
+    for (const ev of ['mousedown', 'pointerdown', 'dblclick']) {
+        btn.addEventListener(ev, (e) => e.stopPropagation());
+    }
 }
 
 /**
@@ -1114,7 +1185,7 @@ function fillAddressed(el, text, colourOf = null) {
  * name over its text. One with no text is a read mark, a row saying
  * its writer read the comment and had nothing to add.
  */
-function replyRow(doc, r, nameOf = null, colourOf = null) {
+function replyRow(doc, r, nameOf = null, colourOf = null, linkOf = null) {
     const el = doc.createElement('div');
     const rc = colourOf && colourOf(r.author || 'Me');
     const seen = !r.resolve && !String(r.text || '').trim();
@@ -1147,7 +1218,7 @@ function replyRow(doc, r, nameOf = null, colourOf = null) {
     }
     const said = doc.createElement('div');
     said.className = 'dendrite-review-text';
-    fillAddressed(said, r.text, colourOf);
+    fillAddressed(said, r.text, colourOf, linkOf);
     el.append(said);
     return el;
 }
@@ -1354,19 +1425,28 @@ function alreadyIn(md, item) {
  * it goes before it is in the card.
  */
 function suggestInto(md, id, s) {
+    if (Array.isArray(s.row)) return suggestRow(md, s);
     const author = clean(s.author) || 'Claude';
     if (typeof s.replace !== 'string') {
         return { reason: 'no replace: the new text, or "" to delete' };
     }
     const quote = String(s.quote || '');
     if (!quote.trim()) return { reason: 'no quote' };
-    if (alreadyIn(md, { kind: 'change', author, quote,
-                        insert: s.replace })) {
-        return { reason: 'already suggested' };
-    }
     const at = locate({ kind: 'suggest', quote, before: s.before,
                         after: s.after }, [{ id, text: md }]);
+    // The same change by the same reviewer is refused only where it
+    // already is: the same new text may be wanted in two places.
+    const text = clean(s.replace, true);
+    if (at && at.how === 'exact' && reviewItems(md).some((x) =>
+        x.kind === 'suggest' && x.author === author && x.text === text &&
+        x.start <= at.start && at.end <= x.end)) {
+        return { reason: 'already suggested' };
+    }
     if (!at || at.how !== 'exact') {
+        if (alreadyIn(md, { kind: 'change', author, quote,
+                            insert: s.replace })) {
+            return { reason: 'already suggested' };
+        }
         const hay = normalise(plainMap(md).text).text;
         const want = normalise(quote).text;
         let n = 0;
@@ -1378,6 +1458,127 @@ function suggestInto(md, id, s) {
     }
     return { md: addItems(md, [{ kind: 'suggest', start: at.start,
         end: at.end, author, date: s.date, text: s.replace }]) };
+}
+
+// A suggested table row: a suggestion with no passage at the end of the
+// row it goes beside, its cells after this, between escaped pipes, so
+// the table stays whole until it is applied as a line of its own.
+const ROW = /^\[row (above|below)\]\s*/;
+
+/** A suggested row's { where, cells }, or null for any other item. */
+function rowSuggestion(it) {
+    if (!it || it.kind !== 'suggest' || it.passage) return null;
+    const m = ROW.exec(it.text || '');
+    if (!m) return null;
+    return { where: m[1], cells: it.text.slice(m[0].length)
+        .split(/\s*\\\|\s*/).map((c) => c.trim()) };
+}
+
+/** What a suggestion would do, as its note says it. */
+function suggestionText(it) {
+    const row = rowSuggestion(it);
+    if (row) {
+        return `Suggests adding a row ${row.where}: ` +
+            row.cells.join(' | ');
+    }
+    const t = String(it.text || '').trim();
+    return !t ? 'Suggests deleting this.' :
+        it.passage ? `Suggests: ${t}` : `Suggests adding: ${t}`;
+}
+
+/** A cell as it prints: its comments, marks and emphasis left out. */
+const printedCell = (t) => t.replace(/%%[\s\S]*?%%/g, '')
+    .replace(/==|[*_`~]/g, '').replace(/\s+/g, ' ').trim();
+
+/**
+ * The table rows in `md`, the delimiter rows left out: each { start,
+ * end } of its line, and its cells { start, end } of their text, which
+ * an escaped pipe, `\|`, does not split.
+ */
+function tableRowsIn(md) {
+    const rows = [];
+    let at = 0;
+    for (const line of md.split('\n')) {
+        const lead = /^[ \t]*/.exec(line)[0].length;
+        if (line[lead] === '|' && !/^\s*\|?[\s:|-]+$/.test(line)) {
+            const cells = [];
+            let start = lead + 1;
+            for (let i = start; i <= line.length; i++) {
+                if (line[i] === '\\') {
+                    i++;
+                } else if (line[i] === '|' || i === line.length) {
+                    const raw = line.slice(start, i);
+                    if (i < line.length || raw.trim()) {
+                        const a = start + /^\s*/.exec(raw)[0].length;
+                        const b = start + raw.replace(/\s+$/, '').length;
+                        cells.push({ start: at + a, end: at + Math.max(a, b),
+                                     text: line.slice(a, Math.max(a, b)) });
+                    }
+                    start = i + 1;
+                }
+            }
+            rows.push({ start: at, end: at + line.length, cells });
+        }
+        at += line.length + 1;
+    }
+    return rows;
+}
+
+/**
+ * A card's markdown with a suggested table row in it, `s` { row: [cells],
+ * after_row or before_row, author?, date }: { md }, or { reason }. The
+ * row it goes beside is named by its first cell or its whole printed
+ * text, and must be the only one so named.
+ */
+function suggestRow(md, s) {
+    const author = clean(s.author) || 'Claude';
+    const cells = s.row.map((c) => String(c === null || c === undefined ?
+        '' : c).trim());
+    if (!cells.length) return { reason: 'no cells in row' };
+    if (cells.some((c) => /[|\n]|%%/.test(c))) {
+        return { reason: 'a cell holds a pipe, a line break or %%' };
+    }
+    const named = s.after_row !== undefined ? s.after_row : s.before_row;
+    if (named === undefined || named === null) {
+        return { reason: 'say after_row or before_row: the row it goes ' +
+                         'beside, by its first cell or its whole text' };
+    }
+    const where = s.after_row !== undefined ? 'below' : 'above';
+    const want = printedCell(String(named).replace(/^\s*\||\|\s*$/g, ''));
+    const found = tableRowsIn(md).filter((r) => {
+        const p = r.cells.map((c) => printedCell(c.text));
+        return p[0] === want || p.join(' | ') === want;
+    });
+    if (!found.length) return { reason: `no table row "${want}" in the card` };
+    if (found.length > 1) {
+        return { reason: `${found.length} table rows match "${want}"; ` +
+                         'give the whole row' };
+    }
+    const row = found[0];
+    if (row.cells.length !== cells.length) {
+        return { reason: `the row has ${cells.length} cells; the table ` +
+                         `has ${row.cells.length} columns` };
+    }
+    const text = `[row ${where}] ${cells.join(' \\| ')}`;
+    if (reviewItems(md).some((x) => x.kind === 'suggest' &&
+        x.author === author && x.text === text)) {
+        return { reason: 'already suggested' };
+    }
+    const pos = row.cells[row.cells.length - 1].end;
+    return { md: md.slice(0, pos) + itemText('suggest', '', author, s.date,
+        text) + md.slice(pos) };
+}
+
+/** `md` with a suggested row's line put beside the line holding `at`. */
+function withRow(md, at, row) {
+    const start = md.lastIndexOf('\n', at - 1) + 1;
+    const nl = md.indexOf('\n', at);
+    const end = nl < 0 ? md.length : nl;
+    const indent = /^[ \t]*/.exec(md.slice(start))[0];
+    const line = `${indent}| ${row.cells.join(' | ')} |`;
+    return row.where === 'below' ?
+        md.slice(0, end) + '\n' + line + md.slice(end) :
+        md.slice(0, start) + line + '\n' + md.slice(start);
 }
 
 /**
@@ -1521,7 +1722,11 @@ function snapOut(md, a) {
 function removeItem(md, n, apply = false) {
     const it = reviewItems(md)[n];
     if (!it) return md;
-    if (apply && it.kind === 'suggest') return applied(md, it).out;
+    if (apply && it.kind === 'suggest') {
+        const row = rowSuggestion(it);
+        return row ? withRow(removeItem(md, n), it.start, row) :
+            applied(md, it).out;
+    }
     if (!it.open) return md.slice(0, it.start) + it.passage +
         md.slice(it.end);
     // Between its markers: other comments' markers and notes are kept.
@@ -1561,7 +1766,8 @@ function keptReplies(it) {
  */
 function applyKeeping(md, n) {
     const it = reviewItems(md)[n];
-    if (!it || it.kind !== 'suggest' || !keptReplies(it).length) {
+    if (!it || it.kind !== 'suggest' || !keptReplies(it).length ||
+        rowSuggestion(it)) {
         return removeItem(md, n, true);
     }
     let { out, start, end } = applied(md, it);
@@ -1753,6 +1959,9 @@ function renderMarkdown(md, colourOf = null) {
             `<span class="dendrite-review-upto${rid}"></span>` : '';
         if (kind === 'suggest' && (marked || !passage)) {
             if (marked && !text) return upto + sup;
+            // A row to add is drawn by its number alone: its cells are
+            // said in its note, since in a cell they would read as text.
+            if (!marked && ROW.test(text)) return sup;
             // An insertion's leading space is the text's, not the mark's.
             const lead = /^\s*/.exec(text)[0];
             // Within another's passage, the space is held apart so it is
@@ -1982,13 +2191,28 @@ function commentMenu(it) {
         [what, label, false]), ['delete', 'Delete from Dendrite', true]];
 }
 
+// Replies being written, by `card/thread`, so a card drawn again, as
+// after a sync, puts its box back with what was typed.
+const drafts = new Map();
+// The draft whose box had the keys, to give them back after a redraw.
+let typingIn = null;
+
+/** A comment's key among the drafts: its card and its thread id. */
+function draftKey(place, it) {
+    return place ? `${place}/${threadId(it)}` : null;
+}
+
 /**
  * A box under a comment to write a reply in, sent with Send or Ctrl+Enter
- * and put away with Cancel or Escape; `send(text)` is given what was
- * written. `typing(el)`, if given, is told of the box, so the keys typed
- * in it stay in it.
+ * and thrown away with Cancel; `send(text)` is given what was written.
+ * Escape closes an empty box and only leaves one written in, so nothing
+ * typed is lost to it. `typing(el)`, if given, is told of the box, so the
+ * keys typed in it stay in it. With `key`, what is typed is kept as a
+ * draft until it is sent or cancelled; `focus` false opens it without
+ * taking the keys, as when a draft is put back.
  */
-function replyBox(parent, send, typing = null, start = '') {
+function replyBox(parent, send, typing = null, start = '', key = null,
+                  focus = true) {
     const doc = parent.ownerDocument;
     const old = parent.querySelector(':scope > .dendrite-review-reply-form');
     if (old) {
@@ -2001,7 +2225,14 @@ function replyBox(parent, send, typing = null, start = '') {
     box.className = 'dendrite-review-reply-box';
     box.rows = 2;
     box.placeholder = 'Reply';
-    box.value = start;
+    box.value = key && drafts.has(key) ? drafts.get(key) : start;
+    if (key) {
+        box.addEventListener('input', () => drafts.set(key, box.value));
+        box.addEventListener('focus', () => { typingIn = key; });
+        box.addEventListener('blur', () => {
+            if (typingIn === key) typingIn = null;
+        });
+    }
     const row = doc.createElement('div');
     row.className = 'dendrite-review-reply-btns';
     const go = doc.createElement('button');
@@ -2012,6 +2243,7 @@ function replyBox(parent, send, typing = null, start = '') {
     no.textContent = 'Cancel';
     // Blurred first, so whatever held the keys for it lets them go.
     const done = () => {
+        if (key) drafts.delete(key);
         box.blur();
         form.remove();
     };
@@ -2032,7 +2264,8 @@ function replyBox(parent, send, typing = null, start = '') {
             go.onclick();
         } else if (e.key === 'Escape') {
             e.preventDefault();
-            done();
+            if (box.value.trim() && box.value !== start) box.blur();
+            else done();
         }
         e.stopPropagation();
     });
@@ -2043,9 +2276,27 @@ function replyBox(parent, send, typing = null, start = '') {
     form.append(box, row);
     parent.append(form);
     if (typing) typing(box);
-    box.focus();
-    box.setSelectionRange(box.value.length, box.value.length);
+    if (focus) {
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+    }
     return form;
+}
+
+/**
+ * Put back the reply box of comment `it`, under `parent`, where a draft
+ * of it is kept; with the keys, if they were in it when it was redrawn.
+ */
+function restoreDraft(parent, it, place, send, typing = null) {
+    const key = draftKey(place, it);
+    if (!key || !drafts.has(key)) return;
+    const had = typingIn === key;
+    const form = replyBox(parent, send, typing, '', key, false);
+    const box = form.querySelector('textarea');
+    if (had && box.isConnected) {
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+    }
 }
 
 /**
@@ -2065,7 +2316,8 @@ function shownAs(el, name, nameOf) {
 }
 
 function decorate(root, items, act, onMenu = null, colourOf = null,
-                  typing = null, nameOf = null) {
+                  typing = null, nameOf = null, place = null,
+                  linkOf = null) {
     const nums = [...root.querySelectorAll('sup.dendrite-review-n')];
     const doc = root.ownerDocument;
     const blocks = new Map();
@@ -2123,16 +2375,14 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                 a.addEventListener('click', (e) => e.stopPropagation());
                 meta.append(' ', a);
             }
-            if (it.kind !== 'suggest') fillAddressed(text, said, colourOf);
-            else text.textContent =
-                !it.text.trim() ? 'Suggests deleting this.' :
-                it.passage ? `Suggests: ${it.text.trim()}` :
-                `Suggests adding: ${it.text.trim()}`;
+            if (it.kind !== 'suggest') {
+                fillAddressed(text, said, colourOf, linkOf);
+            } else text.textContent = suggestionText(it);
             main.append(meta, text);
             // Its replies, under it, each with its own right-click menu,
             // a seen mark among them; Claude's with a reply to Claude.
             (it.replies || []).forEach((r, k) => {
-                const el = replyRow(doc, r, nameOf, colourOf);
+                const el = replyRow(doc, r, nameOf, colourOf, linkOf);
                 if (onMenu) {
                     el.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
@@ -2148,7 +2398,7 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                     btn.addEventListener('click', (e) => {
                         e.stopPropagation();
                         replyBox(main, (t) => act(i, 'reply', t), typing,
-                                 '@Claude ');
+                                 '@Claude ', draftKey(place, it));
                     });
                     const bar = doc.createElement('span');
                     bar.className = 'dendrite-review-acts';
@@ -2158,6 +2408,7 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                 main.append(el);
             });
             note.append(n, main);
+            foldable(note, meta, it);
             const buttons = [...commentActions(it),
                              ['reply', 'Reply', 'Answer this comment']];
             // Its menu on a right-click, its own, not the card's.
@@ -2183,11 +2434,12 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     if (what === 'reply') replyBox(main, (t) =>
-                        act(i, 'reply', t), typing);
+                        act(i, 'reply', t), typing, '', draftKey(place, it));
                     else act(i, what);
                 });
                 bar.append(btn);
             }
+            restoreDraft(main, it, place, (t) => act(i, 'reply', t), typing);
             box.append(note);
             noteOf.set(i, note);
         }
@@ -2232,7 +2484,8 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    REVIEWER_COLOURS, colourCss, reviewerColours, colourList,
                    assignColours, reviewerEntries, entryList,
                    addReply, removeReply, replyBox, threadId,
-                   readyToResolve,
+                   readyToResolve, draftKey, restoreDraft, foldable,
+                   fillLinked, rowSuggestion, suggestionText,
                    threadIds, forReviewers, replyRow,
                    addressed, awaits, replaceReplies, fillAddressed,
                    suggestInto,

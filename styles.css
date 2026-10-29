@@ -2412,13 +2412,49 @@ button.dendrite-reviewer-colour {
 .dendrite-review-reply[class*="is-c-"] > .dendrite-review-meta b {
     color: var(--dendrite-review);
 }
-/* A reader a comment or reply is addressed to, @Claude, in their
-   colour. */
+/* A reader a comment or reply is addressed to, @Claude: bold, in the
+   text's own colour, so it is not read as that reader's comment. */
 .dendrite-review-to {
-    font-weight: var(--font-semibold);
+    font-weight: var(--font-bold);
 }
-.dendrite-review-to[class*="is-c-"] {
-    color: var(--dendrite-review);
+/* A link to a card in a comment, as Obsidian's own links. */
+a.dendrite-card-ref {
+    color: var(--link-color);
+    text-decoration: var(--link-decoration);
+    cursor: var(--cursor-link);
+}
+a.dendrite-card-ref:hover {
+    color: var(--link-color-hover);
+    text-decoration: var(--link-decoration-hover);
+}
+/* A thread folded to its name line, the first line of its text and
+   its latest reply. */
+.dendrite-review-fold {
+    cursor: var(--cursor-link);
+    color: var(--text-faint);
+    display: inline-block;
+    width: 1em;
+    margin-right: 2px;
+}
+.dendrite-review-fold:hover {
+    color: var(--text-normal);
+}
+.dendrite-review-count {
+    display: none;
+    color: var(--text-faint);
+}
+.is-folded .dendrite-review-count {
+    display: inline;
+}
+.is-folded .dendrite-review-reply:not(.is-latest) {
+    display: none;
+}
+.is-folded > .dendrite-review-main > .dendrite-review-text,
+.is-folded > .dendrite-pbubble-text {
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 /* A read mark: the last row of its thread, smaller, its name in its
    writer's colour. */

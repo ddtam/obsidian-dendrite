@@ -6328,3 +6328,50 @@ test('Claude can suggest resolving a comment through the reply endpoint, ' +
     assert.ok(colour(row), 'Claude has a colour here');
     assert.equal(colour(btn), colour(row), 'lit in Claude\'s colour');
 });
+
+test('Escape inside the board or the preview always stops there, so ' +
+     'Obsidian never takes it as leaving for another tab', async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', { 'G-aaaaa': 'Text.' });
+    const press = (el) => {
+        const e = new h.window.KeyboardEvent('keydown', { key: 'Escape',
+            bubbles: true, cancelable: true });
+        el.dispatchEvent(e);
+        return e.defaultPrevented;
+    };
+    const input = view.contentEl.createEl('input');
+    assert.ok(press(input), 'from a field in the board');
+    assert.ok(press(view.contentEl), 'from the board itself');
+    const { DendritePreview } = require('../src/main.js');
+    const p = new DendritePreview({ app: view.app, updateHeader() {} },
+                                  { settings: { headingTop: 1 },
+                                    focusCard() {} });
+    await p.onOpen();
+    await p.setState({ file: INDEX });
+    await tick(20);
+    assert.ok(press(p.contentEl.createEl('textarea')),
+              'from a field in the preview');
+    const esc = p.scope && p.scope.keys.find((k) => k.key === 'Escape');
+    assert.ok(esc, 'the preview has Escape in its keys');
+    assert.equal(esc.fn(), false, 'and takes it');
+});
+
+test('a link to a card in a comment, by its short id, is a link on the ' +
+     'board that selects that card', async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': 'The ==cohort==%%[!review] Claude, 2026-10-29: See ' +
+              '[[bbbbb]] and [[nowhere]].%% is large.',
+          'G-bbbbb': 'Methods.' });
+    view.invalidate('G-aaaaa');
+    await view.renderCard('G-aaaaa');
+    const note = view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-note');
+    const links = [...note.querySelectorAll('a.dendrite-card-ref')];
+    assert.deepEqual(links.map((a) => [a.textContent, a.dataset.href]),
+                     [['bbbbb', 'G-bbbbb']]);
+    assert.match(note.textContent, /\[\[nowhere\]\]/, 'left as written');
+    links[0].click();
+    await tick(10);
+    assert.equal(view.active, 'G-bbbbb');
+});

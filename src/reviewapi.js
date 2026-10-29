@@ -34,7 +34,10 @@
 //        replace, before?, after?, author? }] }
 //        suggested changes, each written at once where its quote is
 //        found exactly in its card, once or once given the text around
-//        it, and refused anywhere less sure; `replace` "" to delete
+//        it, and refused anywhere less sure; `replace` "" to delete.
+//        An item { card, row: [cells], after_row | before_row } suggests
+//        a table row beside the row named by its first cell or whole
+//        text, applied as a line of its own
 //
 // Every request carries `Authorization: Bearer <key>`. A request with an
 // Origin header comes from a web page and is refused, and no CORS header

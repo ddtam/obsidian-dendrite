@@ -20,7 +20,7 @@ const review = require('./review.js');
  * told of comments an edit left marking no text (review.passagesLost).
  */
 function reviewExtension(colourOf = () => null, nameOf = (x) => x,
-                         onLost = () => {}) {
+                         onLost = () => {}, linkOf = null) {
     const { Decoration, EditorView, WidgetType } =
         require('@codemirror/view');
     const { StateField, EditorState } = require('@codemirror/state');
@@ -48,11 +48,13 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
                 (c.kind === 'suggest' ? ' is-suggest' : '') +
                 (tint ? ` is-c-${tint}` : '');
             el.textContent = String(c.n);
-            const said = c.kind === 'suggest' ?
-                (c.text.trim() ? `suggests: ${c.text.trim()}` :
-                    'suggests deleting this') : c.text;
+            const row = review.rowSuggestion(c);
+            const said = row ? review.suggestionText(c).toLowerCase() :
+                c.kind === 'suggest' ?
+                    (c.text.trim() ? `suggests: ${c.text.trim()}` :
+                        'suggests deleting this') : c.text;
             el.title = `${nameOf(c.author) || 'Reviewer'}: ${said}`;
-            if (c.kind !== 'suggest' || !c.text.trim()) return el;
+            if (c.kind !== 'suggest' || !c.text.trim() || row) return el;
             // A suggestion's new text, after its passage, before its number.
             const wrap = doc.createElement('span');
             wrap.className = 'dendrite-cm-suggestion';
@@ -110,16 +112,18 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
                 const { text: said } = review.noteLink(c.text);
                 const shown = div('dendrite-review-text', main);
                 if (c.kind !== 'suggest') {
-                    review.fillAddressed(shown, said, colourOf);
+                    review.fillAddressed(shown, said, colourOf, linkOf);
                 } else {
-                    shown.textContent = !c.text.trim() ?
-                        'Suggests deleting this.' :
-                        c.passage ? `Suggests: ${c.text.trim()}` :
-                        `Suggests adding: ${c.text.trim()}`;
+                    shown.textContent = review.suggestionText(c);
                 }
                 for (const r of c.replies || []) {
-                    main.append(review.replyRow(doc, r, nameOf, colourOf));
+                    main.append(review.replyRow(doc, r, nameOf, colourOf,
+                                                linkOf));
                 }
+                // Folded at first, so a long thread does not push the
+                // text being typed away.
+                review.foldable(note, meta, c, true,
+                                () => view.requestMeasure());
             }
             return box;
         }

@@ -1014,8 +1014,10 @@ test('a reply addressed to Claude shows it, Claude\'s name in Claude\'s ' +
                  'Derek · 27 Oct');
     const said = rows[0].querySelector('.dendrite-review-text');
     assert.equal(said.textContent, '@Claude Is she right?');
-    assert.equal(said.querySelector('.dendrite-review-to.is-c-purple')
-        .textContent, '@Claude');
+    const to = said.querySelector('.dendrite-review-to');
+    assert.equal(to.textContent, '@Claude');
+    assert.ok(![...to.classList].some((c) => c.startsWith('is-c-')),
+              'neutral, so it is not read as Claude\'s own');
     const out = r.forReviewers(r.reviewItems(md), new Set(['Derek']));
     assert.deepEqual(out[0].replies.map((x) => x.text),
                      ['Fixed in Methods.']);
@@ -1385,4 +1387,187 @@ test('a reply suggesting the writer resolve a comment: written with its ' +
         date: '2026-10-29', text: 'Not yet.' }))[0];
     assert.ok(!r.readyToResolve(after));
     assert.equal(r.commentActions(after)[0][3], undefined);
+});
+
+test('a reply being written is never lost to Escape or to its card being ' +
+     'drawn again: Escape keeps what was typed, and a redraw puts the box ' +
+     'back with it', () => {
+    const { JSDOM } = require('jsdom');
+    const win = new JSDOM('<div id="root"></div>').window;
+    const doc = win.document;
+    const md = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%% is ' +
+        'large.';
+    const draw = () => {
+        const root = doc.getElementById('root');
+        root.innerHTML = `<p>${r.renderMarkdown(md)}</p>`;
+        r.decorate(root, r.reviewItems(md), () => {}, null, null, null,
+                   null, 'G-aaaaa');
+        return root;
+    };
+    let root = draw();
+    const reply = [...root.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Reply');
+    reply.click();
+    const box = () => root.querySelector('.dendrite-review-reply-box');
+    box().value = 'Forty-two, in Methods';
+    box().dispatchEvent(new win.Event('input'));
+    const esc = new win.KeyboardEvent('keydown', { key: 'Escape',
+        bubbles: true, cancelable: true });
+    box().dispatchEvent(esc);
+    assert.ok(esc.defaultPrevented, 'goes no further');
+    assert.equal(box() && box().value, 'Forty-two, in Methods',
+                 'kept, not thrown away');
+    root = draw();
+    assert.equal(box() && box().value, 'Forty-two, in Methods',
+                 'back after a redraw');
+    // Cancel is how a draft is thrown away; then a redraw has none.
+    root.querySelector('.dendrite-review-reply-btns button:last-child')
+        .click();
+    assert.equal(box(), null);
+    root = draw();
+    assert.equal(box(), null, 'gone for good');
+    // An empty box closes on Escape.
+    [...root.querySelectorAll('button')]
+        .find((b) => b.textContent === 'Reply').click();
+    box().dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape',
+        bubbles: true, cancelable: true }));
+    assert.equal(box(), null);
+});
+
+test('a link to a card in a comment or reply, [[o5yps]] or with its own ' +
+     'text, is drawn as a link; one to nothing found stays as written',
+     () => {
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div></div>').window.document;
+    const asked = [];
+    const linkOf = (d, target, alias) => {
+        asked.push([target, alias]);
+        if (target === 'zzzzz') return null;
+        const a = d.createElement('a');
+        a.className = 'dendrite-card-ref';
+        a.textContent = alias || target;
+        return a;
+    };
+    const el = doc.createElement('div');
+    r.fillAddressed(el, '@Claude See [[o5yps]], [[14px4|the table]] and ' +
+                    '[[zzzzz]].', null, linkOf);
+    assert.equal(el.textContent, '@Claude See o5yps, the table and ' +
+                 '[[zzzzz]].');
+    assert.deepEqual([...el.querySelectorAll('a.dendrite-card-ref')]
+        .map((a) => a.textContent), ['o5yps', 'the table']);
+    assert.deepEqual(asked, [['o5yps', undefined], ['14px4', 'the table'],
+                             ['zzzzz', undefined]]);
+    const row = r.replyRow(doc, { author: 'Claude', date: '2026-10-29',
+        text: 'Moved to [[o5yps]].' }, null, null, linkOf);
+    assert.ok(row.querySelector('a.dendrite-card-ref'));
+});
+
+test('a comment\'s thread folds to its first line and a count of its ' +
+     'replies, folded or not as it was left, on the board open at first',
+     () => {
+    const { JSDOM } = require('jsdom');
+    const win = new JSDOM('<div id="root"></div>').window;
+    const doc = win.document;
+    const md = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many are ' +
+        'there?%%%%[!reply] Me, 2026-10-24: Forty.%%%%[!reply] Claude, ' +
+        '2026-10-24: Say so in Methods.%% is large.';
+    const draw = () => {
+        const root = doc.getElementById('root');
+        root.innerHTML = `<p>${r.renderMarkdown(md)}</p>`;
+        r.decorate(root, r.reviewItems(md), () => {}, null, null, null,
+                   null, 'G-fold1');
+        return root.querySelector('.dendrite-review-note');
+    };
+    let note = draw();
+    assert.ok(!note.classList.contains('is-folded'), 'open on the board');
+    const fold = note.querySelector('.dendrite-review-fold');
+    assert.ok(fold, 'a fold toggle');
+    fold.click();
+    assert.ok(note.classList.contains('is-folded'));
+    assert.equal(note.querySelector('.dendrite-review-count').textContent,
+                 ' · 1 earlier reply');
+    const rows = [...note.querySelectorAll('.dendrite-review-reply')];
+    assert.deepEqual(rows.map((x) => x.classList.contains('is-latest')),
+                     [false, true], 'the latest reply stays in full');
+    note = draw();
+    assert.ok(note.classList.contains('is-folded'), 'kept when redrawn');
+    note.querySelector('.dendrite-review-fold').click();
+    assert.ok(!note.classList.contains('is-folded'));
+    // Folded at first where asked, as in the card editor.
+    const other = doc.createElement('div');
+    const it = r.reviewItems(md.replace('How many', 'How big'))[0];
+    const meta = doc.createElement('div');
+    other.append(meta);
+    r.foldable(other, meta, it, true);
+    assert.ok(other.classList.contains('is-folded'));
+    // A comment with nothing under it and short text has no toggle.
+    const bare = doc.createElement('div');
+    const bm = doc.createElement('div');
+    bare.append(bm);
+    r.foldable(bare, bm, r.reviewItems('a ==b==%%[!review] A, ' +
+        '2026-10-23: Short.%%')[0], true);
+    assert.equal(bare.querySelector('.dendrite-review-fold'), null);
+    assert.ok(!bare.classList.contains('is-folded'));
+});
+
+test('the same new text suggested for two places, told apart by the text ' +
+     'around them, goes in at both; at the same place it is refused',
+     () => {
+    const md = '| Need | /project (TB) | Total |\n| --- | --- | --- |\n' +
+        '| Storage | 55 | 55 |\n';
+    const one = r.suggestInto(md, 'G-x', { quote: '55', replace: '84',
+        before: 'Storage', after: '55', date: '2026-10-29' });
+    assert.ok(one.md, one.reason);
+    const two = r.suggestInto(one.md, 'G-x', { quote: '55', replace: '84',
+        before: 'Storage 55', date: '2026-10-29' });
+    assert.ok(two.md, two.reason);
+    assert.equal(r.reviewItems(two.md).length, 2);
+    const again = r.suggestInto(two.md, 'G-x', { quote: '55',
+        replace: '84', before: 'Storage 55', date: '2026-10-29' });
+    assert.equal(again.reason, 'already suggested');
+});
+
+test('a new table row is suggested after or before a row named by its ' +
+     'first cell, drawn as a number with what it adds in its note, and ' +
+     'applied as a line of its own', () => {
+    const md = 'Storage.\n\n| Data | Files | TB | Note |\n' +
+        '| --- | --- | --- | --- |\n| scDNA | 18 | 1.2 | measured |\n' +
+        '| Public datasets | 4 | 3.0 | estimate |\n';
+    const s = { row: ['MAESTER raw reads', '18', '1.06', 'measured'],
+                before_row: 'Public datasets', date: '2026-10-29' };
+    const out = r.suggestInto(md, 'G-x', s);
+    assert.ok(out.md, out.reason);
+    const lines = out.md.split('\n');
+    assert.equal(lines.length, md.split('\n').length, 'no line added yet');
+    assert.equal(lines[5], '| Public datasets | 4 | 3.0 | estimate' +
+        '%%[!suggest] Claude, 2026-10-29: [row above] MAESTER raw reads ' +
+        '\\| 18 \\| 1.06 \\| measured%% |');
+    const it = r.reviewItems(out.md)[0];
+    assert.deepEqual(r.rowSuggestion(it), { where: 'above',
+        cells: ['MAESTER raw reads', '18', '1.06', 'measured'] });
+    assert.equal(r.suggestionText(it), 'Suggests adding a row above: ' +
+        'MAESTER raw reads | 18 | 1.06 | measured');
+    // Drawn as its number only: nothing inline in the cell.
+    const html = r.renderMarkdown(out.md);
+    assert.doesNotMatch(html, /dendrite-review-new/);
+    assert.match(html, /estimate<sup class="dendrite-review-n is-suggest/);
+    // Applied: a line of its own above the row; dismissed: as it was.
+    assert.equal(r.removeItem(out.md, 0, true), md.replace(
+        '| Public datasets', '| MAESTER raw reads | 18 | 1.06 | ' +
+        'measured |\n| Public datasets'));
+    assert.equal(r.removeItem(out.md, 0), md);
+    assert.equal(r.applyKeeping(out.md, 0), r.removeItem(out.md, 0, true));
+    // After a row, by its whole printed text.
+    const below = r.suggestInto(md, 'G-x', { row: ['a', 'b', 'c', 'd'],
+        after_row: 'scDNA | 18 | 1.2 | measured', date: '2026-10-29' });
+    assert.ok(below.md, below.reason);
+    assert.ok(r.removeItem(below.md, 0, true).includes(
+        '| scDNA | 18 | 1.2 | measured |\n| a | b | c | d |\n| Public'));
+    // Refused: no such row, the wrong number of cells, sent twice.
+    assert.match(r.suggestInto(md, 'G-x', { ...s, before_row: 'Nope' })
+        .reason, /no table row/);
+    assert.match(r.suggestInto(md, 'G-x', { ...s, row: ['a', 'b'] })
+        .reason, /4 columns/);
+    assert.equal(r.suggestInto(out.md, 'G-x', s).reason,
+                 'already suggested');
 });

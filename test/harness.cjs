@@ -338,7 +338,10 @@ const obsidian = {
         constructor(leaf) {
             this.leaf = leaf;
             this.app = leaf.app;
+            // As Obsidian: the view's own element holds its content.
+            this.containerEl = make('div');
             this.contentEl = make('div');
+            this.containerEl.appendChild(this.contentEl);
         }
         registerEvent() {}
         registerDomEvent(el, ev, fn) { el.addEventListener(ev, fn); }

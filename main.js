@@ -2542,21 +2542,70 @@ var require_review = __commonJS({
       if (j < 0 && it.author !== name) return true;
       return rs.slice(j + 1).some((r) => asked || !self.has(r.author) || to(r));
     }
-    function fillAddressed(el, text, colourOf = null) {
+    var WIKILINK = /\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g;
+    function fillLinked(el, text, linkOf = null) {
+      const doc = el.ownerDocument;
+      let at = 0;
+      WIKILINK.lastIndex = 0;
+      let m;
+      while (linkOf && (m = WIKILINK.exec(text))) {
+        const a = linkOf(doc, m[1].trim(), m[2] && m[2].trim());
+        if (!a) continue;
+        if (m.index > at) el.append(text.slice(at, m.index));
+        el.append(a);
+        at = m.index + m[0].length;
+      }
+      if (at < text.length) el.append(text.slice(at));
+    }
+    function fillAddressed(el, text, colourOf = null, linkOf = null) {
       const { to, text: rest } = addressed({ text });
+      el.textContent = "";
       if (!to) {
-        el.textContent = text;
+        fillLinked(el, text, linkOf);
         return;
       }
       const doc = el.ownerDocument;
       const at = doc.createElement("span");
-      const c = colourOf && colourOf(to);
-      at.className = "dendrite-review-to" + (c ? ` is-c-${c}` : "");
+      at.className = "dendrite-review-to";
       at.textContent = `@${to}`;
-      el.textContent = "";
-      el.append(at, ` ${rest}`);
+      el.append(at, " ");
+      fillLinked(el, rest, linkOf);
     }
-    function replyRow(doc, r, nameOf = null, colourOf = null) {
+    var folds = /* @__PURE__ */ new Map();
+    function foldable(note, meta, it, byDefault = false, onToggle = null) {
+      const earlier = Math.max(0, (it.replies || []).length - 1);
+      if (!earlier && String(it.text || "").length <= 140) return;
+      const rows = note.querySelectorAll(".dendrite-review-reply");
+      if (rows.length) rows[rows.length - 1].classList.add("is-latest");
+      const key = threadId(it);
+      const doc = note.ownerDocument;
+      const btn = doc.createElement("span");
+      btn.className = "dendrite-review-fold";
+      btn.setAttribute("role", "button");
+      btn.title = "Fold or unfold this thread";
+      const count = doc.createElement("span");
+      count.className = "dendrite-review-count";
+      count.textContent = earlier ? ` \xB7 ${earlier} earlier repl${earlier === 1 ? "y" : "ies"}` : "";
+      meta.prepend(btn);
+      meta.append(count);
+      const set = (f) => {
+        note.classList.toggle("is-folded", f);
+        btn.textContent = f ? "\u25B8" : "\u25BE";
+      };
+      set(folds.has(key) ? folds.get(key) : byDefault);
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const f = !note.classList.contains("is-folded");
+        folds.set(key, f);
+        set(f);
+        if (onToggle) onToggle(f);
+      });
+      for (const ev of ["mousedown", "pointerdown", "dblclick"]) {
+        btn.addEventListener(ev, (e) => e.stopPropagation());
+      }
+    }
+    function replyRow(doc, r, nameOf = null, colourOf = null, linkOf = null) {
       const el = doc.createElement("div");
       const rc = colourOf && colourOf(r.author || "Me");
       const seen = !r.resolve && !String(r.text || "").trim();
@@ -2587,7 +2636,7 @@ var require_review = __commonJS({
       }
       const said = doc.createElement("div");
       said.className = "dendrite-review-text";
-      fillAddressed(said, r.text, colourOf);
+      fillAddressed(said, r.text, colourOf, linkOf);
       el.append(said);
       return el;
     }
@@ -2708,27 +2757,32 @@ var require_review = __commonJS({
       });
     }
     function suggestInto(md, id, s) {
+      if (Array.isArray(s.row)) return suggestRow(md, s);
       const author = clean(s.author) || "Claude";
       if (typeof s.replace !== "string") {
         return { reason: 'no replace: the new text, or "" to delete' };
       }
       const quote = String(s.quote || "");
       if (!quote.trim()) return { reason: "no quote" };
-      if (alreadyIn(md, {
-        kind: "change",
-        author,
-        quote,
-        insert: s.replace
-      })) {
-        return { reason: "already suggested" };
-      }
       const at = locate({
         kind: "suggest",
         quote,
         before: s.before,
         after: s.after
       }, [{ id, text: md }]);
+      const text = clean(s.replace, true);
+      if (at && at.how === "exact" && reviewItems(md).some((x) => x.kind === "suggest" && x.author === author && x.text === text && x.start <= at.start && at.end <= x.end)) {
+        return { reason: "already suggested" };
+      }
       if (!at || at.how !== "exact") {
+        if (alreadyIn(md, {
+          kind: "change",
+          author,
+          quote,
+          insert: s.replace
+        })) {
+          return { reason: "already suggested" };
+        }
         const hay = normalise(plainMap(md).text).text;
         const want = normalise(quote).text;
         let n = 0;
@@ -2743,6 +2797,99 @@ var require_review = __commonJS({
         date: s.date,
         text: s.replace
       }]) };
+    }
+    var ROW = /^\[row (above|below)\]\s*/;
+    function rowSuggestion(it) {
+      if (!it || it.kind !== "suggest" || it.passage) return null;
+      const m = ROW.exec(it.text || "");
+      if (!m) return null;
+      return { where: m[1], cells: it.text.slice(m[0].length).split(/\s*\\\|\s*/).map((c) => c.trim()) };
+    }
+    function suggestionText(it) {
+      const row = rowSuggestion(it);
+      if (row) {
+        return `Suggests adding a row ${row.where}: ` + row.cells.join(" | ");
+      }
+      const t = String(it.text || "").trim();
+      return !t ? "Suggests deleting this." : it.passage ? `Suggests: ${t}` : `Suggests adding: ${t}`;
+    }
+    var printedCell = (t) => t.replace(/%%[\s\S]*?%%/g, "").replace(/==|[*_`~]/g, "").replace(/\s+/g, " ").trim();
+    function tableRowsIn(md) {
+      const rows = [];
+      let at = 0;
+      for (const line of md.split("\n")) {
+        const lead = /^[ \t]*/.exec(line)[0].length;
+        if (line[lead] === "|" && !/^\s*\|?[\s:|-]+$/.test(line)) {
+          const cells = [];
+          let start = lead + 1;
+          for (let i = start; i <= line.length; i++) {
+            if (line[i] === "\\") {
+              i++;
+            } else if (line[i] === "|" || i === line.length) {
+              const raw = line.slice(start, i);
+              if (i < line.length || raw.trim()) {
+                const a = start + /^\s*/.exec(raw)[0].length;
+                const b = start + raw.replace(/\s+$/, "").length;
+                cells.push({
+                  start: at + a,
+                  end: at + Math.max(a, b),
+                  text: line.slice(a, Math.max(a, b))
+                });
+              }
+              start = i + 1;
+            }
+          }
+          rows.push({ start: at, end: at + line.length, cells });
+        }
+        at += line.length + 1;
+      }
+      return rows;
+    }
+    function suggestRow(md, s) {
+      const author = clean(s.author) || "Claude";
+      const cells = s.row.map((c) => String(c === null || c === void 0 ? "" : c).trim());
+      if (!cells.length) return { reason: "no cells in row" };
+      if (cells.some((c) => /[|\n]|%%/.test(c))) {
+        return { reason: "a cell holds a pipe, a line break or %%" };
+      }
+      const named = s.after_row !== void 0 ? s.after_row : s.before_row;
+      if (named === void 0 || named === null) {
+        return { reason: "say after_row or before_row: the row it goes beside, by its first cell or its whole text" };
+      }
+      const where = s.after_row !== void 0 ? "below" : "above";
+      const want = printedCell(String(named).replace(/^\s*\||\|\s*$/g, ""));
+      const found = tableRowsIn(md).filter((r) => {
+        const p = r.cells.map((c) => printedCell(c.text));
+        return p[0] === want || p.join(" | ") === want;
+      });
+      if (!found.length) return { reason: `no table row "${want}" in the card` };
+      if (found.length > 1) {
+        return { reason: `${found.length} table rows match "${want}"; give the whole row` };
+      }
+      const row = found[0];
+      if (row.cells.length !== cells.length) {
+        return { reason: `the row has ${cells.length} cells; the table has ${row.cells.length} columns` };
+      }
+      const text = `[row ${where}] ${cells.join(" \\| ")}`;
+      if (reviewItems(md).some((x) => x.kind === "suggest" && x.author === author && x.text === text)) {
+        return { reason: "already suggested" };
+      }
+      const pos = row.cells[row.cells.length - 1].end;
+      return { md: md.slice(0, pos) + itemText(
+        "suggest",
+        "",
+        author,
+        s.date,
+        text
+      ) + md.slice(pos) };
+    }
+    function withRow(md, at, row) {
+      const start = md.lastIndexOf("\n", at - 1) + 1;
+      const nl = md.indexOf("\n", at);
+      const end = nl < 0 ? md.length : nl;
+      const indent = /^[ \t]*/.exec(md.slice(start))[0];
+      const line = `${indent}| ${row.cells.join(" | ")} |`;
+      return row.where === "below" ? md.slice(0, end) + "\n" + line + md.slice(end) : md.slice(0, start) + line + "\n" + md.slice(start);
     }
     function itemText(kind, passage, author, date, text) {
       const note = `%%[!${kind}] ${clean(author) || "Reviewer"}, ${date}: ${clean(text, kind === "suggest")}%%`;
@@ -2829,7 +2976,10 @@ var require_review = __commonJS({
     function removeItem(md, n, apply = false) {
       const it = reviewItems(md)[n];
       if (!it) return md;
-      if (apply && it.kind === "suggest") return applied(md, it).out;
+      if (apply && it.kind === "suggest") {
+        const row = rowSuggestion(it);
+        return row ? withRow(removeItem(md, n), it.start, row) : applied(md, it).out;
+      }
       if (!it.open) return md.slice(0, it.start) + it.passage + md.slice(it.end);
       return md.slice(0, it.open.start) + md.slice(it.open.end, it.noteStart) + md.slice(it.end);
     }
@@ -2849,7 +2999,7 @@ var require_review = __commonJS({
     }
     function applyKeeping(md, n) {
       const it = reviewItems(md)[n];
-      if (!it || it.kind !== "suggest" || !keptReplies(it).length) {
+      if (!it || it.kind !== "suggest" || !keptReplies(it).length || rowSuggestion(it)) {
         return removeItem(md, n, true);
       }
       let { out, start, end } = applied(md, it);
@@ -3005,6 +3155,7 @@ var require_review = __commonJS({
         const upto = marked ? `<span class="dendrite-review-upto${rid}"></span>` : "";
         if (kind === "suggest" && (marked || !passage)) {
           if (marked && !text) return upto + sup;
+          if (!marked && ROW.test(text)) return sup;
           const lead = /^\s*/.exec(text)[0];
           const gap = lead && marked ? `<span class="dendrite-review-lead">${lead}</span>` : lead;
           return `${upto}${gap}<span class="dendrite-review-new${tint}${rid}">${text.slice(lead.length)}</span>${sup}`;
@@ -3142,7 +3293,12 @@ var require_review = __commonJS({
     function commentMenu(it) {
       return [...commentActions(it).map(([what, label]) => [what, label, false]), ["delete", "Delete from Dendrite", true]];
     }
-    function replyBox(parent, send, typing = null, start = "") {
+    var drafts = /* @__PURE__ */ new Map();
+    var typingIn = null;
+    function draftKey(place2, it) {
+      return place2 ? `${place2}/${threadId(it)}` : null;
+    }
+    function replyBox(parent, send, typing = null, start = "", key = null, focus = true) {
       const doc = parent.ownerDocument;
       const old = parent.querySelector(":scope > .dendrite-review-reply-form");
       if (old) {
@@ -3155,7 +3311,16 @@ var require_review = __commonJS({
       box.className = "dendrite-review-reply-box";
       box.rows = 2;
       box.placeholder = "Reply";
-      box.value = start;
+      box.value = key && drafts.has(key) ? drafts.get(key) : start;
+      if (key) {
+        box.addEventListener("input", () => drafts.set(key, box.value));
+        box.addEventListener("focus", () => {
+          typingIn = key;
+        });
+        box.addEventListener("blur", () => {
+          if (typingIn === key) typingIn = null;
+        });
+      }
       const row = doc.createElement("div");
       row.className = "dendrite-review-reply-btns";
       const go = doc.createElement("button");
@@ -3165,6 +3330,7 @@ var require_review = __commonJS({
       no.className = "dendrite-review-btn";
       no.textContent = "Cancel";
       const done = () => {
+        if (key) drafts.delete(key);
         box.blur();
         form.remove();
       };
@@ -3185,7 +3351,8 @@ var require_review = __commonJS({
           go.onclick();
         } else if (e.key === "Escape") {
           e.preventDefault();
-          done();
+          if (box.value.trim() && box.value !== start) box.blur();
+          else done();
         }
         e.stopPropagation();
       });
@@ -3196,16 +3363,29 @@ var require_review = __commonJS({
       form.append(box, row);
       parent.append(form);
       if (typing) typing(box);
-      box.focus();
-      box.setSelectionRange(box.value.length, box.value.length);
+      if (focus) {
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+      }
       return form;
+    }
+    function restoreDraft(parent, it, place2, send, typing = null) {
+      const key = draftKey(place2, it);
+      if (!key || !drafts.has(key)) return;
+      const had = typingIn === key;
+      const form = replyBox(parent, send, typing, "", key, false);
+      const box = form.querySelector("textarea");
+      if (had && box.isConnected) {
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
+      }
     }
     function shownAs(el, name, nameOf) {
       const shown = nameOf && nameOf(name) || name;
       el.textContent = shown;
       if (shown !== name) el.title = `As written: ${name}`;
     }
-    function decorate(root, items, act, onMenu = null, colourOf = null, typing = null, nameOf = null) {
+    function decorate(root, items, act, onMenu = null, colourOf = null, typing = null, nameOf = null, place2 = null, linkOf = null) {
       const nums = [...root.querySelectorAll("sup.dendrite-review-n")];
       const doc = root.ownerDocument;
       const blocks = /* @__PURE__ */ new Map();
@@ -3259,11 +3439,12 @@ var require_review = __commonJS({
             a.addEventListener("click", (e) => e.stopPropagation());
             meta.append(" ", a);
           }
-          if (it.kind !== "suggest") fillAddressed(text, said, colourOf);
-          else text.textContent = !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
+          if (it.kind !== "suggest") {
+            fillAddressed(text, said, colourOf, linkOf);
+          } else text.textContent = suggestionText(it);
           main.append(meta, text);
           (it.replies || []).forEach((r, k) => {
-            const el = replyRow(doc, r, nameOf, colourOf);
+            const el = replyRow(doc, r, nameOf, colourOf, linkOf);
             if (onMenu) {
               el.addEventListener("contextmenu", (e) => {
                 e.preventDefault();
@@ -3282,7 +3463,8 @@ var require_review = __commonJS({
                   main,
                   (t) => act(i, "reply", t),
                   typing,
-                  "@Claude "
+                  "@Claude ",
+                  draftKey(place2, it)
                 );
               });
               const bar2 = doc.createElement("span");
@@ -3293,6 +3475,7 @@ var require_review = __commonJS({
             main.append(el);
           });
           note.append(n, main);
+          foldable(note, meta, it);
           const buttons = [
             ...commentActions(it),
             ["reply", "Reply", "Answer this comment"]
@@ -3315,11 +3498,12 @@ var require_review = __commonJS({
             if (tip) btn.title = tip;
             btn.addEventListener("click", (e) => {
               e.stopPropagation();
-              if (what === "reply") replyBox(main, (t) => act(i, "reply", t), typing);
+              if (what === "reply") replyBox(main, (t) => act(i, "reply", t), typing, "", draftKey(place2, it));
               else act(i, what);
             });
             bar.append(btn);
           }
+          restoreDraft(main, it, place2, (t) => act(i, "reply", t), typing);
           box.append(note);
           noteOf2.set(i, note);
         }
@@ -3392,6 +3576,12 @@ var require_review = __commonJS({
       replyBox,
       threadId,
       readyToResolve,
+      draftKey,
+      restoreDraft,
+      foldable,
+      fillLinked,
+      rowSuggestion,
+      suggestionText,
       threadIds,
       forReviewers,
       replyRow,
@@ -3421,7 +3611,7 @@ var require_cmreview = __commonJS({
     "use strict";
     var review2 = require_review();
     function reviewExtension(colourOf = () => null, nameOf = (x) => x, onLost = () => {
-    }) {
+    }, linkOf = null) {
       const { Decoration, EditorView, WidgetType } = require("@codemirror/view");
       const { StateField, EditorState } = require("@codemirror/state");
       class Chip extends WidgetType {
@@ -3441,9 +3631,10 @@ var require_cmreview = __commonJS({
           const tint = colourOf(c.author);
           el.className = "dendrite-review-n dendrite-cm-chip" + (c.kind === "suggest" ? " is-suggest" : "") + (tint ? ` is-c-${tint}` : "");
           el.textContent = String(c.n);
-          const said = c.kind === "suggest" ? c.text.trim() ? `suggests: ${c.text.trim()}` : "suggests deleting this" : c.text;
+          const row = review2.rowSuggestion(c);
+          const said = row ? review2.suggestionText(c).toLowerCase() : c.kind === "suggest" ? c.text.trim() ? `suggests: ${c.text.trim()}` : "suggests deleting this" : c.text;
           el.title = `${nameOf(c.author) || "Reviewer"}: ${said}`;
-          if (c.kind !== "suggest" || !c.text.trim()) return el;
+          if (c.kind !== "suggest" || !c.text.trim() || row) return el;
           const wrap = doc.createElement("span");
           wrap.className = "dendrite-cm-suggestion";
           const lead = /^\s*/.exec(c.text)[0];
@@ -3491,13 +3682,26 @@ var require_cmreview = __commonJS({
             const { text: said } = review2.noteLink(c.text);
             const shown = div("dendrite-review-text", main);
             if (c.kind !== "suggest") {
-              review2.fillAddressed(shown, said, colourOf);
+              review2.fillAddressed(shown, said, colourOf, linkOf);
             } else {
-              shown.textContent = !c.text.trim() ? "Suggests deleting this." : c.passage ? `Suggests: ${c.text.trim()}` : `Suggests adding: ${c.text.trim()}`;
+              shown.textContent = review2.suggestionText(c);
             }
             for (const r of c.replies || []) {
-              main.append(review2.replyRow(doc, r, nameOf, colourOf));
+              main.append(review2.replyRow(
+                doc,
+                r,
+                nameOf,
+                colourOf,
+                linkOf
+              ));
             }
+            review2.foldable(
+              note,
+              meta,
+              c,
+              true,
+              () => view.requestMeasure()
+            );
           }
           return box;
         }
@@ -4043,7 +4247,8 @@ var require_editor = __commonJS({
                 reviewExtension(
                   opts.colourOf,
                   opts.nameOf,
-                  opts.onLost
+                  opts.onLost,
+                  opts.linkOf
                 )
               ) });
             }
@@ -4062,7 +4267,8 @@ var require_editor = __commonJS({
               reviewExtension(
                 opts.colourOf,
                 opts.nameOf,
-                opts.onLost
+                opts.onLost,
+                opts.linkOf
               ),
               footnoteExtension(opts.pdfOf)
             ];
@@ -6535,6 +6741,45 @@ function ownKeys(app, el) {
     if (app.keymap) app.keymap.popScope(scope);
   });
 }
+function keepEscape(view) {
+  view.registerDomEvent(view.containerEl, "keydown", (e) => {
+    if (e.key === "Escape") e.preventDefault();
+  });
+}
+var HOVER_SOURCE = "dendrite";
+function cardRef(view, doc, id, label, go) {
+  const a = doc.createElement("a");
+  a.className = "internal-link dendrite-card-ref";
+  a.dataset.href = id;
+  a.textContent = label;
+  a.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    go();
+  });
+  for (const ev of ["mousedown", "pointerdown", "dblclick"]) {
+    a.addEventListener(ev, (e) => e.stopPropagation());
+  }
+  a.addEventListener("mouseover", (e) => {
+    view.app.workspace.trigger("hover-link", {
+      event: e,
+      source: HOVER_SOURCE,
+      hoverParent: view,
+      targetEl: a,
+      linktext: id,
+      sourcePath: view.file ? view.file.path : ""
+    });
+  });
+  return a;
+}
+function cardNamed(ids, target) {
+  const t = String(target || "").trim();
+  const low = t.toLowerCase();
+  for (const id of ids) {
+    if (id === t || core.shortId(id).toLowerCase() === low) return id;
+  }
+  return null;
+}
 var MAX_REPLY = 500;
 var REFUSED = -2;
 var NOT_COMMENT = -3;
@@ -6736,6 +6981,7 @@ var DendriteView = class extends ItemView {
   async onOpen() {
     this.contentEl.addClass("dendrite");
     this.contentEl.tabIndex = 0;
+    keepEscape(this);
     this.observer = new IntersectionObserver(
       (entries) => this.onVisible(entries),
       { root: null, rootMargin: "600px 200px" }
@@ -7634,7 +7880,9 @@ var DendriteView = class extends ItemView {
           (n, e, k) => this.commentMenu(id, n, e, k),
           this.colourOf(),
           (el) => ownKeys(this.app, el),
-          this.nameOf()
+          this.nameOf(),
+          id,
+          this.cardLinker()
         );
         externalLinks(out);
       }
@@ -9149,6 +9397,22 @@ var DendriteView = class extends ItemView {
     this.showMode();
     if (this.find) this.paintFind();
   }
+  /**
+   * How a [[link]] in a comment is drawn on the board and in its
+   * editor: to one of the manuscript's cards, a link that goes to it.
+   */
+  cardLinker() {
+    return (doc, target, alias) => {
+      const id = cardNamed(this.byId.keys(), target);
+      return id ? cardRef(
+        this,
+        doc,
+        id,
+        alias || target,
+        () => this.select(id)
+      ) : null;
+    };
+  }
   /** A card's editor: Obsidian's, unless the settings say not. */
   newEditor(handlers) {
     const colours = this.colourOf();
@@ -9159,6 +9423,7 @@ var DendriteView = class extends ItemView {
       Object.assign({
         colourOf: (who) => colours(who || "Reviewer"),
         pdfOf: (key) => this.plugin.pdfLinks ? this.plugin.pdfLinks.get(key) : null,
+        linkOf: this.cardLinker(),
         nameOf,
         onLost: (lost) => {
           const clip = (t) => t.length > 40 ? `${t.slice(0, 39).trim()}\u2026` : t;
@@ -10173,7 +10438,9 @@ var DendriteView = class extends ItemView {
         (n, e, k) => this.commentMenu(id, n, e, k),
         this.colourOf(),
         (el2) => ownKeys(this.app, el2),
-        this.nameOf()
+        this.nameOf(),
+        id,
+        this.cardLinker()
       );
       externalLinks(out);
     }
@@ -13145,8 +13412,21 @@ var DendritePreview = class extends ItemView {
     }
     return super.setState(state, result);
   }
+  /**
+   * How a [[link]] in a comment is drawn in the preview: to one of the
+   * manuscript's cards, a link that selects it on the board.
+   */
+  cardLinker() {
+    return (doc, target, alias) => {
+      const id = cardNamed(this.segs.keys(), target);
+      return id ? cardRef(this, doc, id, alias || target, () => this.plugin.focusCard(this.file, id, false)) : null;
+    };
+  }
   async onOpen() {
     this.contentEl.addClass("dendrite-preview");
+    keepEscape(this);
+    this.scope = new Scope(this.app.scope);
+    this.scope.register([], "Escape", () => false);
     this.observer = new IntersectionObserver(
       (entries) => this.onVisible(entries),
       { root: null, rootMargin: "800px 0px" }
@@ -13741,10 +14021,11 @@ var DendritePreview = class extends ItemView {
         review.fillAddressed(
           shown,
           text,
-          (who) => this.colours && this.colours.get(who)
+          (who) => this.colours && this.colours.get(who),
+          this.cardLinker()
         );
       } else {
-        shown.textContent = !it.text.trim() ? "Suggests deleting this." : it.passage ? `Suggests: ${it.text.trim()}` : `Suggests adding: ${it.text.trim()}`;
+        shown.textContent = review.suggestionText(it);
       }
       const send = async (t) => {
         if (this.plugin.reviewFromPreview) {
@@ -13762,7 +14043,8 @@ var DendritePreview = class extends ItemView {
           el.ownerDocument,
           r,
           (who) => this.names.get(who),
-          (who) => this.colours && this.colours.get(who)
+          (who) => this.colours && this.colours.get(who),
+          this.cardLinker()
         ));
         if (r.author !== "Claude") continue;
         const doc = el.ownerDocument;
@@ -13778,7 +14060,8 @@ var DendritePreview = class extends ItemView {
             el,
             send,
             (box) => ownKeys(this.app, box),
-            "@Claude "
+            "@Claude ",
+            review.draftKey(id, it)
           );
           this.scheduleBubbles();
         });
@@ -13825,9 +14108,29 @@ var DendritePreview = class extends ItemView {
       answer.title = "Answer this comment";
       answer.addEventListener("click", (e) => {
         e.stopPropagation();
-        review.replyBox(el, send, (box) => ownKeys(this.app, box));
+        review.replyBox(
+          el,
+          send,
+          (box) => ownKeys(this.app, box),
+          "",
+          review.draftKey(id, it)
+        );
         this.scheduleBubbles();
       });
+      review.restoreDraft(
+        el,
+        it,
+        id,
+        send,
+        (box) => ownKeys(this.app, box)
+      );
+      review.foldable(
+        el,
+        meta,
+        it,
+        false,
+        () => this.scheduleBubbles()
+      );
     }
     const order = new Map(this.reviewList.map((x, k) => [`${x.id}\0${x.n}`, k]));
     const key = (el) => order.get(`${el.dataset.id}\0${el.dataset.n}`) ?? 1e9;
@@ -15813,6 +16116,12 @@ module.exports = class DendritePlugin extends Plugin {
         ev,
         () => this.pdfLinks.forget()
       ));
+    }
+    if (this.registerHoverLinkSource) {
+      this.registerHoverLinkSource(
+        HOVER_SOURCE,
+        { display: "Dendrite", defaultMod: false }
+      );
     }
     this.registerView(VIEW, (leaf) => new DendriteView(leaf, this));
     this.registerView(PREVIEW, (leaf) => new DendritePreview(leaf, this));
