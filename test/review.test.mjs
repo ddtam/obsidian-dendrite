@@ -1686,3 +1686,47 @@ test('the preview draws only the comments a filter keeps, the rest as ' +
     assert.equal(r.renderMarkdown(md, null, () => true),
                  r.renderMarkdown(md), 'all kept: as without a filter');
 });
+
+test('a comment\'s triage priority is a tag on its marker, read and set ' +
+     'without changing what the comment is or says', () => {
+    const core = require('../src/core.js');
+    const plain = 'A ==one==%%[!review] Aly, 2026-10-23: Why?%%%%[!reply] ' +
+        'Me, 2026-10-24: So.%% then %%{1%%held%%}1 [!suggest] R, ' +
+        '2026-10-24: kept%% end.';
+    const tagged = 'A ==one==%%[!review|p1] Aly, 2026-10-23: Why?%%%%' +
+        '[!reply] Me, 2026-10-24: So.%% then %%{1%%held%%}1 ' +
+        '[!suggest|p3] R, 2026-10-24: kept%% end.';
+    const was = r.reviewItems(plain);
+    const now = r.reviewItems(tagged);
+    assert.deepEqual(now.map((it) => it.priority), ['p1', 'p3']);
+    assert.deepEqual(was.map((it) => it.priority), [null, null]);
+    for (const k of [0, 1]) {
+        for (const f of ['kind', 'author', 'date', 'text', 'passage']) {
+            assert.equal(now[k][f], was[k][f], f);
+        }
+        assert.deepEqual(now[k].replies, was[k].replies);
+        assert.deepEqual(r.reviewKeys(now[k]), r.reviewKeys(was[k]));
+        assert.equal(r.threadId(now[k]), r.threadId(was[k]));
+    }
+    // Set, changed and cleared, on the marker alone.
+    assert.equal(r.setPriority(plain, 0, 'p1').replace(
+        '[!suggest]', '[!suggest|p3]'), tagged);
+    assert.equal(r.setPriority(tagged, 0, 'p2'),
+                 tagged.replace('[!review|p1]', '[!review|p2]'));
+    assert.equal(r.setPriority(r.setPriority(tagged, 0, null), 1, null),
+                 plain);
+    assert.equal(r.setPriority(plain, 5, 'p1'), plain, 'no such comment');
+    // Drawn, printed and revised as without it.
+    assert.equal(r.renderMarkdown(tagged), r.renderMarkdown(plain));
+    assert.equal(core.stripComments(tagged), core.stripComments(plain));
+    assert.equal(r.stripReview(tagged), r.stripReview(plain));
+    const revised = r.reviseSuggestion(tagged, 1, 'other', '2026-10-30');
+    assert.equal(r.reviewItems(revised)[1].priority, 'p3', 'kept');
+    assert.equal(r.reviewItems(revised)[1].text, 'other');
+    // Filtered by.
+    const self = new Set(['Me']);
+    assert.deepEqual(now.map((it) => r.passesFilter(it, { priority: 'p1' },
+                                                    self)), [true, false]);
+    assert.deepEqual(was.map((it) => r.passesFilter(it,
+        { priority: 'none' }, self)), [true, true]);
+});

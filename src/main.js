@@ -77,7 +77,8 @@ const PREVIEW = 'dendrite-preview';
 const DRAW_MARGIN = 800;
 // The comment list in the sidebar, and its filter with nothing chosen.
 const COMMENTS = 'dendrite-comments';
-const COMMENT_FILTER = Object.freeze({ author: '', waiting: '', kind: '' });
+const COMMENT_FILTER = Object.freeze({ author: '', waiting: '', kind: '',
+                                      priority: '' });
 // Where the preview shows footnotes, and the menu's words for each.
 const NOTES_AT = {
     section: 'Footnotes collected under each section',
@@ -557,12 +558,44 @@ const NOT_COMMENT = -3;
  * refused as a replacement, false where it suggests resolving a change.
  */
 function withReply(body, n, reply) {
-    const { replace, ...r } = reply;
+    const { replace, priority, only, ...r } = reply;
     if (r.resolve && (review.reviewItems(body)[n] || {}).kind === 'suggest') {
         return false;
     }
-    return replace ? review.replaceReplies(body, n, r.author, r) :
+    const out = only ? body : replace ?
+        review.replaceReplies(body, n, r.author, r) :
         review.addReply(body, n, r);
+    // A priority given with it, p1 to p3, or none to take it off.
+    return typeof out === 'string' && priority !== undefined ?
+        review.setPriority(out, n, priority) : out;
+}
+
+/**
+ * A comment's triage priority as a small button, p1 to p3, or faint with
+ * none, that opens a menu of them, the one set ticked; `pick(p)` with
+ * the one chosen, null for none.
+ */
+function priorityButton(parent, p, pick) {
+    const b = parent.createEl('button', { cls: 'dendrite-prio' +
+        (p ? ` is-${p}` : ' is-none'), text: p || 'p–' });
+    b.setAttr('aria-label', p ? `Priority ${p}` : 'Set a priority');
+    b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const m = dendriteMenu(false);
+        for (const [value, title] of [['p1', 'p1'], ['p2', 'p2'],
+                                      ['p3', 'p3'], [null, 'None']]) {
+            m.addItem((i) => {
+                i.setTitle(title).onClick(() => {
+                    if (value !== (p || null)) pick(value);
+                });
+                if (typeof i.setChecked === 'function') {
+                    i.setChecked(value === (p || null));
+                }
+            });
+        }
+        if (m.showAtMouseEvent) m.showAtMouseEvent(e);
+    });
+    return b;
 }
 
 function localDay(d = new Date()) {
@@ -6603,6 +6636,12 @@ class DendriteView extends ItemView {
             await write(arg);
             return;
         }
+        // A triage priority, on the comment's marker.
+        if (what === 'priority') {
+            const out = review.setPriority(body, n, arg);
+            if (out !== body) await write(out);
+            return;
+        }
         // A program's reply comes signed and dated.
         if (what === 'reply') {
             await write(review.addReply(body, n, typeof arg === 'object' ?
@@ -8631,6 +8670,10 @@ class DendritePreview extends ItemView {
                 this.goComment();
             });
             const meta = el.createDiv({ cls: 'dendrite-review-meta' });
+            if (this.file && this.plugin.setCommentPriority) {
+                priorityButton(meta, it.priority, (p) => this.plugin
+                    .setCommentPriority(this.file, id, n, p));
+            }
             review.shownAs(meta.createEl('b'), it.author || 'Reviewer',
                            (who) => this.names.get(who));
             meta.appendText(` · ${review.shortDate(it.date)}`);
@@ -9251,6 +9294,7 @@ class DendriteComments extends ItemView {
             .setCommentFilter({ author: this.authorEl.value }));
         this.switchRows = {};
         for (const [key, label] of [['waiting', 'Waiting on'],
+                                    ['priority', 'Priority'],
                                     ['kind', 'Kind']]) {
             const r = bar.createDiv({ cls: 'dendrite-comments-row' });
             r.createSpan({ text: label });
@@ -9425,6 +9469,11 @@ class DendriteComments extends ItemView {
             ['me', 'Me', 'Someone else has the last word'],
             ['Claude', 'Claude', 'Asked with @Claude, not answered since'],
             ['resolve', 'Resolve', 'The last reply suggests resolving it']]);
+        flip('priority', 'The priority set for working through them', [
+            ['', 'Any', 'Every comment'],
+            ['p1', 'p1', 'Priority p1'], ['p2', 'p2', 'Priority p2'],
+            ['p3', 'p3', 'Priority p3'],
+            ['none', 'None', 'Comments with no priority set']]);
         flip('kind', 'Comments or suggested changes', [
             ['', 'All', 'Comments and suggested changes'],
             ['comment', 'Comments', 'Comments only'],
@@ -9441,8 +9490,27 @@ class DendriteComments extends ItemView {
         }
         const f = this.plugin.commentFilterState;
         const self = this.plugin.selfNames();
-        const shown = this.threads.filter((t) =>
-            review.passesFilter(t.it, f, self));
+        // In reading order, the higher priorities first in each section.
+        const rank = (t) => {
+            const k = review.PRIORITIES.indexOf(t.it.priority);
+            return k < 0 ? review.PRIORITIES.length : k;
+        };
+        const shown = this.threads.map((t, k) => ({ t, k }))
+            .filter(({ t }) => review.passesFilter(t.it, f, self))
+            .sort((a, b) => a.k - b.k)
+            .map(({ t }) => t);
+        const groups = [];
+        for (const t of shown) {
+            const g = groups[groups.length - 1];
+            if (g && g[0].where === t.where) g.push(t);
+            else groups.push([t]);
+        }
+        shown.length = 0;
+        for (const g of groups) {
+            shown.push(...g.map((t, k) => ({ t, k }))
+                .sort((a, b) => rank(a.t) - rank(b.t) || a.k - b.k)
+                .map(({ t }) => t));
+        }
         const all = this.threads.length;
         this.countEl.setText(shown.length === all ?
             `${all} open comment${all === 1 ? '' : 's'}` :
@@ -9465,6 +9533,8 @@ class DendriteComments extends ItemView {
             // Who wrote it, then the comment's start; the passage and the
             // thread are read in the preview.
             const who = el.createDiv({ cls: 'dendrite-cthread-meta' });
+            priorityButton(who, it.priority, (p) =>
+                this.plugin.setCommentPriority(this.file, t.id, t.n, p));
             review.shownAs(who.createEl('b'), it.author || 'Reviewer',
                            nameOf);
             const rs = it.replies || [];
@@ -12062,7 +12132,7 @@ module.exports = class DendritePlugin extends Plugin {
                     passage: it.passage, author: it.author, date: it.date,
                     text: it.kind === 'suggest' ? it.text : said.trim(),
                     link: it.kind === 'suggest' ? null : url || null,
-                    replies });
+                    priority: it.priority, replies });
             }
         }
         const json = { manuscript: prefixOf(app, file), threads, cards };
@@ -12105,7 +12175,17 @@ module.exports = class DendritePlugin extends Plugin {
         if (data.seen && (said || data.resolve)) {
             return bad(400, 'either seen, with no text, or a reply');
         }
-        if (!data.seen && !data.resolve && !said) return bad(400, 'no text');
+        const ranked = data.priority !== undefined;
+        const priority = data.priority === 'none' ? null : data.priority;
+        if (ranked && priority !== null &&
+            !review.PRIORITIES.includes(priority)) {
+            return bad(400, 'priority is p1, p2, p3 or none');
+        }
+        // A priority alone, with no reply, ranks the comment and no more.
+        const only = ranked && !data.seen && !data.resolve && !said;
+        if (!data.seen && !data.resolve && !said && !only) {
+            return bad(400, 'no text');
+        }
         if (said.length > MAX_REPLY) {
             return bad(400, `${said.length} characters; a reply is up to ` +
                        `${MAX_REPLY}. Say only what the writer needs ` +
@@ -12118,6 +12198,8 @@ module.exports = class DendritePlugin extends Plugin {
                         date: localDay(), text: data.seen ? '' : said,
                         replace: !!data.replace };
         if (data.resolve) reply.resolve = true;
+        if (ranked) reply.priority = priority;
+        if (only) reply.only = true;
         const view = this.openViews().find((v) => v.file === file);
         const done = [];
         const missing = [];
@@ -12146,7 +12228,7 @@ module.exports = class DendritePlugin extends Plugin {
                        `${done.length} comment${done.length === 1 ? '' :
                            's'}, on ` +
                        `${done.map((x) => x.split('/')[0]).join(', ')}.`);
-        } else if (!data.seen && done.length) {
+        } else if (!data.seen && !only && done.length) {
             new Notice(`Dendrite: ${reply.author} replied on ` +
                        `${done.map((x) => x.split('/')[0]).join(', ')}.`);
         }
@@ -12683,6 +12765,25 @@ module.exports = class DendritePlugin extends Plugin {
             await leaf.setViewState({ type: COMMENTS, active: true });
         }
         ws.revealLeaf(leaf);
+    }
+
+    /**
+     * A comment's triage priority set, p1 to p3 or null: through the
+     * board when it has the manuscript open, so it is undone as a change
+     * to the card; else in the card's file.
+     */
+    async setCommentPriority(file, id, n, p) {
+        const view = this.openViews().find((v) => v.file === file);
+        if (view) {
+            await view.reviewAction(id, n, 'priority', p);
+            return;
+        }
+        const f = this.app.metadataCache.getFirstLinkpathDest(id, file.path);
+        if (!(f instanceof TFile)) return;
+        await this.app.vault.process(f, (data) => {
+            const { fm, body } = core.splitFrontmatter(data);
+            return fm + review.setPriority(body, n, p);
+        });
     }
 
     /** The comment list's filter while the list is open, or null. */

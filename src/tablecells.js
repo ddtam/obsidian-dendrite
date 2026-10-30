@@ -72,7 +72,7 @@ function markTableCells(cm, draw) {
                 const cell = rows[r] && rows[r][c];
                 const wrap = td.querySelector(':scope > .table-cell-wrapper');
                 if (!cell || !wrap || td.querySelector('.cm-editor')) return;
-                if (!/\[!(review|suggest)\]/.test(cell.text)) return;
+                if (!/\[!(review|suggest)[\]|]/.test(cell.text)) return;
                 const base = review.countComments(
                     review.reviewItems(text.slice(0, cell.start)));
                 const key = `${base}:${cell.text}`;

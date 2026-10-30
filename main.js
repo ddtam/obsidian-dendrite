@@ -110,7 +110,7 @@ var require_core = __commonJS({
       return cleanLabel(words.length > LABEL_WORDS ? cut + "\u2026" : cut);
     }
     function stripComments(text) {
-      return text.replace(/==([^=\n]+?)==(?=%%\[!(?:review|suggest)\])/g, "$1").replace(/%%[\s\S]*?%%/g, "");
+      return text.replace(/==([^=\n]+?)==(?=%%\[!(?:review|suggest)[\]|])/g, "$1").replace(/%%[\s\S]*?%%/g, "");
     }
     function validPrefix(prefix) {
       return PREFIX.test(prefix || "");
@@ -1151,7 +1151,7 @@ var require_core = __commonJS({
       const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return { patterns: terms.map((t) => new RegExp(esc(t), flags)) };
     }
-    var REVIEW_NOTE = new RegExp("%%(?:\\}[a-z0-9]+\\s+)?\\[!(review|suggest|reply)\\]\\s*([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%", "g");
+    var REVIEW_NOTE = new RegExp("%%(?:\\}[a-z0-9]+\\s+)?\\[!(review|suggest|reply)(?:\\|p[123])?\\]\\s*([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%", "g");
     function reviewText(body) {
       const out = [];
       REVIEW_NOTE.lastIndex = 0;
@@ -2444,7 +2444,9 @@ var require_review = __commonJS({
       const end = e > s ? c.src(e - 1) + 1 : start;
       return { id: c.id, start, end: e > s ? end : start, how };
     }
-    var SCAN = new RegExp("%%\\{([a-z0-9]+)%%|(?:==([^=\\n]+?)==)?%%(?:\\}([a-z0-9]+)\\s+)?\\[!(review|suggest)\\]\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)", "g");
+    var SCAN = new RegExp("%%\\{([a-z0-9]+)%%|(?:==([^=\\n]+?)==)?%%(?:\\}([a-z0-9]+)\\s+)?\\[!(review|suggest)(?:\\|p[123])?\\]\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)", "g");
+    var PRIORITY = /\[!(review|suggest)(?:\|(p[123]))?\]/;
+    var PRIORITIES = ["p1", "p2", "p3"];
     function scan(md) {
       const opens = /* @__PURE__ */ new Map();
       const items = [];
@@ -2464,6 +2466,7 @@ var require_review = __commonJS({
         if (old !== void 0) syntax.push([at, at + 2]);
         syntax.push([old !== void 0 ? noteStart - 2 : noteStart, end]);
         const open = id !== void 0 && opens.get(id) || null;
+        const tag = PRIORITY.exec(md.slice(noteStart, end));
         items.push({
           kind,
           old,
@@ -2473,7 +2476,8 @@ var require_review = __commonJS({
           noteStart,
           end,
           body,
-          replies
+          replies,
+          priority: tag && tag[2] || null
         });
       }
       return { items, syntax };
@@ -2523,12 +2527,22 @@ var require_review = __commonJS({
           date: h ? h[2] : "",
           text: h ? x.kind === "suggest" ? h[3] : h[3].trim() : x.body.trim(),
           replies: readReplies(x.replies),
+          priority: x.priority,
           start: x.start,
           end: x.end,
           noteStart: x.noteStart,
           ...x.open ? { id: x.id, open: x.open } : {}
         };
       });
+    }
+    function setPriority(md, n, p) {
+      const it = reviewItems(md)[n];
+      if (!it) return md;
+      const m = PRIORITY.exec(md.slice(it.noteStart, it.end));
+      if (!m) return md;
+      const at = it.noteStart + m.index;
+      const tag = PRIORITIES.includes(p) ? `|${p}` : "";
+      return md.slice(0, at) + `[!${m[1]}${tag}]` + md.slice(at + m[0].length);
     }
     function addReply(md, n, reply) {
       const it = reviewItems(md)[n];
@@ -2574,6 +2588,7 @@ var require_review = __commonJS({
     function passesFilter(it, f, self) {
       if (!f) return true;
       const suggest = it.kind === "suggest";
+      if (f.priority === "none" ? it.priority : f.priority && it.priority !== f.priority) return false;
       if (f.kind === "comment" && suggest) return false;
       if (f.kind === "suggest" && !suggest) return false;
       if (f.author === "me" ? !self.has(it.author) : f.author && it.author !== f.author) return false;
@@ -2876,10 +2891,11 @@ var require_review = __commonJS({
       const it = reviewItems(md)[n];
       if (!it || it.kind !== "suggest") return md;
       const seg = md.slice(it.start, it.end);
-      const h = seg.search(/\[!suggest\]/);
+      const h = seg.search(PRIORITY);
       const close = h < 0 ? -1 : seg.indexOf("%%", h);
       if (close < 0) return md;
-      const head = `[!suggest] ${clean(it.author) || "Reviewer"}, ${date}: ` + clean(text, true);
+      const tag = it.priority ? `|${it.priority}` : "";
+      const head = `[!suggest${tag}] ${clean(it.author) || "Reviewer"}, ${date}: ` + clean(text, true);
       return md.slice(0, it.start + h) + head + md.slice(it.start + close);
     }
     var ROW = /^\[row (above|below)\]\s*/;
@@ -3683,6 +3699,8 @@ var require_review = __commonJS({
       addressed,
       awaits,
       passesFilter,
+      setPriority,
+      PRIORITIES,
       replaceReplies,
       fillAddressed,
       suggestInto,
@@ -3939,7 +3957,7 @@ var require_tablecells = __commonJS({
             const cell = rows[r] && rows[r][c];
             const wrap = td.querySelector(":scope > .table-cell-wrapper");
             if (!cell || !wrap || td.querySelector(".cm-editor")) return;
-            if (!/\[!(review|suggest)\]/.test(cell.text)) return;
+            if (!/\[!(review|suggest)[\]|]/.test(cell.text)) return;
             const base = review2.countComments(
               review2.reviewItems(text.slice(0, cell.start))
             );
@@ -6580,7 +6598,12 @@ var STATUS_ITEMS = [
 var PREVIEW = "dendrite-preview";
 var DRAW_MARGIN = 800;
 var COMMENTS = "dendrite-comments";
-var COMMENT_FILTER = Object.freeze({ author: "", waiting: "", kind: "" });
+var COMMENT_FILTER = Object.freeze({
+  author: "",
+  waiting: "",
+  kind: "",
+  priority: ""
+});
 var NOTES_AT = {
   section: "Footnotes collected under each section",
   end: "Footnotes collected at the end",
@@ -6902,11 +6925,37 @@ var MAX_REPLY = 500;
 var REFUSED = -2;
 var NOT_COMMENT = -3;
 function withReply(body, n, reply) {
-  const { replace, ...r } = reply;
+  const { replace, priority, only, ...r } = reply;
   if (r.resolve && (review.reviewItems(body)[n] || {}).kind === "suggest") {
     return false;
   }
-  return replace ? review.replaceReplies(body, n, r.author, r) : review.addReply(body, n, r);
+  const out = only ? body : replace ? review.replaceReplies(body, n, r.author, r) : review.addReply(body, n, r);
+  return typeof out === "string" && priority !== void 0 ? review.setPriority(out, n, priority) : out;
+}
+function priorityButton(parent, p, pick) {
+  const b = parent.createEl("button", { cls: "dendrite-prio" + (p ? ` is-${p}` : " is-none"), text: p || "p\u2013" });
+  b.setAttr("aria-label", p ? `Priority ${p}` : "Set a priority");
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const m = dendriteMenu(false);
+    for (const [value, title] of [
+      ["p1", "p1"],
+      ["p2", "p2"],
+      ["p3", "p3"],
+      [null, "None"]
+    ]) {
+      m.addItem((i) => {
+        i.setTitle(title).onClick(() => {
+          if (value !== (p || null)) pick(value);
+        });
+        if (typeof i.setChecked === "function") {
+          i.setChecked(value === (p || null));
+        }
+      });
+    }
+    if (m.showAtMouseEvent) m.showAtMouseEvent(e);
+  });
+  return b;
 }
 function localDay(d = /* @__PURE__ */ new Date()) {
   const two = (x) => String(x).padStart(2, "0");
@@ -12537,6 +12586,11 @@ var DendriteView = class extends ItemView {
       await write(arg);
       return;
     }
+    if (what === "priority") {
+      const out = review.setPriority(body, n, arg);
+      if (out !== body) await write(out);
+      return;
+    }
     if (what === "reply") {
       await write(review.addReply(body, n, typeof arg === "object" ? arg : {
         author: this.plugin.settings.replyName || "Me",
@@ -14467,6 +14521,9 @@ var DendritePreview = class extends ItemView {
         this.goComment();
       });
       const meta = el.createDiv({ cls: "dendrite-review-meta" });
+      if (this.file && this.plugin.setCommentPriority) {
+        priorityButton(meta, it.priority, (p) => this.plugin.setCommentPriority(this.file, id, n, p));
+      }
       review.shownAs(
         meta.createEl("b"),
         it.author || "Reviewer",
@@ -15046,6 +15103,7 @@ var DendriteComments = class extends ItemView {
     this.switchRows = {};
     for (const [key, label] of [
       ["waiting", "Waiting on"],
+      ["priority", "Priority"],
       ["kind", "Kind"]
     ]) {
       const r = bar.createDiv({ cls: "dendrite-comments-row" });
@@ -15217,6 +15275,13 @@ var DendriteComments = class extends ItemView {
       ["Claude", "Claude", "Asked with @Claude, not answered since"],
       ["resolve", "Resolve", "The last reply suggests resolving it"]
     ]);
+    flip("priority", "The priority set for working through them", [
+      ["", "Any", "Every comment"],
+      ["p1", "p1", "Priority p1"],
+      ["p2", "p2", "Priority p2"],
+      ["p3", "p3", "Priority p3"],
+      ["none", "None", "Comments with no priority set"]
+    ]);
     flip("kind", "Comments or suggested changes", [
       ["", "All", "Comments and suggested changes"],
       ["comment", "Comments", "Comments only"],
@@ -15233,7 +15298,21 @@ var DendriteComments = class extends ItemView {
     }
     const f = this.plugin.commentFilterState;
     const self = this.plugin.selfNames();
-    const shown = this.threads.filter((t) => review.passesFilter(t.it, f, self));
+    const rank = (t) => {
+      const k = review.PRIORITIES.indexOf(t.it.priority);
+      return k < 0 ? review.PRIORITIES.length : k;
+    };
+    const shown = this.threads.map((t, k) => ({ t, k })).filter(({ t }) => review.passesFilter(t.it, f, self)).sort((a, b) => a.k - b.k).map(({ t }) => t);
+    const groups = [];
+    for (const t of shown) {
+      const g = groups[groups.length - 1];
+      if (g && g[0].where === t.where) g.push(t);
+      else groups.push([t]);
+    }
+    shown.length = 0;
+    for (const g of groups) {
+      shown.push(...g.map((t, k) => ({ t, k })).sort((a, b) => rank(a.t) - rank(b.t) || a.k - b.k).map(({ t }) => t));
+    }
     const all = this.threads.length;
     this.countEl.setText(shown.length === all ? `${all} open comment${all === 1 ? "" : "s"}` : `${shown.length} of ${all} open comments`);
     const nameOf = (who) => this.names.get(who);
@@ -15248,6 +15327,7 @@ var DendriteComments = class extends ItemView {
       const c = this.colours.get(it.author || "Reviewer");
       const el = list.createDiv({ cls: "dendrite-cthread" + (suggest ? " is-suggest" : "") + (c ? ` is-c-${c}` : "") + (t.unprinted ? " is-unprinted" : "") });
       const who = el.createDiv({ cls: "dendrite-cthread-meta" });
+      priorityButton(who, it.priority, (p) => this.plugin.setCommentPriority(this.file, t.id, t.n, p));
       review.shownAs(
         who.createEl("b"),
         it.author || "Reviewer",
@@ -17551,6 +17631,7 @@ module.exports = class DendritePlugin extends Plugin {
           date: it.date,
           text: it.kind === "suggest" ? it.text : said.trim(),
           link: it.kind === "suggest" ? null : url || null,
+          priority: it.priority,
           replies
         });
       }
@@ -17590,7 +17671,15 @@ module.exports = class DendritePlugin extends Plugin {
     if (data.seen && (said || data.resolve)) {
       return bad(400, "either seen, with no text, or a reply");
     }
-    if (!data.seen && !data.resolve && !said) return bad(400, "no text");
+    const ranked = data.priority !== void 0;
+    const priority = data.priority === "none" ? null : data.priority;
+    if (ranked && priority !== null && !review.PRIORITIES.includes(priority)) {
+      return bad(400, "priority is p1, p2, p3 or none");
+    }
+    const only = ranked && !data.seen && !data.resolve && !said;
+    if (!data.seen && !data.resolve && !said && !only) {
+      return bad(400, "no text");
+    }
     if (said.length > MAX_REPLY) {
       return bad(400, `${said.length} characters; a reply is up to ${MAX_REPLY}. Say only what the writer needs before acting on the comment.`);
     }
@@ -17602,6 +17691,8 @@ module.exports = class DendritePlugin extends Plugin {
       replace: !!data.replace
     };
     if (data.resolve) reply.resolve = true;
+    if (ranked) reply.priority = priority;
+    if (only) reply.only = true;
     const view = this.openViews().find((v) => v.file === file);
     const done = [];
     const missing = [];
@@ -17624,7 +17715,7 @@ module.exports = class DendritePlugin extends Plugin {
     }
     if (data.resolve && done.length) {
       new Notice(`Dendrite: ${reply.author} suggests resolving ${done.length} comment${done.length === 1 ? "" : "s"}, on ${done.map((x) => x.split("/")[0]).join(", ")}.`);
-    } else if (!data.seen && done.length) {
+    } else if (!data.seen && !only && done.length) {
       new Notice(`Dendrite: ${reply.author} replied on ${done.map((x) => x.split("/")[0]).join(", ")}.`);
     }
     return { status: 201, json: { done, missing, refused } };
@@ -18170,6 +18261,24 @@ module.exports = class DendritePlugin extends Plugin {
       await leaf.setViewState({ type: COMMENTS, active: true });
     }
     ws.revealLeaf(leaf);
+  }
+  /**
+   * A comment's triage priority set, p1 to p3 or null: through the
+   * board when it has the manuscript open, so it is undone as a change
+   * to the card; else in the card's file.
+   */
+  async setCommentPriority(file, id, n, p) {
+    const view = this.openViews().find((v) => v.file === file);
+    if (view) {
+      await view.reviewAction(id, n, "priority", p);
+      return;
+    }
+    const f = this.app.metadataCache.getFirstLinkpathDest(id, file.path);
+    if (!(f instanceof TFile)) return;
+    await this.app.vault.process(f, (data) => {
+      const { fm, body } = core.splitFrontmatter(data);
+      return fm + review.setPriority(body, n, p);
+    });
   }
   /** The comment list's filter while the list is open, or null. */
   commentFilter() {

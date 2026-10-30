@@ -920,8 +920,13 @@ function place(c, s, e, how) {
 // %%{1%%passage%%}1 [!review] …%%.
 const SCAN = new RegExp('%%\\{([a-z0-9]+)%%|' +
     '(?:==([^=\\n]+?)==)?%%(?:\\}([a-z0-9]+)\\s+)?' +
-    '\\[!(review|suggest)\\]\\s*([\\s\\S]*?)%%' +
+    '\\[!(review|suggest)(?:\\|p[123])?\\]\\s*([\\s\\S]*?)%%' +
     '((?:%%\\[!reply\\][\\s\\S]*?%%)*)', 'g');
+
+// A comment's triage priority, for the writer to work through: a tag on
+// its marker, [!review|p1], kept by Dendrite and never exported.
+const PRIORITY = /\[!(review|suggest)(?:\|(p[123]))?\]/;
+const PRIORITIES = ['p1', 'p2', 'p3'];
 
 /**
  * A card's comments as found, in order, with the ranges of their syntax
@@ -948,9 +953,10 @@ function scan(md) {
         if (old !== undefined) syntax.push([at, at + 2]);
         syntax.push([old !== undefined ? noteStart - 2 : noteStart, end]);
         const open = id !== undefined && opens.get(id) || null;
+        const tag = PRIORITY.exec(md.slice(noteStart, end));
         items.push({ kind, old, id: open ? id : undefined, open,
                      start: open ? open.start : at, noteStart, end, body,
-                     replies });
+                     replies, priority: tag && tag[2] || null });
     }
     return { items, syntax };
 }
@@ -1015,10 +1021,26 @@ function reviewItems(md) {
                  author: h ? h[1] : '', date: h ? h[2] : '',
                  text: h ? (x.kind === 'suggest' ? h[3] : h[3].trim()) :
                      x.body.trim(),
-                 replies: readReplies(x.replies),
+                 replies: readReplies(x.replies), priority: x.priority,
                  start: x.start, end: x.end, noteStart: x.noteStart,
                  ...(x.open ? { id: x.id, open: x.open } : {}) };
     });
+}
+
+/**
+ * A card's markdown with its `n`th comment's priority set to `p`, one of
+ * p1 to p3, or taken off for null; as it was where there is no such
+ * comment.
+ */
+function setPriority(md, n, p) {
+    const it = reviewItems(md)[n];
+    if (!it) return md;
+    const m = PRIORITY.exec(md.slice(it.noteStart, it.end));
+    if (!m) return md;
+    const at = it.noteStart + m.index;
+    const tag = PRIORITIES.includes(p) ? `|${p}` : '';
+    return md.slice(0, at) + `[!${m[1]}${tag}]` +
+        md.slice(at + m[0].length);
 }
 
 /**
@@ -1095,12 +1117,15 @@ function awaits(it, name, self) {
  * each '' for any: `author`, a name or 'me' for any name in `self`;
  * `waiting`, 'me' where someone else has the last word, 'Claude' where
  * Claude was asked, with @Claude, and has not answered since, or
- * 'resolve' where the last reply suggests resolving it; and `kind`,
- * 'comment' or 'suggest'.
+ * 'resolve' where the last reply suggests resolving it; `kind`,
+ * 'comment' or 'suggest'; and `priority`, p1 to p3, or 'none' for those
+ * with none.
  */
 function passesFilter(it, f, self) {
     if (!f) return true;
     const suggest = it.kind === 'suggest';
+    if (f.priority === 'none' ? it.priority :
+        f.priority && it.priority !== f.priority) return false;
     if (f.kind === 'comment' && suggest) return false;
     if (f.kind === 'suggest' && !suggest) return false;
     if (f.author === 'me' ? !self.has(it.author) :
@@ -1534,10 +1559,12 @@ function reviseSuggestion(md, n, text, date) {
     const it = reviewItems(md)[n];
     if (!it || it.kind !== 'suggest') return md;
     const seg = md.slice(it.start, it.end);
-    const h = seg.search(/\[!suggest\]/);
+    const h = seg.search(PRIORITY);
     const close = h < 0 ? -1 : seg.indexOf('%%', h);
     if (close < 0) return md;
-    const head = `[!suggest] ${clean(it.author) || 'Reviewer'}, ${date}: ` +
+    const tag = it.priority ? `|${it.priority}` : '';
+    const head = `[!suggest${tag}] ${clean(it.author) || 'Reviewer'}, ` +
+        `${date}: ` +
         clean(text, true);
     return md.slice(0, it.start + h) + head + md.slice(it.start + close);
 }
@@ -2585,7 +2612,7 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    fillLinked, rowSuggestion, suggestionText,
                    findSuggestion, reviseSuggestion,
                    threadIds, forReviewers, replyRow,
-                   addressed, awaits, passesFilter,
+                   addressed, awaits, passesFilter, setPriority, PRIORITIES,
                    replaceReplies, fillAddressed,
                    suggestInto,
                    firstOfComment, countComments,

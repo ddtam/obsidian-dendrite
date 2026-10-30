@@ -2823,3 +2823,38 @@ button.dendrite-done {
     color: var(--text-faint);
     font-style: italic;
 }
+
+/* A comment's triage priority, as a property's value is drawn; none a
+   faint placeholder to click. */
+button.dendrite-prio {
+    padding: 0 5px;
+    margin-right: 6px;
+    height: auto;
+    min-height: 0;
+    font-size: var(--font-ui-smaller);
+    font-weight: var(--font-semibold);
+    line-height: 1.5;
+    border-radius: var(--radius-s);
+    box-shadow: none;
+    background: var(--background-modifier-hover);
+    color: var(--text-muted);
+    cursor: pointer;
+}
+/* Red, yellow and blue from the theme, as Todoist marks its priorities:
+   the text in the colour, on a tint of it. */
+button.dendrite-prio.is-p1 {
+    color: var(--color-red);
+    background: rgba(var(--color-red-rgb), 0.18);
+}
+button.dendrite-prio.is-p2 {
+    color: var(--color-yellow);
+    background: rgba(var(--color-yellow-rgb), 0.18);
+}
+button.dendrite-prio.is-p3 {
+    color: var(--color-blue);
+    background: rgba(var(--color-blue-rgb), 0.18);
+}
+button.dendrite-prio.is-none {
+    background: transparent;
+    color: var(--text-faint);
+}

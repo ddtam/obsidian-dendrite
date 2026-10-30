@@ -6722,3 +6722,68 @@ test('a comment gone to far down the preview has the parts around it ' +
                      'the part above it drawn, then aimed at');
     await pv.onClose();
 });
+
+test('a comment\'s triage priority: set by Claude through the endpoint, ' +
+     'with a reply or alone, given in threads, and set from the comment ' +
+     'list as an undoable change to the card', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const { DendriteComments } = require('../src/main.js');
+    const A = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%% ' +
+        'is large, and ==this==%%[!review] Aly, 2026-10-23: Cite?%% too.';
+    const { app, view, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|a]]\n', { 'G-aaaaa': A });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.openViews = () => [view];
+    const ids = (await p.threadsFor('G')).json.threads.map((t) => t.id);
+    // A priority alone: ranked, with no reply and no notice of one.
+    let out = await p.replyTo({ manuscript: 'G', thread: ids[1],
+                                priority: 'p1' });
+    assert.equal(out.status, 201);
+    assert.match(text(cardPath('G-aaaaa')), /%%\[!review\|p1\] Aly, [^%]*Cite/);
+    assert.doesNotMatch(text(cardPath('G-aaaaa')), /\[!reply\]/);
+    // With a reply.
+    out = await p.replyTo({ manuscript: 'G', thread: ids[0],
+                            text: 'Forty.', priority: 'p2' });
+    assert.equal(out.status, 201);
+    const threads = (await p.threadsFor('G')).json.threads;
+    assert.deepEqual(threads.map((t) => t.priority), ['p2', 'p1']);
+    assert.deepEqual(threads.map((t) => t.id), ids, 'the same ids');
+    assert.equal((await p.replyTo({ manuscript: 'G', thread: ids[0],
+                                    priority: 'p9' })).status, 400);
+    assert.equal((await p.replyTo({ manuscript: 'G', thread: ids[0],
+                                    priority: 'none' })).status, 201);
+    assert.equal((await p.threadsFor('G')).json.threads[0].priority, null);
+    // From the list: p1 first in its section, a click steps it on.
+    p.commentFilterState = { author: '', waiting: '', kind: '',
+                             priority: '' };
+    p.selfNames = () => new Set(['Me']);
+    p.previewLeaf = () => null;
+    const list = new DendriteComments({ app }, p);
+    await list.onOpen();
+    await list.show(app.vault.getAbstractFileByPath(INDEX));
+    const rows = () => [...list.contentEl.querySelectorAll(
+        '.dendrite-cthread')].map((el) => [
+            el.querySelector('.dendrite-prio').textContent,
+            el.querySelector('.dendrite-cthread-text').textContent]);
+    assert.deepEqual(rows(), [['p1', 'Cite?'], ['p–', 'How many?']]);
+    list.contentEl.querySelectorAll('.dendrite-prio')[1].click();
+    const menu = h.obsidian.lastMenu;
+    assert.deepEqual(menu.items.map((i) => i.title),
+                     ['p1', 'p2', 'p3', 'None'], 'a menu of them');
+    await menuItem(menu, 'p1').click();
+    await tick(20);
+    assert.match(text(cardPath('G-aaaaa')), /\[!review\|p1\] Aly, [^%]*How/);
+    await list.refresh();
+    assert.deepEqual(rows(), [['p1', 'How many?'], ['p1', 'Cite?']],
+                     'both p1, in reading order');
+    await view.doUndo();
+    await tick(20);
+    assert.match(text(cardPath('G-aaaaa')), /\[!review\] Aly, [^%]*How/,
+                 'undone');
+    // Filtered by.
+    p.commentFilterState.priority = 'none';
+    await list.refresh();
+    assert.deepEqual(rows(), [['p–', 'How many?']]);
+});
