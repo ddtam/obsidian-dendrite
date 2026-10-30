@@ -33,14 +33,38 @@
     white-space: nowrap;
 }
 
+body {
+    --dendrite-info-height: 24px;
+}
+
+/* The board's buttons and read-outs one header: no line between them,
+   the read-out row's line under both. */
+.dendrite > .dendrite-bar {
+    border-bottom: none;
+}
+
+/* The preview's bar as tall as the board's bar and read-out row
+   together, so the lines under them meet when side by side. */
+.dendrite-preview > .dendrite-bar {
+    min-height: calc(var(--input-height, 30px) + 12px +
+                     var(--dendrite-info-height));
+}
+
+/* On a phone the board has no read-out row to line up with. */
+.is-phone .dendrite-preview > .dendrite-bar {
+    min-height: calc(var(--input-height, 30px) + 12px);
+}
+
 /* The read-outs under the buttons: the mode, the totals and the tally,
    in a slim row of their own. */
 .dendrite-info {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 2px 12px;
-    min-height: 22px;
+    padding: 0 12px;
+    /* A fixed height, which the preview's bar adds to its own to line
+       up with the board's two rows when they sit side by side. */
+    height: var(--dendrite-info-height);
     box-sizing: border-box;
     border-bottom: 1px solid var(--background-modifier-border);
     flex: 0 0 auto;
