@@ -703,6 +703,37 @@ function narrowSplit(leaf, share = 1 / 3) {
     return true;
 }
 
+// A sidebar's width, which the comment list takes beside a board in a
+// popout window, where there is no sidebar to open it in.
+const SIDEBAR_WIDTH = 300;
+
+/**
+ * A pane just split off given `px` of its side-by-side split's width,
+ * at most two fifths, as a sidebar is, the others keeping their shares
+ * of the rest; through setDimension, as narrowSplit.
+ */
+function sideSplit(leaf, px) {
+    let item = leaf;
+    while (item && item.parent && !(item.parent.direction === 'vertical' &&
+        (item.parent.children || []).length > 1)) item = item.parent;
+    const split = item && item.parent;
+    if (!split || typeof item.setDimension !== 'function') return false;
+    const width = (el) => el && el.getBoundingClientRect ?
+        el.getBoundingClientRect().width : 0;
+    const total = width(split.containerEl);
+    const share = total ? Math.min(0.4, px / total) : 0.25;
+    const rest = split.children.filter((c) => c !== item);
+    const widths = rest.map((c) => width(c.containerEl) || 1);
+    const sum = widths.reduce((a, b) => a + b, 0);
+    item.setDimension(100 * share);
+    rest.forEach((c, k) => {
+        if (typeof c.setDimension === 'function') {
+            c.setDimension(100 * (1 - share) * widths[k] / sum);
+        }
+    });
+    return true;
+}
+
 function styleMenu(m, icons) {
     if (m.dom && m.dom.addClass) m.dom.addClass('dendrite-menu');
     if (!icons && typeof m.setNoIcon === 'function') m.setNoIcon();
@@ -9397,22 +9428,9 @@ class DendriteComments extends ItemView {
         const el = this.contentEl;
         el.empty();
         el.addClass('dendrite-comments');
-        // Who wrote it from a list, which grows with the reviewers; the
-        // others as switches of a few choices, each one click.
-        const bar = el.createDiv({ cls: 'dendrite-comments-filter' });
-        const row = bar.createEl('label');
-        row.createSpan({ text: 'Written by' });
-        this.authorEl = row.createEl('select', { cls: 'dropdown' });
-        this.authorEl.addEventListener('change', () => this.plugin
-            .setCommentFilter({ author: this.authorEl.value }));
-        this.switchRows = {};
-        for (const [key, label] of [['waiting', 'Waiting on'],
-                                    ['priority', 'Priority'],
-                                    ['kind', 'Kind']]) {
-            const r = bar.createDiv({ cls: 'dendrite-comments-row' });
-            r.createSpan({ text: label });
-            this.switchRows[key] = r.createDiv();
-        }
+        // The filters as one row of buttons, each a menu of its choices,
+        // lit and naming its choice while one is set.
+        this.filterEl = el.createDiv({ cls: 'dendrite-comments-filter' });
         this.countEl = el.createDiv({ cls: 'dendrite-comments-count' });
         this.listEl = el.createDiv({ cls: 'dendrite-comments-list' });
         const ws = this.app.workspace;
@@ -9557,7 +9575,7 @@ class DendriteComments extends ItemView {
 
     /** The filter's choices, with every name that wrote a comment. */
     showFilter() {
-        if (!this.authorEl) return;
+        if (!this.filterEl) return;
         const f = this.plugin.commentFilterState;
         const self = this.plugin.selfNames();
         const nameOf = (who) => this.names.get(who) || who;
@@ -9566,33 +9584,56 @@ class DendriteComments extends ItemView {
         if (f.author && f.author !== 'me' && !authors.includes(f.author)) {
             authors.push(f.author);
         }
-        const sel = this.authorEl;
-        sel.empty();
-        for (const [value, text] of [['', 'Anyone'], ['me', 'Me'],
-            ...authors.map((a) => [a, nameOf(a)])]) {
-            sel.createEl('option', { value, text });
+        // Each: its name, its choices as [value, in the menu, on the
+        // button once chosen], the first meaning any.
+        const facets = [
+            ['author', 'Author', 'Who wrote it', [['', 'Anyone'],
+                ['me', 'Me', 'By me'],
+                ...authors.map((a) => [a, nameOf(a)])]],
+            ['waiting', 'Waiting', 'Whose answer it waits for', [
+                ['', 'Anyone'], ['me', 'Me', 'On me'],
+                ['Claude', 'Claude', 'On Claude'],
+                ['resolve', 'Ready to resolve', 'To resolve']]],
+            ['priority', 'Priority', 'The priority set to work through it',
+                [['', 'Any'], ['p1', 'p1'], ['p2', 'p2'], ['p3', 'p3'],
+                 ['none', 'None set', 'No priority']]],
+            ['kind', 'Kind', 'A comment or a suggested change', [
+                ['', 'All'], ['comment', 'Comments'],
+                ['suggest', 'Suggested changes', 'Changes']]]];
+        const bar = this.filterEl;
+        bar.empty();
+        for (const [key, name, tip, choices] of facets) {
+            const now = choices.find((c) => c[0] === (f[key] || ''));
+            const set = !!(f[key] && now);
+            const b = bar.createEl('button', { cls: 'dendrite-cfilter' +
+                (set ? ' is-on' : '') });
+            b.dataset.filter = key;
+            b.createSpan({ text: set ? now[2] || now[1] : name });
+            setIcon(b.createSpan({ cls: 'dendrite-cfilter-caret' }),
+                    'chevron-down');
+            b.setAttr('aria-label', tip);
+            b.addEventListener('click', (e) => {
+                const m = dendriteMenu(false);
+                for (const [value, label] of choices) {
+                    m.addItem((i) => {
+                        i.setTitle(label).onClick(() =>
+                            this.plugin.setCommentFilter({ [key]: value }));
+                        if (typeof i.setChecked === 'function') {
+                            i.setChecked(value === (f[key] || ''));
+                        }
+                    });
+                }
+                if (m.showAtMouseEvent) m.showAtMouseEvent(e);
+            });
         }
-        sel.value = f.author || '';
-        const flip = (key, title, views) => {
-            const r = this.switchRows[key];
-            r.empty();
-            barSwitch(r, title, views, f[key] || '', (v) =>
-                this.plugin.setCommentFilter({ [key]: v }));
-        };
-        flip('waiting', 'Whose answer a comment waits for', [
-            ['', 'Any', 'Every comment'],
-            ['me', 'Me', 'Someone else has the last word'],
-            ['Claude', 'Claude', 'Asked with @Claude, not answered since'],
-            ['resolve', 'Resolve', 'The last reply suggests resolving it']]);
-        flip('priority', 'The priority set for working through them', [
-            ['', 'Any', 'Every comment'],
-            ['p1', 'p1', 'Priority p1'], ['p2', 'p2', 'Priority p2'],
-            ['p3', 'p3', 'Priority p3'],
-            ['none', 'None', 'Comments with no priority set']]);
-        flip('kind', 'Comments or suggested changes', [
-            ['', 'All', 'Comments and suggested changes'],
-            ['comment', 'Comments', 'Comments only'],
-            ['suggest', 'Changes', 'Suggested changes only']]);
+        if (Object.values(f).some(Boolean)) {
+            const x = bar.createEl('button', { cls: 'dendrite-cfilter ' +
+                'dendrite-cfilter-clear' });
+            setIcon(x, 'x');
+            x.setAttr('aria-label', 'Clear the filters');
+            x.addEventListener('click', () => this.plugin.setCommentFilter(
+                { author: '', waiting: '', priority: '', kind: '' }));
+        }
     }
 
     draw() {
@@ -12925,7 +12966,7 @@ module.exports = class DendritePlugin extends Plugin {
             const pv = ws.getLeavesOfType(PREVIEW).find((l) =>
                 l.view && l.view.file === from.file && inWindow(l));
             leaf = ws.createLeafBySplit(pv || from.leaf, 'vertical');
-            narrowSplit(leaf, 1 / 4);
+            sideSplit(leaf, SIDEBAR_WIDTH);
             await leaf.setViewState({ type: COMMENTS, active: false });
         } else if (!leaf) {
             leaf = ws.getRightLeaf(false);

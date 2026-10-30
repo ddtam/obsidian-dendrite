@@ -2750,28 +2750,42 @@ button.dendrite-done {
    a card in its reviewer's colour, as the preview's bubbles. */
 .dendrite-comments-filter {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-bottom: 8px;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-bottom: 6px;
 }
-.dendrite-comments-filter label {
-    display: flex;
+/* A filter: a small button naming it, or its choice in the accent while
+   one is set, that opens its menu. */
+button.dendrite-cfilter {
+    display: inline-flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    font-size: var(--font-ui-small);
+    gap: 1px;
+    height: auto;
+    padding: 2px 4px 2px 6px;
+    font-size: var(--font-ui-smaller);
+    border-radius: var(--radius-l);
+    box-shadow: none;
+    background: var(--background-modifier-hover);
     color: var(--text-muted);
 }
-.dendrite-comments-row {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: var(--font-ui-small);
-    color: var(--text-muted);
+button.dendrite-cfilter.is-on {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
 }
-.dendrite-comments-filter select {
-    flex: 0 1 60%;
-    min-width: 0;
+.dendrite-cfilter-caret {
+    display: inline-flex;
+}
+.dendrite-cfilter-caret svg {
+    width: 10px;
+    height: 10px;
+}
+button.dendrite-cfilter-clear svg {
+    width: 12px;
+    height: 12px;
+}
+button.dendrite-cfilter-clear {
+    padding: 2px 6px;
+    background: transparent;
 }
 .dendrite-comments-count {
     margin-bottom: 8px;

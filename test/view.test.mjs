@@ -6651,11 +6651,22 @@ test('the comment list in the sidebar lists the open comments in reading ' +
         '.dendrite-cthread-unprinted')].map((el) => el.textContent);
     assert.deepEqual(gone, ['Old version: does not print'],
                      'why the preview does not show it');
-    const authors = [...list.authorEl.options].map((o) => o.text);
-    assert.deepEqual(authors, ['Anyone', 'Me', 'Aly']);
-    [...list.contentEl.querySelectorAll('.dendrite-seg-btn')]
-        .find((b) => b.textContent === 'Claude').click();
+    // The filters, one row of buttons, each a menu.
+    const filter = (key) => list.contentEl.querySelector(
+        `.dendrite-cfilter[data-filter="${key}"]`);
+    assert.deepEqual([...list.contentEl.querySelectorAll('.dendrite-cfilter')]
+        .map((b) => b.textContent), ['Author', 'Waiting', 'Priority',
+                                     'Kind']);
+    filter('author').click();
+    assert.deepEqual(h.obsidian.lastMenu.items.map((i) => i.title),
+                     ['Anyone', 'Me', 'Aly']);
+    filter('waiting').click();
+    await menuItem(h.obsidian.lastMenu, 'Claude').click();
     assert.deepEqual(rows(), ['@Claude right?']);
+    assert.equal(filter('waiting').textContent, 'On Claude', 'its choice');
+    assert.ok(filter('waiting').classList.contains('is-on'));
+    assert.ok(list.contentEl.querySelector('.dendrite-cfilter-clear'),
+              'and a way to clear them');
     assert.equal(list.countEl.textContent, '1 of 4 open comments');
     // A click: the preview shows its comments, those the filter keeps.
     list.contentEl.querySelector('.dendrite-cthread').click();
@@ -6833,7 +6844,19 @@ test('the comment list opens beside the board in a popout window, which ' +
             t === 'dendrite-preview' ? [preview] : [],
         createLeafBySplit(from, dir) {
             const l = leafIn(from.getContainer());
-            made.push([from, dir, l]);
+            // Beside the board and preview, 800 and 400 px wide.
+            const dims = new Map();
+            const box = (w) => ({
+                getBoundingClientRect: () => ({ width: w }) });
+            const item = (w) => ({ containerEl: box(w),
+                                   setDimension(d) { dims.set(this, d); } });
+            const a = item(800);
+            const b = item(400);
+            l.containerEl = box(0);
+            l.setDimension = (d) => dims.set(l, d);
+            l.parent = { direction: 'vertical', children: [a, b, l],
+                         containerEl: box(1200) };
+            made.push([from, dir, l, () => [a, b, l].map((x) => dims.get(x))]);
             return l;
         },
         getRightLeaf: () => side,
@@ -6845,6 +6868,8 @@ test('the comment list opens beside the board in a popout window, which ' +
     assert.equal(made[0][0], preview, 'beside the preview there');
     assert.equal(made[0][1], 'vertical');
     assert.equal(made[0][2].state.type, 'dendrite-comments');
+    assert.deepEqual(made[0][3](), [50, 25, 25],
+                     'a sidebar\'s 300 px of 1200, the rest kept 2:1');
     assert.equal(side.state, undefined, 'not in the main window\'s sidebar');
     // In the main window: the right sidebar.
     const mainBoard = leafIn(main);
