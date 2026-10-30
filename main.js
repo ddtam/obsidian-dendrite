@@ -6617,7 +6617,8 @@ var require_reviewapi = __commonJS({
           author: q("author"),
           awaiting: q("awaiting"),
           card: q("card"),
-          resolved: !!q("resolved")
+          resolved: !!q("resolved"),
+          status: !!q("status")
         });
         return send(res, out.status, out.json);
       }
@@ -7952,6 +7953,36 @@ var DendriteView = class extends ItemView {
   async goTo(id) {
     if (id === this.active) this.applyActive();
     else await this.select(id);
+  }
+  /**
+   * Each card not settled with its file, for a program reading or
+   * writing it: { card, state, since }, the state `older_copy` (a sync
+   * brought in text it had before), `typing_kept` (the typing kept
+   * over a newer copy), `editing` (open in the editor) or, for the
+   * index, card null, `index_older`.
+   */
+  syncStates() {
+    const since = (k) => {
+      const t = this.revertedAt && this.revertedAt.get(k);
+      return t ? new Date(t).toISOString() : null;
+    };
+    const out = [];
+    for (const k of this.reverted) {
+      if (k === "index") {
+        out.push({
+          card: null,
+          state: "index_older",
+          since: since(k)
+        });
+      } else {
+        out.push({ card: k, state: this.held.has(k) ? "typing_kept" : "older_copy", since: since(k) });
+      }
+    }
+    const ed = this.editing;
+    if (ed && !this.reverted.has(ed.id)) {
+      out.push({ card: ed.id, state: "editing", since: null });
+    }
+    return out;
   }
   /** The cards marked as changed by sync, in reading order. */
   revertedCards() {
@@ -18204,7 +18235,12 @@ module.exports = class DendritePlugin extends Plugin {
       items.push(item);
       let reason = null;
       if (!(f instanceof TFile)) reason = `no card ${item.card}`;
-      else if (!item.withdraw && item.replace === null) {
+      else if (reason = await this.writeBlock(
+        file,
+        f.basename,
+        x && x.base
+      )) {
+      } else if (!item.withdraw && item.replace === null) {
         reason = "no replace: the new text, or withdraw: true";
       } else {
         const got = review.findSuggestion(await bodyOf(f), item);
@@ -18288,6 +18324,55 @@ module.exports = class DendritePlugin extends Plugin {
     } };
   }
   /**
+   * A card's version, for a program to tell whether two reads saw the
+   * same text and whether it changed before a write: a hash of its text
+   * as a write would find it, in the editor while it is open there.
+   */
+  async cardVersion(file, id, view = void 0) {
+    if (view === void 0) {
+      view = this.openViews().find((v) => v.file === file);
+    }
+    const ed = view && view.editing;
+    let text;
+    if (ed && ed.id === id) {
+      text = ed.editor.value;
+    } else {
+      const f = this.app.metadataCache.getFirstLinkpathDest(
+        id,
+        file.path
+      );
+      if (!(f instanceof TFile)) return null;
+      text = core.splitFrontmatter(await this.app.vault.read(f)).body;
+    }
+    return require_docx().crc32(Buffer.from(text, "utf8")).toString(16).padStart(8, "0");
+  }
+  /**
+   * Why a program may not write to card `id` of `file` now, or null: a
+   * sync left it on an older copy, or kept typing over a newer one,
+   * until Derek chooses its version; or `base`, a version it read,
+   * is no longer its text. Open in the editor is no reason: a write
+   * goes into the editor's text, as one more change there.
+   */
+  async writeBlock(file, id, base = null) {
+    const view = this.openViews().find((v) => v.file === file);
+    const st = view && view.syncStates().find((x) => x.card === id && (x.state === "older_copy" || x.state === "typing_kept"));
+    if (st) {
+      return `card ${core.shortId(id)} is ${st.state}: a sync changed it, and Derek chooses its version on the board before anything is written to it`;
+    }
+    if (base !== null && base !== void 0 && base !== "") {
+      const now = await this.cardVersion(file, id, view);
+      if (now !== String(base)) {
+        return `card ${core.shortId(id)} changed since read: version ${now}, not ${base}`;
+      }
+    }
+    return null;
+  }
+  /** The sync block of a manuscript's threads: its board and states. */
+  syncBlock(file) {
+    const view = this.openViews().find((v) => v.file === file);
+    return { board_open: !!view, sync: view ? view.syncStates() : [] };
+  }
+  /**
    * A manuscript's open review comments and suggested changes, each
    * with its id, card, passage, reviewer, text, Google link and
    * replies, in reading order, and the text of their cards without
@@ -18303,7 +18388,8 @@ module.exports = class DendritePlugin extends Plugin {
     author = null,
     awaiting = null,
     card = null,
-    resolved = false
+    resolved = false,
+    status = false
   } = {}) {
     const file = this.indexWithPrefix(prefix);
     if (!file) {
@@ -18320,10 +18406,23 @@ module.exports = class DendritePlugin extends Plugin {
     if (card && !top) {
       return { status: 404, json: { error: `no card ${card}` } };
     }
+    const within = top ? [top, ...core.allNodes(top)] : all;
+    const versions = {};
+    for (const n of within) {
+      const v = await this.cardVersion(file, n.id);
+      if (v) versions[n.id] = v;
+    }
+    const sync = this.syncBlock(file);
+    if (status) {
+      return { status: 200, json: {
+        manuscript: prefixOf(app, file),
+        ...sync,
+        versions
+      } };
+    }
     const threads = [];
     const cards = {};
     const open = /* @__PURE__ */ new Set();
-    const within = top ? [top, ...core.allNodes(top)] : all;
     for (const n of within) {
       const f = app.metadataCache.getFirstLinkpathDest(n.id, file.path);
       if (!(f instanceof TFile)) continue;
@@ -18357,7 +18456,13 @@ module.exports = class DendritePlugin extends Plugin {
         });
       }
     }
-    const json = { manuscript: prefixOf(app, file), threads, cards };
+    const json = {
+      manuscript: prefixOf(app, file),
+      threads,
+      cards,
+      versions,
+      ...sync
+    };
     if (resolved) {
       const ids = new Set(within.map((n) => n.id));
       json.resolved = reviewlog.settled(
@@ -18424,6 +18529,12 @@ module.exports = class DendritePlugin extends Plugin {
         card,
         file.path
       );
+      const base = data.base && typeof data.base === "object" ? data.base[card] : data.base;
+      const block = f instanceof TFile ? await this.writeBlock(file, f.basename, base) : null;
+      if (block) {
+        refused.push({ id, reason: block });
+        continue;
+      }
       const n = !(f instanceof TFile) ? -1 : await (view ? view.replyFrom(card, tid, reply) : this.replyInFile(f, tid, reply));
       if (n === REFUSED) {
         refused.push({ id, reason: "someone has replied since; send a new reply instead" });
@@ -18469,6 +18580,11 @@ module.exports = class DendritePlugin extends Plugin {
       );
       if (!(f instanceof TFile)) {
         refused.push({ n, reason: `no card ${card}` });
+        continue;
+      }
+      const block = await this.writeBlock(file, f.basename, x.base);
+      if (block) {
+        refused.push({ n, reason: block });
         continue;
       }
       const item = { ...x, author: String(x.author || "").trim() || "Claude", date: localDay() };

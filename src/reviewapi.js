@@ -17,7 +17,16 @@
 //        not answered by them, or replied to since by a reviewer, by the
 //        writer on their own comment, or as `@<name> ...`; and `card`
 //        keeps to that card and those under it; `resolved=1` adds the
-//        comments dealt with, from the manuscript's review log; read only
+//        comments dealt with, from the manuscript's review log; read only.
+//        Also `versions`, each card's version, a hash of its text, and
+//        `board_open` and `sync`, each card the open board has not
+//        settled: [{ card, state, since }], `older_copy`, `typing_kept`,
+//        `editing`, or `index_older` with card null. `status=1` gives
+//        only those, without threads
+//   Writes (reply, suggest, revise) are refused on a card that is
+//        `older_copy` or `typing_kept`, and, given `base`, a version
+//        read, where the card has changed since; `editing` is written
+//        into the open editor
 //   POST /dendrite/reply         { manuscript, thread, text, author? }
 //        a reply written under the comment whose id is `thread`, at
 //        once, as `author`, Claude if not given; up to 500 characters.
@@ -128,7 +137,7 @@ async function handle(opts, req, res) {
         const q = (k) => url.searchParams.get(k) || null;
         const out = await opts.threads(prefix, { author: q('author'),
             awaiting: q('awaiting'), card: q('card'),
-            resolved: !!q('resolved') });
+            resolved: !!q('resolved'), status: !!q('status') });
         return send(res, out.status, out.json);
     }
     const m = /^\/dendrite\/review\/([\w-]+)$/.exec(url.pathname);

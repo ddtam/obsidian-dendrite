@@ -891,11 +891,14 @@ test('the review endpoint answers GET /dendrite/threads with the ' +
             '&author=Claude&card=G-aaaaa', auth),
             [200, { manuscript: 'G', threads: [] }]);
         await call('/dendrite/threads?manuscript=G&resolved=1', auth);
+        await call('/dendrite/threads?manuscript=G&status=1', auth);
         assert.deepEqual(asked, [
             ['G', { author: 'Claude', awaiting: null, card: 'G-aaaaa',
-                    resolved: false }],
+                    resolved: false, status: false }],
             ['G', { author: null, awaiting: null, card: null,
-                    resolved: true }]]);
+                    resolved: true, status: false }],
+            ['G', { author: null, awaiting: null, card: null,
+                    resolved: false, status: true }]]);
         assert.equal((await call('/dendrite/threads?manuscript=G'))[0], 401);
         assert.equal((await call('/dendrite/threads', auth))[0], 400,
                      'which manuscript');

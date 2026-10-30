@@ -7366,3 +7366,65 @@ test('the comment list and the tables and figures share one pane beside ' +
     assert.equal(leaves['dendrite-floats'].length, 0);
     assert.equal(split[0].children.length, 0, 'the pane emptied');
 });
+
+test('the endpoint says which cards a sync has not settled and each ' +
+     'card\'s version, and refuses writes to an unsettled card or one ' +
+     'changed since read', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%% ' +
+        'is large.';
+    const B = 'Storage is 83 TB.';
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n', { 'G-aaaaa': A, 'G-bbbbb': B });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.saveSettings = async () => {};
+    p.openViews = () => [view];
+    let st = (await p.threadsFor('G', { status: true })).json;
+    assert.equal(st.board_open, true);
+    assert.deepEqual(st.sync, []);
+    assert.deepEqual(Object.keys(st.versions).sort(), ['G-aaaaa', 'G-bbbbb']);
+    const vb = st.versions['G-bbbbb'];
+    assert.match(vb, /^[0-9a-f]{8}$/);
+    // A sync put an older copy on G-aaaaa: listed, and writes refused.
+    view.reverted.add('G-aaaaa');
+    view.revertedAt.set('G-aaaaa', Date.parse('2026-10-30T20:19:55Z'));
+    st = (await p.threadsFor('G', { status: true })).json;
+    assert.deepEqual(st.sync, [{ card: 'G-aaaaa', state: 'older_copy',
+                                 since: '2026-10-30T20:19:55.000Z' }]);
+    const full = (await p.threadsFor('G')).json;
+    assert.deepEqual(full.sync, st.sync, 'in the threads too');
+    assert.ok(full.threads.length && full.versions['G-aaaaa']);
+    const tid = full.threads[0].id;
+    let out = await p.replyTo({ manuscript: 'G', thread: tid,
+                                text: 'Forty.' });
+    assert.match(out.json.refused[0].reason, /older_copy/);
+    out = await p.suggestTo({ manuscript: 'G', items: [
+        { card: 'G-aaaaa', quote: 'large', replace: 'big' }] });
+    assert.match(out.json.refused[0].reason, /older_copy/);
+    out = await p.submitRevision({ manuscript: 'G', items: [
+        { card: 'aaaaa', quote: 'cohort', withdraw: true }] });
+    assert.match(out.json.missing[0].reason, /older_copy/);
+    view.held.set('G-aaaaa', A);
+    assert.equal((await p.threadsFor('G', { status: true })).json.sync[0]
+        .state, 'typing_kept');
+    // A version read before a change is refused; the current one written.
+    out = await p.suggestTo({ manuscript: 'G', items: [
+        { card: 'G-bbbbb', quote: 'Storage', replace: 'Disk',
+          base: 'deadbeef' }] });
+    assert.match(out.json.refused[0].reason, /changed since read/);
+    out = await p.suggestTo({ manuscript: 'G', items: [
+        { card: 'G-bbbbb', quote: 'Storage', replace: 'Disk', base: vb }] });
+    assert.deepEqual(out.json.done, [1]);
+    // Open in the editor: reported, and written into the editor's text.
+    await view.startEdit('G-bbbbb');
+    st = (await p.threadsFor('G', { status: true })).json;
+    assert.ok(st.sync.some((x) => x.card === 'G-bbbbb' &&
+                           x.state === 'editing'));
+    out = await p.suggestTo({ manuscript: 'G', items: [
+        { card: 'G-bbbbb', quote: '83 TB', replace: '100 TB' }] });
+    assert.deepEqual(out.json.done, [1]);
+    assert.match(view.editing.editor.value, /100 TB/);
+    await view.endEdit();
+});
