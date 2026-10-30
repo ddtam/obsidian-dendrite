@@ -3820,7 +3820,7 @@ var require_cmreview = __commonJS({
     "use strict";
     var review2 = require_review();
     function reviewExtension(colourOf = () => null, nameOf = (x) => x, onLost = () => {
-    }, linkOf = null) {
+    }, linkOf = null, { notes = true } = {}) {
       const { Decoration, EditorView, WidgetType } = require("@codemirror/view");
       const { StateField, EditorState } = require("@codemirror/state");
       class Chip extends WidgetType {
@@ -3929,7 +3929,7 @@ var require_cmreview = __commonJS({
           if (!under.has(end)) under.set(end, []);
           under.get(end).push(c);
         }
-        for (const [end, list] of under) {
+        for (const [end, list] of notes ? under : []) {
           all.push(Decoration.widget({
             widget: new Notes(list),
             block: true,
@@ -4456,7 +4456,8 @@ var require_editor = __commonJS({
                   opts.colourOf,
                   opts.nameOf,
                   opts.onLost,
-                  opts.linkOf
+                  opts.linkOf,
+                  { notes: false }
                 )
               ) });
             }
@@ -7778,7 +7779,12 @@ var DendriteView = class extends ItemView {
     btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e), true).addClass("dendrite-bar-gap-before");
     this.reviewBtn = btn("inbox", "Review", "Bring in review comments: from the linked Google Doc, a returned Word file, or programs", (e) => this.reviewMenu(e), true);
     this.showInboxBadge();
-    btn("messages-square", "Comments", "List the open comments in the sidebar, to filter them by who wrote them and whose answer they wait for", () => this.plugin.showCommentList(this));
+    this.commentsBtn = btn("messages-square", "Comments", "Review on or off: the list of open comments, to filter them by who wrote them and whose answer they wait for, and the comments beside the preview's text", () => this.plugin.setReview(
+      this,
+      !this.plugin.reviewOn()
+    ));
+    this.commentsBtn.addClass("is-toggle");
+    this.showReviewOn();
     this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
     this.showMode();
     this.totalEl = bar.createDiv({ cls: "dendrite-total" });
@@ -8428,7 +8434,8 @@ var DendriteView = class extends ItemView {
     m.addItem((i) => i.setTitle("Export\u2026").setIcon("file-output").onClick(() => this.exportMenu(null, e)));
     const waiting = (this.inbox || []).length;
     m.addItem((i) => i.setTitle("Review\u2026" + (waiting ? ` (${waiting} waiting)` : "")).setIcon("inbox").onClick(() => this.reviewMenu(e)));
-    m.addItem((i) => i.setTitle("Comment list").setIcon("messages-square").onClick(() => this.plugin.showCommentList(this)));
+    const reviewing = this.plugin.reviewOn && this.plugin.reviewOn();
+    m.addItem((i) => i.setTitle(reviewing ? "Close the comments" : "Comments").setIcon("messages-square").onClick(() => this.plugin.setReview(this, !reviewing)));
     m.addSeparator();
     m.addItem((i) => i.setTitle("This manuscript's settings").setIcon("settings").onClick(() => this.openManuscriptSettings()));
     m.addItem((i) => i.setTitle("Open the index note").setIcon("file-text").onClick(() => this.plugin.openAsMarkdown(this.file)));
@@ -12085,6 +12092,14 @@ var DendriteView = class extends ItemView {
     new ManuscriptModal(this).open();
   }
   /** Light the Preview button while this manuscript's preview is open. */
+  /** The Comments button lit while review is on. */
+  showReviewOn() {
+    if (!this.commentsBtn) return;
+    this.commentsBtn.toggleClass(
+      "is-on",
+      !!(this.plugin.reviewOn && this.plugin.reviewOn())
+    );
+  }
   showPreviewOn() {
     if (this.previewBtn && this.plugin.previewOpen) {
       this.previewBtn.toggleClass(
@@ -14057,7 +14072,7 @@ var DendritePreview = class extends ItemView {
   async setState(state, result) {
     const f = state && state.file && this.app.vault.getAbstractFileByPath(state.file);
     this.showLeft = !!(state && state.showLeft);
-    this.showComments = !!(state && state.showComments);
+    this.showComments = !!(state && state.showComments) || !!(this.plugin.reviewOn && this.plugin.reviewOn());
     this.notesAt = NOTES_AT[state && state.notesAt] ? state.notesAt : "section";
     if (f instanceof TFile) {
       this.file = f;
@@ -14065,6 +14080,14 @@ var DendritePreview = class extends ItemView {
       await this.refresh();
     }
     return super.setState(state, result);
+  }
+  /** Review comments beside the text, or not, as review is on or off. */
+  async setComments(on) {
+    if (this.showComments === on) return;
+    this.showComments = on;
+    this.reviewAt = -1;
+    this.app.workspace.requestSaveLayout();
+    await this.refresh();
   }
   /**
    * How a [[link]] in a comment is drawn in the preview: to one of the
@@ -14149,21 +14172,6 @@ var DendritePreview = class extends ItemView {
         this.refresh();
       }
     );
-    const comments = barButton(
-      bar,
-      "message-square",
-      "Comments",
-      "Show review comments and suggested changes beside the text, as Word and Google Docs do, to go through them one by one",
-      () => {
-        this.showComments = !this.showComments;
-        comments.toggleClass("is-on", this.showComments);
-        this.reviewAt = -1;
-        this.app.workspace.requestSaveLayout();
-        this.refresh();
-      }
-    );
-    comments.addClass("is-toggle");
-    comments.toggleClass("is-on", this.showComments);
     this.navEl = bar.createDiv({ cls: "dendrite-seg dendrite-pcomments-nav" });
     const navBtn = (icon, label, d) => barButton(
       this.navEl,
@@ -15302,10 +15310,11 @@ var DendriteComments = class extends ItemView {
     const board = ws.getLeavesOfType(VIEW)[0];
     const f = last ? last.file : board && board.view.file;
     await this.show(f || null);
+    if (this.plugin.reviewChanged) this.plugin.reviewChanged();
   }
   async onClose() {
     clearTimeout(this.timer);
-    if (this.plugin.refreshPreviews) this.plugin.refreshPreviews();
+    if (this.plugin.reviewChanged) this.plugin.reviewChanged();
   }
   /** The manuscript of a board or preview made active. */
   follow(leaf) {
@@ -15539,11 +15548,7 @@ var DendriteComments = class extends ItemView {
     const leaf = this.plugin.previewLeaf ? this.plugin.previewLeaf(this.file) : null;
     const pv = leaf && leaf.view;
     if (pv) {
-      if (!pv.showComments) {
-        pv.showComments = true;
-        pv.build();
-        await pv.refresh();
-      }
+      await pv.setComments(true);
       const k = pv.reviewList.findIndex((x) => (x.parts || [x]).some((p) => p.id === t.id && p.n === t.n));
       if (k >= 0) {
         pv.reviewAt = k;
@@ -18494,6 +18499,34 @@ module.exports = class DendritePlugin extends Plugin {
       const { fm, body } = core.splitFrontmatter(data);
       return fm + review.setPriority(body, n, p);
     });
+  }
+  /** Whether review is on: the comment list open. */
+  reviewOn() {
+    return this.app.workspace.getLeavesOfType(COMMENTS).length > 0;
+  }
+  /**
+   * Review on, from board `from`: the comment list opened, which shows
+   * the previews' comments; off: the list closed, which hides them.
+   */
+  async setReview(from, on) {
+    if (on) await this.showCommentList(from);
+    else {
+      for (const l of this.app.workspace.getLeavesOfType(COMMENTS)) {
+        l.detach();
+      }
+    }
+    this.reviewChanged();
+  }
+  /** The previews and the boards' buttons, as review is on or off. */
+  reviewChanged() {
+    const on = this.reviewOn();
+    for (const l of this.app.workspace.getLeavesOfType(PREVIEW)) {
+      if (l.view.setComments) l.view.setComments(on);
+      else if (l.view.scheduleRefresh) l.view.scheduleRefresh();
+    }
+    for (const v of this.openViews ? this.openViews() : []) {
+      if (v.showReviewOn) v.showReviewOn();
+    }
   }
   /** The comment list's filter while the list is open, or null. */
   commentFilter() {

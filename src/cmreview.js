@@ -20,7 +20,8 @@ const review = require('./review.js');
  * told of comments an edit left marking no text (review.passagesLost).
  */
 function reviewExtension(colourOf = () => null, nameOf = (x) => x,
-                         onLost = () => {}, linkOf = null) {
+                         onLost = () => {}, linkOf = null,
+                         { notes = true } = {}) {
     const { Decoration, EditorView, WidgetType } =
         require('@codemirror/view');
     const { StateField, EditorState } = require('@codemirror/state');
@@ -153,7 +154,9 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
             if (!under.has(end)) under.set(end, []);
             under.get(end).push(c);
         }
-        for (const [end, list] of under) {
+        // Without them in a table cell's own editor: a cell is no place
+        // for a callout.
+        for (const [end, list] of notes ? under : []) {
             all.push(Decoration.widget({ widget: new Notes(list),
                                          block: true, side: 1 }).range(end));
         }

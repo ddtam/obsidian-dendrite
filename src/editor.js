@@ -175,7 +175,8 @@ function obsidianEditor(app, parent, opts) {
                     const { StateEffect } = require('@codemirror/state');
                     out.cm.dispatch({ effects: StateEffect.appendConfig.of(
                         reviewExtension(opts.colourOf, opts.nameOf,
-                                        opts.onLost, opts.linkOf)) });
+                                        opts.onLost, opts.linkOf,
+                                        { notes: false })) });
                 }
             } catch (err) {
                 console.warn('Dendrite: review comments in a table cell ' +

@@ -4337,11 +4337,8 @@ test('the preview can show review comments as bubbles beside the text, ' +
     const bubbles = () => [...view.contentEl.querySelectorAll(
         '.dendrite-pbubble')];
     assert.equal(bubbles().length, 0, 'off at first');
-    const toggle = [...view.contentEl.querySelectorAll('.dendrite-bar-btn')]
-        .find((b) => b.textContent === 'Comments');
-    toggle.onclick();
+    await view.setComments(true);
     await tick(30);
-    assert.ok(toggle.hasClass('is-on'));
     assert.equal(view.getState().showComments, true);
     // Only what prints: the heading card's notes are not in the document.
     assert.deepEqual(bubbles().map((b) => b.querySelector(
@@ -4457,7 +4454,7 @@ test('the preview can show review comments as bubbles beside the text, ' +
     assert.deepEqual(focused, ['G-bbbbb']);
     await nav('Next comment').onclick();
     assert.equal(label(), '2 of 2', 'on to the one after, none skipped');
-    toggle.onclick();
+    await view.setComments(false);
     await tick(30);
     assert.equal(bubbles().length, 0);
     assert.ok(!view.doc.hasClass('has-comments'));
@@ -5149,27 +5146,54 @@ test('an image clicked in the preview opens in Image Toolkit, and does not ' +
     assert.deepEqual(focused, []);
 });
 
-test('the Preview and Comments buttons are toggles, lit while on and ' +
-     'faded while off', async () => {
+test('the board\'s Preview and Comments buttons are toggles, lit while ' +
+     'on; Comments is the one switch for review, the list and the ' +
+     'preview\'s comments together, and the preview has none of its own',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
     const { DendritePreview } = require('../src/main.js');
-    const app = h.makeApp();
-    app.vault.folders.add('W/Grant/cards');
-    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
-        '- [[G-aaaaa|a]]\n');
-    await app.vault.create(cardPath('G-aaaaa'), 'Text.');
-    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
-    const view = new DendritePreview({ app, updateHeader() {} }, plugin);
-    await view.onOpen();
-    await view.setState({ file: INDEX });
-    await tick(30);
-    const comments = [...view.contentEl.querySelectorAll(
-        '.dendrite-bar-btn')].find((b) => /Comments/.test(b.textContent));
-    assert.ok(comments.hasClass('is-toggle'));
-    assert.ok(!comments.hasClass('is-on'));
-    comments.onclick();
-    assert.ok(comments.hasClass('is-on'));
     const board = await open(FLOAT_INDEX, floatCards());
     assert.ok(board.view.previewBtn.hasClass('is-toggle'));
+    const btn = board.view.commentsBtn;
+    assert.ok(btn.hasClass('is-toggle'));
+    assert.ok(!btn.hasClass('is-on'));
+    // A plugin with a preview open and the list's leaves to come.
+    const app = board.app;
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = board.view.plugin.settings;
+    p.selfNames = () => new Set(['Me']);
+    p.commentFilterState = { author: '', waiting: '', kind: '',
+                             priority: '' };
+    const pv = new DendritePreview({ app, updateHeader() {} }, p);
+    await pv.onOpen();
+    await pv.setState({ file: INDEX });
+    await tick(30);
+    assert.ok(![...pv.contentEl.querySelectorAll('.dendrite-bar-btn')]
+        .some((b) => /Comments/.test(b.textContent)), 'none in the preview');
+    const lists = [];
+    const leaves = { 'dendrite-preview': [{ view: pv }],
+                     'dendrite-comments': lists };
+    app.workspace.getLeavesOfType = (t) => leaves[t] || [];
+    app.workspace.rootSplit = {};
+    app.workspace.getRightLeaf = () => {
+        const leaf = { async setViewState() { lists.push(leaf); },
+                       detach() { lists.splice(lists.indexOf(leaf), 1); } };
+        return leaf;
+    };
+    app.workspace.revealLeaf = () => {};
+    p.openViews = () => [board.view];
+    board.view.plugin = p;
+    btn.onclick();
+    await tick(30);
+    assert.equal(lists.length, 1, 'the list opened');
+    assert.ok(pv.showComments, 'the preview\'s comments shown');
+    assert.ok(btn.hasClass('is-on'));
+    btn.onclick();
+    await tick(30);
+    assert.equal(lists.length, 0, 'the list closed');
+    assert.ok(!pv.showComments, 'and the comments hidden');
+    assert.ok(!btn.hasClass('is-on'));
 });
 
 test('a heading card carrying a review comment shows revise, not the ' +

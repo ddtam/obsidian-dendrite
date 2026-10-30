@@ -1416,6 +1416,7 @@ body {
     --dendrite-suggest: var(--interactive-accent);
 }
 .dendrite-md mark.dendrite-review-mark,
+.dendrite-cell mark.dendrite-review-mark,
 .dendrite-preview-doc mark.dendrite-review-mark {
     background: color-mix(in srgb, var(--dendrite-review) 22%,
                           transparent);
@@ -1424,12 +1425,14 @@ body {
     padding: 0 1px;
 }
 .dendrite-md .dendrite-review-old,
+.dendrite-cell .dendrite-review-old,
 .dendrite-preview-doc .dendrite-review-old {
     color: var(--dendrite-suggest);
     text-decoration: line-through;
     text-decoration-color: var(--dendrite-suggest);
 }
 .dendrite-md .dendrite-review-new,
+.dendrite-cell .dendrite-review-new,
 .dendrite-preview-doc .dendrite-review-new {
     color: var(--dendrite-suggest);
     text-decoration: underline;
