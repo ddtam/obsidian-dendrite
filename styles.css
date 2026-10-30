@@ -2531,3 +2531,151 @@ a.dendrite-cite-pdf:hover {
     color: var(--text-accent-hover);
     text-decoration: underline;
 }
+
+/* One column at a time, in a pane under one and a half cards wide, as
+   on a phone held upright. A column fills the width and a sideways
+   swipe snaps to the next; a column scrolls natively, each parent's
+   cards under its name, which stays at the top while they are in view.
+   No snap down a column: the browser snaps a scroll by the view too,
+   which pulled the active card away from the top. */
+.dendrite.is-narrow .dendrite-board {
+    scroll-snap-type: x mandatory;
+}
+
+.dendrite.is-narrow .dendrite-board::before,
+.dendrite.is-narrow .dendrite-board::after {
+    display: none;
+}
+
+.dendrite.is-narrow .dendrite-col {
+    flex: 0 0 100%;
+    box-sizing: border-box;
+    padding: 0 8px;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+    overflow-y: auto;
+}
+
+.dendrite.is-narrow .dendrite-col-inner {
+    will-change: auto;
+}
+
+.dendrite.is-narrow .dendrite-group {
+    padding: 0 0 10px;
+    margin-bottom: 20px;
+}
+
+.dendrite.is-narrow .dendrite-spacer:first-child {
+    height: 8px;
+}
+
+.dendrite.is-narrow .dendrite-spacer:last-child {
+    height: 80vh;
+}
+
+.dendrite.is-narrow .dendrite-flow {
+    display: none;
+}
+
+.dendrite-group-head {
+    display: none;
+}
+
+.dendrite.is-narrow .dendrite-group-head {
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    margin: 0 -8px;
+    padding: 6px 12px;
+    background: var(--background-secondary);
+    border-bottom: 1px solid var(--background-modifier-border);
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+}
+
+/* The bar as one row of icons; the read-outs left out, the chips kept. */
+.dendrite.is-narrow .dendrite-bar {
+    gap: 2px;
+    padding: 4px 8px;
+}
+
+.dendrite.is-narrow .dendrite-bar-btn > span:not([class]),
+.dendrite.is-narrow .dendrite-mode,
+.dendrite.is-narrow .dendrite-total {
+    display: none;
+}
+
+.dendrite.is-narrow .dendrite-bar-gap {
+    margin-right: 0;
+}
+
+/* The way down to the active card, each parent a step back up. */
+.dendrite-crumbs {
+    display: none;
+}
+
+.dendrite.is-narrow .dendrite-crumbs {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    white-space: nowrap;
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.dendrite-crumb {
+    cursor: pointer;
+}
+
+.dendrite-crumb.is-current {
+    color: var(--text-normal);
+    font-weight: var(--font-semibold);
+    cursor: default;
+}
+
+.dendrite-crumb-sep {
+    color: var(--text-faint);
+}
+
+button.dendrite-done {
+    font-size: var(--font-ui-small);
+    padding: 2px 12px;
+}
+
+/* Notices waiting on a choice, at the foot of the board, each its
+   heading until tapped. */
+.dendrite.is-narrow .dendrite-pinned {
+    top: auto;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    max-width: none;
+}
+
+.dendrite.is-narrow .dendrite-orphans:not(.is-open) >
+    :not(.dendrite-orphans-head) {
+    display: none;
+}
+
+.dendrite.is-narrow .dendrite-orphans-head {
+    cursor: pointer;
+}
+
+/* A comment's buttons on a row of their own, so the name keeps its line. */
+.dendrite.is-narrow .dendrite-review-main > .dendrite-review-acts,
+.dendrite.is-narrow .dendrite-review-reply > .dendrite-review-acts {
+    float: none;
+    display: flex;
+    justify-content: flex-end;
+    margin: 0 0 2px;
+}

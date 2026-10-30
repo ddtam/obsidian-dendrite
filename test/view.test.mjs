@@ -6461,3 +6461,51 @@ test('a link in a card\'s text to another card of the manuscript goes to ' +
     assert.deepEqual(app.linksOpened.map((a) => a[0]),
                      ['Other note', 'G-bbbbb'], 'Ctrl-click opens it');
 });
+
+test('in a narrow pane the board shows one column at a time: each group ' +
+     'under its parent\'s name, the way down to the active card above, ' +
+     'and a Done button on a card being typed in', async () => {
+    const was = DendriteView.prototype.isNarrow;
+    DendriteView.prototype.isNarrow = () => true;
+    try {
+        const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+            '- [[G-aaaaa|Aims]]\n    - [[G-bbbbb|Aim 1]]\n' +
+            '    - [[G-ccccc|Aim 2]]\n- [[G-ddddd|Methods]]\n',
+            { 'G-aaaaa': '# Aims', 'G-bbbbb': 'First.',
+              'G-ccccc': 'Second.', 'G-ddddd': '# Methods' });
+        assert.ok(view.contentEl.hasClass('is-narrow'));
+        assert.ok(view.nativeScroll, 'columns scroll natively');
+        const heads = [...view.contentEl.querySelectorAll(
+            '.dendrite-group-head')].map((x) => x.textContent);
+        assert.deepEqual(heads, ['Aims'], 'the second column\'s group');
+        await view.select('G-ccccc');
+        const crumbs = [...view.contentEl.querySelectorAll(
+            '.dendrite-crumb')];
+        assert.deepEqual(crumbs.map((c) => c.textContent),
+                         ['Aims', 'Aim 2']);
+        crumbs[0].onclick();
+        await tick(10);
+        assert.equal(view.active, 'G-aaaaa', 'a step back up');
+        await view.startEdit('G-bbbbb');
+        await tick(10);
+        const done = view.cardEls.get('G-bbbbb')
+            .querySelector('button.dendrite-done');
+        assert.ok(done, 'Done while typing');
+        done.onclick({ stopPropagation() {} });
+        await tick(20);
+        assert.equal(view.editing, null, 'left the card');
+    } finally {
+        DendriteView.prototype.isNarrow = was;
+    }
+});
+
+test('in a pane of any width the board keeps its columns side by side, ' +
+     'and a card being typed in has no Done button', async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n', { 'G-aaaaa': 'Text.' });
+    assert.ok(!view.contentEl.hasClass('is-narrow'));
+    await view.startEdit('G-aaaaa');
+    await tick(10);
+    assert.equal(view.cardEls.get('G-aaaaa')
+        .querySelector('button.dendrite-done'), null);
+});

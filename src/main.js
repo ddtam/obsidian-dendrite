@@ -361,6 +361,12 @@ const HEIGHT_SAMPLES = 8;
  * place and slides only the rest.
  */
 const LONG_MOVE = 1.5;
+// Under this many cards' width the board shows one column at a time:
+// a phone held upright, or a narrow pane.
+const NARROW_CARDS = 1.5;
+// Room above a card brought to the top of a column in that layout, for
+// its parent's name, which stays at the top as the column scrolls.
+const NARROW_TOP = 40;
 
 /** How many screens from the view a drawn card is emptied to its slot. */
 const EMPTY_REACH = 5;
@@ -617,6 +623,11 @@ function openInImageToolkit(app, e) {
     if (!kit || typeof kit.clickImage !== 'function') return false;
     kit.clickImage(e);
     return true;
+}
+
+/** The preview's share of the width: half on a tablet, else a third. */
+function previewShare() {
+    return Platform.isTablet ? 1 / 2 : 1 / 3;
 }
 
 /**
@@ -1152,7 +1163,11 @@ class DendriteView extends ItemView {
                            text: 'Open an index note in Dendrite.' });
             return;
         }
+        this.narrow = this.isNarrow();
+        el.toggleClass('is-narrow', this.narrow);
         this.renderBar(el);
+        // The way down to the active card, shown in the one-column layout.
+        this.crumbsEl = el.createDiv({ cls: 'dendrite-crumbs' });
         const stage = el.createDiv({ cls: 'dendrite-stage' });
         const board = stage.createDiv({ cls: 'dendrite-board' });
         this.board = board;
@@ -1163,7 +1178,7 @@ class DendriteView extends ItemView {
         // content it follows. Dendrite moves each column's content itself
         // and redraws the flow in the same frame. On a phone native
         // scrolling is kept for its momentum.
-        this.nativeScroll = !!Platform.isMobile;
+        this.nativeScroll = !!Platform.isMobile || this.narrow;
         board.toggleClass('is-native-scroll', this.nativeScroll);
         const NS = 'http://www.w3.org/2000/svg';
         this.flowSvg = this.pageDoc().createElementNS(NS, 'svg');
@@ -1186,6 +1201,7 @@ class DendriteView extends ItemView {
             }
             this.scheduleFlow();
             this.drawWhenIdle();
+            if (this.narrow) this.scheduleReading();
         }, true);
         // A copy or cut can be handled by another plugin that focuses a
         // hidden textarea, and the browser then scrolls the board to show
@@ -1213,6 +1229,14 @@ class DendriteView extends ItemView {
         const pinned = stage.createDiv({ cls: 'dendrite-pinned' });
         this.renderOrphans(pinned);
         this.renderOldComments(pinned);
+        // One column at a time, a notice is its heading line until it is
+        // tapped, so it does not cover the column.
+        pinned.addEventListener('click', (e) => {
+            const head = this.narrow &&
+                e.target.closest('.dendrite-orphans-head');
+            if (head) head.parentElement.toggleClass('is-open',
+                !head.parentElement.hasClass('is-open'));
+        });
         // A pane resized moves the columns, which the flow follows in the
         // same frame, as it does a scroll.
         if (this.resizer) this.resizer.observe(board);
@@ -1243,6 +1267,7 @@ class DendriteView extends ItemView {
                 if (!group || this.upOf(n) !== parent) {
                     group = inner.createDiv({ cls: 'dendrite-group' });
                     parent = this.upOf(n);
+                    if (parent && parent.id) this.groupHead(group, parent);
                 }
                 this.renderShell(group, n);
             }
@@ -1861,10 +1886,120 @@ class DendriteView extends ItemView {
             el.toggleClass('is-picked', this.picked.has(id));
         }
         this.renderToolbar();
+        this.renderCrumbs();
         this.scheduleFlow();
     }
 
+    /**
+     * Whether the pane is too narrow for columns side by side, so the
+     * board shows one at a time. Not known before the pane has a width.
+     */
+    isNarrow() {
+        const w = this.contentEl.clientWidth;
+        const card = this.plugin.settings.cardWidth || 480;
+        return w > 0 && w < card * NARROW_CARDS + 4 * 12;
+    }
+
+    /**
+     * A group's parent named at its top, for the one-column layout, where
+     * the parent's own column is out of sight; it stays at the top of
+     * the column while the group is scrolled, and goes to the parent.
+     */
+    groupHead(group, parent) {
+        const head = group.createDiv({ cls: 'dendrite-group-head' });
+        head.setText(parent.label || core.shortId(parent.id));
+        head.onclick = (e) => {
+            e.stopPropagation();
+            this.select(parent.id);
+        };
+    }
+
+    /** The active card's parents, each a step back up to it. */
+    renderCrumbs() {
+        const el = this.crumbsEl;
+        if (!el) return;
+        el.empty();
+        const node = this.active && this.byId.get(this.active);
+        const path = [];
+        for (let n = node; n && n.id; n = this.upOf(n)) path.unshift(n);
+        path.forEach((n, k) => {
+            if (k) el.createSpan({ cls: 'dendrite-crumb-sep', text: '›' });
+            const c = el.createSpan({ cls: 'dendrite-crumb',
+                text: n.label || core.shortId(n.id) });
+            if (n.id === this.active) c.addClass('is-current');
+            else c.onclick = () => this.select(n.id);
+        });
+    }
+
+    /**
+     * Where each column goes in the one-column layout to show the active
+     * card's line: its parents, itself and its first children, each at
+     * the top of its column, under the parent's name.
+     */
+    narrowTargets(node, pos) {
+        const at = this.cols.map(() => null);
+        for (let n = node; n && n.id; n = this.upOf(n)) at[n.depth] = n;
+        for (let n = node, kids = this.kidsOf(n); kids.length;
+            kids = this.kidsOf(n)) {
+            n = kids[0];
+            at[n.depth] = n;
+        }
+        return at.map((n) => {
+            const p = n && pos(n.id);
+            return p ? Math.max(0, p.top - NARROW_TOP) : null;
+        });
+    }
+
+    scheduleReading() {
+        const win = this.pageWin();
+        win.clearTimeout(this.readingTimer);
+        this.readingTimer = win.setTimeout(() => this.readPosition(), 140);
+    }
+
+    /**
+     * In the one-column layout, the card read is the active one: after a
+     * scroll or swipe by hand settles, the first card at the top of the
+     * column in view, the others brought to its parents and children so
+     * the next swipe finds them. Not while a card is edited.
+     */
+    readPosition() {
+        if (!this.narrow || this.editing || !this.board) return;
+        if (Date.now() - (this.handAt || 0) > 1500) return;
+        const board = this.board;
+        const wide = board.clientWidth;
+        const cols = board.querySelectorAll('.dendrite-col');
+        if (!wide || !cols.length) return;
+        const d = Math.max(0, Math.min(cols.length - 1,
+            Math.round(board.scrollLeft / wide)));
+        const line = cols[d].scrollTop + NARROW_TOP + 4;
+        let pick = null;
+        for (const n of this.cols[d] || []) {
+            const el = this.cardEls.get(n.id);
+            if (el && el.offsetTop + el.offsetHeight > line) {
+                pick = n;
+                break;
+            }
+        }
+        if (!pick || pick.id === this.active) return;
+        this.active = pick.id;
+        this.placed = pick.id;
+        this.highlight();
+        const pos = (id) => {
+            const el = this.cardEls.get(id);
+            return el ? { top: el.offsetTop, height: el.offsetHeight } : null;
+        };
+        const t = this.narrowTargets(pick, pos);
+        cols.forEach((c, k) => {
+            if (k !== d && t[k] !== null) c.scrollTop = t[k];
+        });
+    }
+
     onResize(entries = []) {
+        // Wide enough again, or too narrow now: the other layout.
+        if (this.board && this.isNarrow() !== !!this.narrow) {
+            this.render();
+            return;
+        }
         this.anchorColumns(entries);
         // The cards drawn tell their heights for nothing, as they resize:
         // kept for their slots, and learnt from for those never drawn.
@@ -2042,8 +2177,14 @@ class DendriteView extends ItemView {
         const own = this.ownOffset(node, pos(node.id), heights[node.depth],
                                    typed);
         this.placed = node.id;
-        const targets = core.alignColumns(this.cols, node, pos, heights,
+        let targets = core.alignColumns(this.cols, node, pos, heights,
             own, { up: (n) => this.upOf(n), kids: (n) => this.kidsOf(n) });
+        // One column at a time: the card at the top, and while it is
+        // typed in, the column left to keep the caret in view itself.
+        if (this.narrow) {
+            targets = this.editing ? targets.map(() => null) :
+                this.narrowTargets(node, pos);
+        }
         if (this.nativeScroll) {
             cols.forEach((col, d) => {
                 if (targets[d] !== null) {
@@ -2361,10 +2502,26 @@ class DendriteView extends ItemView {
         this.toolbar = null;
         const card = this.active && this.cardEls.get(this.active);
         // A slot gets its tools once filled (decorateCard).
-        if (!card || this.editing || card.hasClass('is-slot')) return;
+        if (!card || card.hasClass('is-slot')) return;
+        // A phone's keyboard has no Escape: a card being typed in there,
+        // or in a narrow pane, has a Done button to leave it.
+        const done = this.editing && this.editing.id === this.active &&
+            (this.editing.editor || {}).kind !== 'float' &&
+            (this.narrow || Platform.isMobile);
+        if (this.editing && !done) return;
         const foot = card.querySelector(':scope > .dendrite-card-foot') ||
             card.createDiv({ cls: 'dendrite-card-foot' });
         const t = foot.createDiv({ cls: 'dendrite-toolbar' });
+        if (done) {
+            const b = t.createEl('button', { cls: 'mod-cta dendrite-done',
+                                             text: 'Done' });
+            b.onclick = (e) => {
+                e.stopPropagation();
+                this.endEdit();
+            };
+            this.toolbar = t;
+            return;
+        }
         const btn = (icon, title, fn) => {
             const b = t.createEl('button', { cls: 'clickable-icon' });
             setIcon(b, icon);
@@ -12011,9 +12168,10 @@ module.exports = class DendritePlugin extends Plugin {
             this.app.workspace.revealLeaf(open);
             return;
         }
-        // Beside the board, a third of the width, the board the rest.
+        // Beside the board, a third of the width, the board the rest; on
+        // a tablet half, where a third is too narrow to read.
         const leaf = this.app.workspace.getLeaf('split', 'vertical');
-        narrowSplit(leaf);
+        narrowSplit(leaf, previewShare());
         await leaf.setViewState({ type: PREVIEW, active: false,
                                   state: { file: file.path } });
     }
