@@ -20,6 +20,14 @@ const CRC_TABLE = (() => {
     return t;
 })();
 
+/**
+ * Text as its UTF-8 bytes, for crc32, from the browser's TextEncoder,
+ * which a phone has, where Node's Buffer is not.
+ */
+function utf8(s) {
+    return new TextEncoder().encode(String(s));
+}
+
 function crc32(buf) {
     let c = 0xffffffff;
     for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
@@ -213,5 +221,5 @@ function keepDocument(buf, zlib) {
         zlib);
 }
 
-module.exports = { crc32, readZip, writeZip, styleXml, pageXml, reference,
+module.exports = { utf8, crc32, readZip, writeZip, styleXml, pageXml, reference,
                    keepTables, keepDocument };

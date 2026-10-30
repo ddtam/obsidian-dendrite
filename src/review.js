@@ -1041,9 +1041,9 @@ function addReply(md, n, reply) {
  * stays the same as it is answered.
  */
 function threadId(it) {
-    return docx.crc32(Buffer.from([it.kind, it.author, it.date,
-        flat(it.passage || ''), flat(it.text || '')].join('\u0000'),
-    'utf8')).toString(16);
+    return docx.crc32(docx.utf8([it.kind, it.author, it.date,
+        flat(it.passage || ''), flat(it.text || '')].join('\u0000')))
+        .toString(16);
 }
 
 /**
@@ -1307,7 +1307,7 @@ const flat = (t) => clean(t).replace(/\s+/g, ' ');
 function reviewKeys(it) {
     const author = clean(it.author) || 'Reviewer';
     const keys = [];
-    const hash = (s) => docx.crc32(Buffer.from(s, 'utf8')).toString(16);
+    const hash = (s) => docx.crc32(docx.utf8(s)).toString(16);
     const change = (out, put) => 's:' + hash(`${author}\u0000${flat(out)}` +
                                              `\u0000${flat(put)}`);
     const comment = (text) => 'c:' + hash(`${author}\u0000${flat(text)

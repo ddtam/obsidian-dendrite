@@ -1477,6 +1477,9 @@ var require_docx = __commonJS({
       }
       return t;
     })();
+    function utf8(s) {
+      return new TextEncoder().encode(String(s));
+    }
     function crc32(buf) {
       let c = 4294967295;
       for (const b of buf) c = CRC_TABLE[(c ^ b) & 255] ^ c >>> 8;
@@ -1655,6 +1658,7 @@ var require_docx = __commonJS({
       );
     }
     module2.exports = {
+      utf8,
       crc32,
       readZip,
       writeZip,
@@ -2533,16 +2537,13 @@ var require_review = __commonJS({
       return md.slice(0, it.end) + note + md.slice(it.end);
     }
     function threadId(it) {
-      return docx.crc32(Buffer.from(
-        [
-          it.kind,
-          it.author,
-          it.date,
-          flat(it.passage || ""),
-          flat(it.text || "")
-        ].join("\0"),
-        "utf8"
-      )).toString(16);
+      return docx.crc32(docx.utf8([
+        it.kind,
+        it.author,
+        it.date,
+        flat(it.passage || ""),
+        flat(it.text || "")
+      ].join("\0"))).toString(16);
     }
     function threadIds(items) {
       const seen = /* @__PURE__ */ new Map();
@@ -2712,7 +2713,7 @@ var require_review = __commonJS({
     function reviewKeys(it) {
       const author = clean(it.author) || "Reviewer";
       const keys = [];
-      const hash = (s) => docx.crc32(Buffer.from(s, "utf8")).toString(16);
+      const hash = (s) => docx.crc32(docx.utf8(s)).toString(16);
       const change = (out, put) => "s:" + hash(`${author}\0${flat(out)}\0${flat(put)}`);
       const comment = (text2) => "c:" + hash(`${author}\0${flat(text2).replace(/^On “[^”]*”(?:, in an earlier version)?: /, "")}`);
       if (it.kind === "change" || it.kind === "suggest") {
@@ -7394,7 +7395,9 @@ var DendriteView = class extends ItemView {
     this.narrow = this.isNarrow();
     el.toggleClass("is-narrow", this.narrow);
     this.renderBar(el);
-    this.crumbsEl = el.createDiv({ cls: "dendrite-crumbs" });
+    this.crumbsEl = null;
+    this.trayBtn = null;
+    if (this.narrow) this.renderPhoneBar(el);
     const stage = el.createDiv({ cls: "dendrite-stage" });
     const board = stage.createDiv({ cls: "dendrite-board" });
     this.board = board;
@@ -7407,7 +7410,10 @@ var DendriteView = class extends ItemView {
     this.colInners = [];
     this.offsets = [];
     board.addEventListener("scroll", (e) => {
-      if (e.target === board) return;
+      if (e.target === board) {
+        if (this.narrow) this.scheduleSettle();
+        return;
+      }
       const col = e.target;
       if (!this.nativeScroll && col.scrollTop && col.classList.contains("dendrite-col")) {
         const d = Number(col.dataset.depth);
@@ -7417,7 +7423,6 @@ var DendriteView = class extends ItemView {
       }
       this.scheduleFlow();
       this.drawWhenIdle();
-      if (this.narrow) this.scheduleReading();
     }, true);
     for (const t of ["copy", "cut"]) {
       board.addEventListener(t, () => this.holdBoardScroll(), true);
@@ -7765,6 +7770,18 @@ var DendriteView = class extends ItemView {
       card.addClass("is-pending");
       this.drawWhenIdle();
     }
+    const kids = this.narrow ? this.kidsOf(n) : [];
+    if (kids.length) {
+      const tab = card.createDiv({
+        cls: "dendrite-kids",
+        text: `\u203A ${kids.length}`
+      });
+      tab.setAttr("aria-label", `Go to its ${kids.length} card` + (kids.length === 1 ? "" : "s") + " below");
+      tab.onclick = (e) => {
+        e.stopPropagation();
+        this.select(kids[0].id);
+      };
+    }
     const foot = card.createDiv({ cls: "dendrite-card-foot" });
     this.renderQuotaWidget(foot, n.id);
     const tag = foot.createSpan({
@@ -8097,6 +8114,7 @@ var DendriteView = class extends ItemView {
       if (n.id === this.active) c.addClass("is-current");
       else c.onclick = () => this.select(n.id);
     });
+    el.scrollLeft = el.scrollWidth;
   }
   /**
    * Where each column goes in the one-column layout to show the active
@@ -8115,49 +8133,122 @@ var DendriteView = class extends ItemView {
       return p ? Math.max(0, p.top - NARROW_TOP) : null;
     });
   }
-  scheduleReading() {
-    const win = this.pageWin();
-    win.clearTimeout(this.readingTimer);
-    this.readingTimer = win.setTimeout(() => this.readPosition(), 140);
-  }
   /**
-   * In the one-column layout, the card read is the active one: after a
-   * scroll or swipe by hand settles, the first card at the top of the
-   * column in view, the others brought to its parents and children so
-   * the next swipe finds them. Not while a card is edited.
+   * The phone's bar: the way down to the active card, which takes the
+   * row, then Undo and a menu holding the rest of the board's bar and
+   * the notices waiting on it. The full bar is kept, hidden, so its
+   * buttons and notices are still drawn and counted.
    */
-  readPosition() {
-    if (!this.narrow || this.editing || !this.board) return;
-    if (Date.now() - (this.handAt || 0) > 1500) return;
-    const board = this.board;
-    const wide = board.clientWidth;
-    const cols = board.querySelectorAll(".dendrite-col");
-    if (!wide || !cols.length) return;
-    const d = Math.max(0, Math.min(
-      cols.length - 1,
-      Math.round(board.scrollLeft / wide)
-    ));
-    const line = cols[d].scrollTop + NARROW_TOP + 4;
-    let pick = null;
+  renderPhoneBar(el) {
+    const bar = el.createDiv({ cls: "dendrite-phone-bar" });
+    this.crumbsEl = bar.createDiv({ cls: "dendrite-crumbs" });
+    const btn = (icon, label, fn) => {
+      const b = bar.createEl(
+        "button",
+        { cls: "clickable-icon dendrite-phone-btn" }
+      );
+      setIcon(b, icon);
+      b.setAttr("aria-label", label);
+      b.onclick = fn;
+      return b;
+    };
+    btn("undo-2", "Undo", () => this.doUndo());
+    this.trayBtn = btn("more-horizontal", "More", (e) => this.openTray(e));
+    this.showTrayCount();
+  }
+  /** The notices waiting on the bar, as the full bar draws them. */
+  barChips() {
+    return this.statusEl ? [...this.statusEl.querySelectorAll(".dendrite-status-chip")] : [];
+  }
+  /** How many notices wait, on the phone bar's menu button. */
+  showTrayCount() {
+    const b = this.trayBtn;
+    if (!b) return;
+    const old = b.querySelector(".dendrite-bar-badge");
+    if (old) old.remove();
+    const n = this.barChips().length;
+    if (n) b.createSpan({ cls: "dendrite-bar-badge", text: String(n) });
+  }
+  /** The phone bar's menu: the notices, then what the full bar holds. */
+  openTray(e) {
+    const m = dendriteMenu();
+    const tally = this.statusEl && this.statusEl.firstChild && this.statusEl.firstChild.nodeType === 3 ? this.statusEl.firstChild.textContent : "";
+    if (tally) {
+      m.addItem((i) => {
+        i.setTitle(tally).setIcon("list-checks");
+        if (typeof i.setDisabled === "function") i.setDisabled(true);
+      });
+    }
+    for (const c of this.barChips()) {
+      m.addItem((i) => i.setTitle(c.textContent).setIcon("bell").onClick(() => c.onclick && c.onclick()));
+    }
+    m.addSeparator();
+    m.addItem((i) => i.setTitle("Redo").setIcon("redo-2").onClick(() => this.doRedo()));
+    const on = this.previewBtn && this.previewBtn.hasClass("is-on");
+    m.addItem((i) => i.setTitle(on ? "Close the preview" : "Preview").setIcon("scroll-text").onClick(async () => {
+      await this.plugin.togglePreview(this.file);
+      this.showPreviewOn();
+    }));
+    m.addItem((i) => i.setTitle(this.printOnly ? "Show every card" : "Show only the cards that print").setIcon("filter").onClick(() => this.togglePrintOnly()));
+    m.addItem((i) => i.setTitle("Export\u2026").setIcon("file-output").onClick(() => this.exportMenu(null, e)));
+    const waiting = (this.inbox || []).length;
+    m.addItem((i) => i.setTitle("Review\u2026" + (waiting ? ` (${waiting} waiting)` : "")).setIcon("inbox").onClick(() => this.reviewMenu(e)));
+    m.addSeparator();
+    m.addItem((i) => i.setTitle("This manuscript's settings").setIcon("settings").onClick(() => this.openManuscriptSettings()));
+    m.addItem((i) => i.setTitle("Open the index note").setIcon("file-text").onClick(() => this.plugin.openAsMarkdown(this.file)));
+    if (m.showAtMouseEvent) m.showAtMouseEvent(e);
+  }
+  scheduleSettle() {
+    const win = this.pageWin();
+    win.clearTimeout(this.settleTimer);
+    this.settleTimer = win.setTimeout(() => this.settleSwipe(), 140);
+  }
+  /** The first card at the top of column `d`, below its parent's name. */
+  topCard(d) {
+    const col = this.board.querySelectorAll(".dendrite-col")[d];
+    if (!col) return null;
+    const line = col.scrollTop + NARROW_TOP + 4;
     for (const n of this.cols[d] || []) {
       const el = this.cardEls.get(n.id);
-      if (el && el.offsetTop + el.offsetHeight > line) {
-        pick = n;
-        break;
-      }
+      if (el && el.offsetTop + el.offsetHeight > line) return n;
     }
-    if (!pick || pick.id === this.active) return;
-    this.active = pick.id;
-    this.placed = pick.id;
-    this.highlight();
-    const pos = (id) => {
-      const el = this.cardEls.get(id);
-      return el ? { top: el.offsetTop, height: el.offsetHeight } : null;
-    };
-    const t = this.narrowTargets(pick, pos);
-    cols.forEach((c, k) => {
-      if (k !== d && t[k] !== null) c.scrollTop = t[k];
-    });
+    return null;
+  }
+  /** Whether card `node` shows in its column. */
+  onScreen(node) {
+    const col = this.board.querySelectorAll(".dendrite-col")[node.depth];
+    const el = this.cardEls.get(node.id);
+    if (!col || !el) return false;
+    return el.offsetTop < col.scrollTop + col.clientHeight && el.offsetTop + el.offsetHeight > col.scrollTop + NARROW_TOP;
+  }
+  /**
+   * After a swipe sideways settles in the one-column layout, the card
+   * it went from, the active one if it shows, else the card at the top
+   * of the column, decides where it lands: on that card's first child,
+   * or its parent. With no child, it goes back. Scrolling down a column
+   * changes nothing; a tap selects.
+   */
+  settleSwipe() {
+    if (!this.narrow || this.editing || !this.board) return;
+    const board = this.board;
+    const wide = board.clientWidth;
+    const count = this.cols ? this.cols.length : 0;
+    if (!wide || !count) return;
+    const d = Math.max(0, Math.min(
+      count - 1,
+      Math.round(board.scrollLeft / wide)
+    ));
+    const node = this.active && this.byId.get(this.active);
+    if (node && node.depth === d) return;
+    const p = node ? node.depth : d;
+    const from = node && this.onScreen(node) ? node : this.topCard(p);
+    let to = from;
+    for (let k = p; to && k < d; k++) to = this.kidsOf(to)[0] || null;
+    for (let k = p; to && to.id && k > d; k--) to = this.upOf(to);
+    if (!to || !to.id) to = from || this.topCard(d);
+    if (!to) return;
+    if (to.id === this.active) this.centre(true);
+    else this.select(to.id);
   }
   onResize(entries = []) {
     if (this.board && this.isNarrow() !== !!this.narrow) {
@@ -12510,12 +12601,12 @@ var DendriteView = class extends ItemView {
   /** What each card prints now, fingerprinted as a round keeps it. */
   async fingerprints() {
     const bodies = await this.loadBodies();
-    const crc = require_docx().crc32;
+    const { crc32, utf8 } = require_docx();
     return core.roundFingerprints(
       this.root,
       (id) => bodies.get(id),
       (id) => this.printRoleOf(id),
-      (t) => String(crc(Buffer.from(t, "utf8")))
+      (t) => String(crc32(utf8(t)))
     );
   }
   /**
@@ -12714,6 +12805,7 @@ var DendriteView = class extends ItemView {
         s.onclick = () => new OldCopiesModal(this).open();
       }
     }
+    this.showTrayCount();
     if (this.plugin.previewStatuses) {
       this.plugin.previewStatuses(this.file);
     }

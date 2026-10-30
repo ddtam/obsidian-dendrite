@@ -1621,3 +1621,28 @@ test('the card editor leaves a table\'s comments to the table: nothing ' +
         assert.ok(!list.some(inside), `no ${k} in the table`);
     }
 });
+
+test('a card with comments is drawn, and its comments keyed, where there ' +
+     'is no Node Buffer, as on a phone', () => {
+    const { JSDOM } = require('jsdom');
+    const doc = new JSDOM('<div id="root"></div>').window.document;
+    const md = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%%' +
+        '%%[!reply] Me, 2026-10-24: Forty.%%%%[!reply] Claude, ' +
+        '2026-10-24: Say so.%% is large.';
+    const keys = r.reviewKeys(r.reviewItems(md)[0]);
+    const id = r.threadId(r.reviewItems(md)[0]);
+    const was = globalThis.Buffer;
+    globalThis.Buffer = undefined;
+    try {
+        const root = doc.getElementById('root');
+        root.innerHTML = `<p>${r.renderMarkdown(md)}</p>`;
+        r.decorate(root, r.reviewItems(md), () => {}, null, null, null,
+                   null, 'G-phone');
+        assert.ok(root.querySelector('.dendrite-review-note'));
+        assert.deepEqual(r.reviewKeys(r.reviewItems(md)[0]), keys,
+                         'the same keys as with Buffer');
+        assert.equal(r.threadId(r.reviewItems(md)[0]), id);
+    } finally {
+        globalThis.Buffer = was;
+    }
+});

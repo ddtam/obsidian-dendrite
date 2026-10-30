@@ -2679,3 +2679,65 @@ button.dendrite-done {
     justify-content: flex-end;
     margin: 0 0 2px;
 }
+
+/* The phone's bar: the way down to the active card, Undo and a menu. */
+.dendrite.is-narrow > .dendrite-bar {
+    display: none;
+}
+
+.dendrite-phone-bar {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 4px 2px 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.dendrite.is-narrow .dendrite-phone-bar .dendrite-crumbs {
+    flex: 1 1 auto;
+    min-width: 0;
+    border-bottom: none;
+}
+
+.dendrite-phone-btn {
+    position: relative;
+    flex: 0 0 auto;
+    padding: 8px;
+}
+
+.dendrite-phone-btn .dendrite-bar-badge {
+    position: absolute;
+    margin: 0;
+    min-width: 0;
+    top: 0;
+    right: 0;
+    font-size: 10px;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 8px;
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+/* A card's children, a column away: a tab on its right edge. */
+.dendrite-kids {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-left: 1px solid var(--background-modifier-border);
+    border-radius: 0 var(--radius-m) var(--radius-m) 0;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+    background: var(--background-secondary);
+    cursor: pointer;
+}
+
+.dendrite.is-narrow .dendrite-card:has(> .dendrite-kids) {
+    padding-right: 34px;
+}
