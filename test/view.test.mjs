@@ -2326,11 +2326,13 @@ test('the preview opens beside the board at a third of the width',
     const state = [];
     const leaf = { parent: newTabs,
                    setViewState: async (v) => state.push(v.type) };
-    const self = { app: { workspace: { getLeaf: () => leaf } },
-                   previewLeaf: () => null };
+    const self = { app: { workspace: { getLeaf: () => leaf,
+                                       getLeavesOfType: () => [] } },
+                   previewLeaf: () => null,
+                   fitPanes: Plugin.prototype.fitPanes };
     await Plugin.prototype.openPreview.call(self, new h.TFile('W/G.md'));
     assert.deepEqual(state, ['dendrite-preview']);
-    assert.deepEqual(dims, [['preview', 33], ['board', 67]]);
+    assert.deepEqual(dims.sort(), [['board', 67], ['preview', 33]]);
 });
 
 test('an exported PDF opens beside the preview, or in the tab already ' +
@@ -4851,16 +4853,16 @@ test('a table card is edited with its caption, its table as it prints, ' +
                  'Table 1.', 'its number above the table');
     assert.ok(!form.querySelector('.dendrite-float-shown'),
               'shown once, in the editor, not again above it');
-    // In the editor's font at the card's width by default; a switch
-    // shows it as it prints, at the page's width, kept for next time.
+    // In the editor's font by default, at the page's width; a switch
+    // shows it as it prints, kept for next time.
     assert.ok(form.hasClass('is-plain'));
-    assert.doesNotMatch(form.style.width, /pt$/, 'the pane\'s width');
+    assert.match(form.style.width, /pt$/, 'as wide as the page\'s text');
     const look = form.querySelector('.dendrite-float-look');
     assert.equal(look.textContent, 'Show as printed');
     look.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
     assert.ok(!form.hasClass('is-plain'));
     assert.match(form.style.width, /pt$/, 'as wide as the page\'s text');
-    assert.equal(look.textContent, 'Show in editor font');
+    assert.equal(look.textContent, 'Show as editor');
     assert.equal(view.plugin.settings.floatPlain, false);
     table.value = '| A | B |\n| --- | --- |\n| 3 | 4 |';
     table.dispatchEvent(new h.window.Event('input'));
@@ -7134,4 +7136,42 @@ test('the comment list opens on the manuscript of the board it was ' +
     await tick(20);
     assert.equal(lists.length, 1, 'the same list');
     assert.equal(lists[0].view.file, other, 'moved to the other board');
+});
+
+test('the preview opened beside a board and its comment list takes a ' +
+     'third of the window, the list keeping a sidebar\'s width and the ' +
+     'board the rest', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const dims = new Map();
+    const box = (w) => ({ getBoundingClientRect: () => ({ width: w }) });
+    const item = (w, extra = {}) => Object.assign({ containerEl: box(w),
+        setDimension(d) { dims.set(this, d); } }, extra);
+    // A board 900 px and the list 300 px of 1200, as the list leaves it.
+    const board = item(900);
+    const list = item(300);
+    const split = { direction: 'vertical', containerEl: box(1200),
+                    children: [board, list] };
+    board.parent = split;
+    list.parent = split;
+    let made = null;
+    const ws = {
+        getLeavesOfType: (t) => t === 'dendrite-comments' ? [list] :
+            t === 'dendrite-preview' ? (made ? [made] : []) : [],
+        getLeaf() {
+            // Split off the board, between it and the list, at half the
+            // board's width, as Obsidian does.
+            made = item(450, { async setViewState(s) { this.state = s; } });
+            made.parent = split;
+            board.containerEl = box(450);
+            split.children = [board, made, list];
+            return made;
+        },
+        revealLeaf() {} };
+    const p = new DendritePlugin();
+    p.app = { workspace: ws };
+    await p.openPreview({ path: INDEX });
+    assert.equal(made.state.type, 'dendrite-preview');
+    assert.equal(Math.round(dims.get(made)), 33, 'a third');
+    assert.equal(dims.get(list), 25, 'the list a sidebar\'s 300 px');
+    assert.equal(Math.round(dims.get(board)), 42, 'the board the rest');
 });

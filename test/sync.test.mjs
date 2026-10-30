@@ -168,9 +168,18 @@ test('a card a stale device puts back is caught and can be restored; the ' +
     const count = [...a.view.statusEl.querySelectorAll('.is-reverted')]
         .find((c) => /changed by sync/.test(c.textContent));
     assert.equal(count && count.textContent, '1 card changed by sync ⟲');
-    await a.view.select(null);
+    assert.match(count.getAttribute('aria-label'), /aaaaa/,
+                 'names the card');
+    // The card already active, as one typed in is: the board is still
+    // moved to it, not left where it was.
+    assert.equal(a.view.active, 'G-aaaaa');
+    let moved = 0;
+    const apply = a.view.applyActive.bind(a.view);
+    a.view.applyActive = (...x) => { moved++; return apply(...x); };
     await count.onclick();
     assert.equal(a.view.active, 'G-aaaaa', 'gone to');
+    assert.equal(moved, 1, 'the board moved to it');
+    a.view.applyActive = apply;
     // Export refuses while a card has gone back.
     assert.equal(await a.view.exportTo(null), null);
     assert.equal(a.read('W/Grant/exports/Grant.md'), undefined);

@@ -5883,7 +5883,7 @@ var require_float = __commonJS({
       root.toggleClass("is-plain", !!opts.plain);
       if (kind === "table" && opts.onPlain) {
         const look = head.createEl("a", { cls: "dendrite-float-look" });
-        const name = () => look.setText(root.hasClass("is-plain") ? "Show as printed" : "Show in editor font");
+        const name = () => look.setText(root.hasClass("is-plain") ? "Show as printed" : "Show as editor");
         name();
         look.addEventListener("mousedown", (e) => e.preventDefault());
         look.addEventListener("click", (e) => {
@@ -7145,22 +7145,23 @@ function narrowSplit(leaf, share = 1 / 3) {
   return true;
 }
 var SIDEBAR_WIDTH = 300;
-function sideSplit(leaf, px) {
+function fitSplit(leaf, fixed) {
   let item = leaf;
   while (item && item.parent && !(item.parent.direction === "vertical" && (item.parent.children || []).length > 1)) item = item.parent;
   const split = item && item.parent;
   if (!split || typeof item.setDimension !== "function") return false;
   const width = (el) => el && el.getBoundingClientRect ? el.getBoundingClientRect().width : 0;
   const total = width(split.containerEl);
-  const share = total ? Math.min(0.4, px / total) : 0.25;
-  const rest = split.children.filter((c) => c !== item);
+  const shares = split.children.map((c) => fixed(c, total));
+  const taken = shares.reduce((a, x) => a + (x || 0), 0);
+  const rest = split.children.filter((c, k) => shares[k] === null);
+  const room = rest.length ? Math.max(0.2, 1 - taken) : 0;
+  const scale = rest.length ? (1 - room) / (taken || 1) : 1 / (taken || 1);
   const widths = rest.map((c) => width(c.containerEl) || 1);
   const sum = widths.reduce((a, b) => a + b, 0);
-  item.setDimension(100 * share);
-  rest.forEach((c, k) => {
-    if (typeof c.setDimension === "function") {
-      c.setDimension(100 * (1 - share) * widths[k] / sum);
-    }
+  split.children.forEach((c, k) => {
+    if (typeof c.setDimension !== "function") return;
+    c.setDimension(100 * (shares[k] !== null ? shares[k] * scale : room * widths[rest.indexOf(c)] / sum));
   });
   return true;
 }
@@ -7847,10 +7848,20 @@ var DendriteView = class extends ItemView {
    * order, selected; from the tally's count of them.
    */
   async nextReverted() {
-    const ids = core.allNodes(this.root).map((n) => n.id).filter((id) => this.reverted.has(id));
+    const ids = this.revertedCards();
     if (!ids.length) return;
     const at = ids.indexOf(this.active);
-    await this.select(ids[(at + 1) % ids.length]);
+    const id = ids[(at + 1) % ids.length];
+    if (this.shown && !this.shown.parent.has(id)) {
+      this.reviewVersion(id);
+      return;
+    }
+    if (id === this.active) this.applyActive();
+    else await this.select(id);
+  }
+  /** The cards marked as changed by sync, in reading order. */
+  revertedCards() {
+    return core.allNodes(this.root).map((n) => n.id).filter((id) => this.reverted.has(id));
   }
   /**
    * Card notes in cards/ that the index does not link, in a panel
@@ -10190,15 +10201,14 @@ var DendriteView = class extends ItemView {
   }
   /** Keep the wide editor over its card as the columns move. */
   /**
-   * The table or figure editor's width: the page's text width as it
-   * prints, or, a table shown as text, the pane's, set when placed.
+   * The table or figure editor's width, the page's text width as it
+   * prints, in either look of a table.
    */
   sizeFloat(place = true) {
     const el = this.floatEl;
     if (!el) return;
-    const plain = el.hasClass("is-plain");
     const st = this.manuscript().style || {};
-    el.style.width = plain ? "" : `${Math.round(float.textWidthPt(st))}pt`;
+    el.style.width = `${Math.round(float.textWidthPt(st))}pt`;
     if (place) this.placeFloat();
   }
   placeFloat() {
@@ -10208,15 +10218,14 @@ var DendriteView = class extends ItemView {
     const stage = el.parentElement.getBoundingClientRect();
     const r = card.getBoundingClientRect();
     const left = Math.max(0, r.left - stage.left);
-    const room = `${Math.max(r.width, stage.width - left - 12)}px`;
     setStyles(el, {
       left: `${left}px`,
       top: `${r.top - stage.top}px`,
-      maxWidth: room
+      maxWidth: `${Math.max(
+        r.width,
+        stage.width - left - 12
+      )}px`
     });
-    if (el.hasClass("is-plain")) {
-      el.style.width = `calc(${room} - 34px)`;
-    }
     const body = card.querySelector(".dendrite-card-body");
     const extra = r.height - (body ? body.offsetHeight : 0);
     const high = el.offsetHeight;
@@ -13129,13 +13138,18 @@ var DendriteView = class extends ItemView {
       }
       this.statusEl.setText(parts.join(" \xB7 "));
       this.statusEl.toggleClass("has-flags", t.revise + t.unsplit > 0);
-      const cards = [...this.reverted].filter((k) => k !== "index" && this.byId.has(k)).length;
+      const ids = this.revertedCards();
+      const cards = ids.length;
       if (cards) {
         const s = this.statusEl.createSpan({
           cls: "dendrite-status-chip is-reverted",
           text: `${cards} card${cards === 1 ? "" : "s"} changed by sync \u27F2`
         });
-        s.setAttr("aria-label", "Cards changed outside Dendrite to an older copy, or kept from a change while you typed. Click to go to each in turn; its red chip compares and chooses");
+        const names = ids.map((id) => {
+          const node = this.byId.get(id);
+          return core.shortId(id) + (node && node.label ? ` (${node.label})` : "") + (this.held.has(id) ? ", your typing kept" : "");
+        });
+        s.setAttr("aria-label", "Cards changed outside Dendrite to an older copy, or kept from a change while you typed: " + names.join("; ") + ". Click to go to each in turn; its red chip compares and chooses");
         s.onclick = () => this.nextReverted();
       }
       if (this.reverted.has("index")) {
@@ -18659,11 +18673,33 @@ module.exports = class DendritePlugin extends Plugin {
       return;
     }
     const leaf = this.app.workspace.getLeaf("split", "vertical");
-    narrowSplit(leaf, previewShare());
+    this.fitPanes(leaf, "preview");
     await leaf.setViewState({
       type: PREVIEW,
       active: false,
       state: { file: file.path }
+    });
+  }
+  /**
+   * The split `leaf` was opened in, `own` its kind, 'preview' or
+   * 'comments', sized: a comment list a sidebar's width, a preview a
+   * third, a half on a tablet, of the window, each whatever else is
+   * open, the boards the rest.
+   */
+  fitPanes(leaf, own) {
+    const ws = this.app.workspace;
+    const lists = new Set(ws.getLeavesOfType(COMMENTS));
+    const previews = new Set(ws.getLeavesOfType(PREVIEW));
+    let mine = leaf;
+    while (mine && mine.parent && !(mine.parent.direction === "vertical" && (mine.parent.children || []).length > 1)) {
+      mine = mine.parent;
+    }
+    return fitSplit(leaf, (c, total) => {
+      const kind = c === mine ? own : lists.has(c) ? "comments" : previews.has(c) ? "preview" : null;
+      if (kind === "comments") {
+        return total ? Math.min(0.4, SIDEBAR_WIDTH / total) : 0.25;
+      }
+      return kind === "preview" ? previewShare() : null;
     });
   }
   /**
@@ -18682,7 +18718,7 @@ module.exports = class DendritePlugin extends Plugin {
     if (!leaf && popout) {
       const pv = ws.getLeavesOfType(PREVIEW).find((l) => l.view && l.view.file === from.file && inWindow(l));
       leaf = ws.createLeafBySplit(pv || from.leaf, "vertical");
-      sideSplit(leaf, SIDEBAR_WIDTH);
+      this.fitPanes(leaf, "comments");
       await leaf.setViewState({ type: COMMENTS, active: false });
     } else if (!leaf) {
       leaf = ws.getRightLeaf(false);

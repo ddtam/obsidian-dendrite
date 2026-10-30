@@ -115,14 +115,14 @@ function floatEditor(opts) {
         e.preventDefault();
         if (opts.onAsText) opts.onAsText();
     });
-    // A table in the editor's font at the card's width, as other notes
-    // are edited, or as it prints, in the manuscript's font at the
-    // page's width; one switch for every table, kept between visits.
+    // A table in the editor's font, as other notes are edited, or as it
+    // prints, in the manuscript's font, both at the page's width; one
+    // switch for every table, kept between visits.
     root.toggleClass('is-plain', !!opts.plain);
     if (kind === 'table' && opts.onPlain) {
         const look = head.createEl('a', { cls: 'dendrite-float-look' });
         const name = () => look.setText(root.hasClass('is-plain') ?
-            'Show as printed' : 'Show in editor font');
+            'Show as printed' : 'Show as editor');
         name();
         look.addEventListener('mousedown', (e) => e.preventDefault());
         look.addEventListener('click', (e) => {
