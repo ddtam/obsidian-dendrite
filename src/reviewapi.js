@@ -19,12 +19,15 @@
 //        keeps to that card and those under it; `resolved=1` adds the
 //        comments dealt with, from the manuscript's review log; read only.
 //        Also `versions`, each card's version, a hash of its text, and
-//        `board_open` and `sync`, each card the open board has not
-//        settled: [{ card, state, since }], `older_copy`, `typing_kept`,
-//        `editing`, or `index_older` with card null. `status=1` gives
-//        only those, without threads
+//        `board_open`, `device`, this computer's name, and `sync`, each
+//        card the open board has not settled by this device's own
+//        history: [{ card, state, since, device }], `older_copy`,
+//        `typing_kept`, `editing`, `index_older` with card null, or
+//        `behind`: the review log has a change to it from another device
+//        that its card here does not show yet, board open or not.
+//        `status=1` gives only those, without threads
 //   Writes (reply, suggest, revise) are refused on a card that is
-//        `older_copy` or `typing_kept`, and, given `base`, a version
+//        `older_copy`, `typing_kept` or `behind`, and, given `base`, a version
 //        read, where the card has changed since; `editing` is written
 //        into the open editor
 //   POST /dendrite/reply         { manuscript, thread, text, author? }

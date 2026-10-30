@@ -12,7 +12,9 @@
 // was last seen and whether it came from outside, so the choice offered
 // can say where each side came from.
 
-const KEEP = 20;
+// Hashes are small: enough to span weeks of editing, so a copy several
+// days stale is still recognised.
+const KEEP = 200;
 const WINDOW_MS = 10 * 60 * 1000;
 
 /** cyrb53: a quick 53-bit string hash; collisions do not matter here. */
@@ -87,9 +89,11 @@ class History {
      * Record a card's text, compared by `compared` (its body, so a status
      * change alone is not a version). `outside` means Dendrite did not
      * write it. Returns 'reverted' when an outside text matches an older
-     * version, else null.
+     * version, else null; unless `trust(h, since)` answers that another
+     * device wrote or kept that text after `since`, this device's newest
+     * version, which makes it that device's change.
      */
-    observe(key, text, compared, outside) {
+    observe(key, text, compared, outside, trust = null) {
         return this.serial(key, async () => {
             const h = hash(compared);
             const rec = (await this.store.get(key)) ||
@@ -112,7 +116,8 @@ class History {
                 }
                 return null;
             }
-            if (outside && v.slice(0, -1).some((x) => x.h === h)) {
+            if (outside && v.slice(0, -1).some((x) => x.h === h) &&
+                !(trust && await trust(h, last.s || last.t))) {
                 rec.reverted = { h, at: this.now() };
                 await this.store.set(key, rec);
                 return 'reverted';
@@ -127,6 +132,29 @@ class History {
             rec.text = text;
             await this.store.set(key, rec);
             return null;
+        });
+    }
+
+    /**
+     * A card gone back settled when `trust(h, since)` answers that
+     * another device wrote or kept its text, hashed `h`, after this
+     * device's newest version: true if it was.
+     */
+    settleIf(key, text, compared, trust) {
+        return this.serial(key, async () => {
+            const rec = await this.store.get(key);
+            if (!rec || !rec.reverted) return false;
+            const v = rec.versions;
+            const last = v[v.length - 1];
+            const h = hash(compared);
+            if (!last || !(await trust(h, last.s || last.t))) return false;
+            rec.reverted = null;
+            const t = this.now();
+            v.push({ h, t, s: t, o: true });
+            if (v.length > KEEP) v.splice(0, v.length - KEEP);
+            rec.text = text;
+            await this.store.set(key, rec);
+            return true;
         });
     }
 

@@ -12,13 +12,17 @@ const require = createRequire(import.meta.url);
 const h = require('./harness.cjs');
 const { DendriteView } = require('../src/main.js');
 const { History, memoryStore, WINDOW_MS } = require('../src/history.js');
+const { Ledger } = require('../src/ledger.js');
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 const INDEX = 'W/Grant/Grant.md';
 const cardPath = (id) => `W/Grant/cards/${id}.md`;
 
-/** A device: a vault holding `files`, its board open on the index. */
-async function device(files, clock) {
+/**
+ * A device: a vault holding `files`, its board open on the index; with a
+ * `name`, it keeps a record for the other devices, saved at once.
+ */
+async function device(files, clock, name = null) {
     const app = h.makeApp();
     app.vault.folders.add('W/Grant/cards');
     for (const [p, t] of Object.entries(files)) await app.vault.create(p, t);
@@ -40,6 +44,9 @@ async function device(files, clock) {
                      openAsMarkdown() {}, async lintCard() {},
                      statusColour: () => null,
                      history: new History(memoryStore(), () => clock.t) };
+    if (name) {
+        plugin.ledger = new Ledger(app.vault, name, () => clock.t, 0);
+    }
     const view = new DendriteView({ app, updateHeader() {}, detach() {} },
                                   plugin);
     await view.onOpen();
@@ -58,7 +65,7 @@ async function device(files, clock) {
         }
         await tick(20);
     };
-    return { app, view, read, writes, receive };
+    return { app, view, read, writes, receive, plugin };
 }
 
 const type = (view, value) => {
@@ -641,4 +648,87 @@ test('an index renamed as a new note and a delete: the board follows the ' +
         INDEX));
     assert.ok(!detached, 'the board stays open');
     assert.deepEqual(a.writes, []);
+});
+
+test('a card one device puts back to text it held before, by resolving ' +
+     'its comment, is that device\'s change on the others once its ' +
+     'record arrives; an old copy nobody stands by is still caught; and ' +
+     'a version kept on one device settles the others', async () => {
+    const clock = { t: 1 };
+    const T1 = '---\ndendrite_status: draft\n---\n# Aims\n\n' +
+        'Why?%%[!review] Aly, 2026-10-30: Why?%%\n';
+    const a = await device(FILES, clock, 'nix');
+    const b = await device(FILES, clock, 'laptop');
+    const card = cardPath('G-aaaaa');
+    const rec = 'W/Grant/devices/laptop.json';
+    // B adds a comment; A receives it.
+    clock.t += WINDOW_MS + 1;
+    await b.view.startEdit('G-aaaaa');
+    type(b.view, '# Aims\n\nWhy?%%[!review] Aly, 2026-10-30: Why?%%\n');
+    await b.view.endEdit();
+    await tick(40);
+    await a.receive(card, b.read(card));
+    // B resolves it, back to the text both had before.
+    clock.t += WINDOW_MS + 1;
+    await b.view.startEdit('G-aaaaa');
+    type(b.view, '# Aims\n');
+    await b.view.endEdit();
+    await tick(40);
+    assert.ok(b.read(rec), 'B keeps a record');
+    // The card first: caught for now; then B's record: settled.
+    await a.receive(card, b.read(card));
+    await tick(40);
+    assert.ok(a.view.reverted.has('G-aaaaa'), 'caught before the record');
+    await a.receive(rec, b.read(rec));
+    await tick(60);
+    assert.ok(!a.view.reverted.has('G-aaaaa'), 'settled by B\'s record');
+    // A stale copy from a third device, which nobody stands by: caught.
+    clock.t += WINDOW_MS + 1;
+    await a.view.startEdit('G-aaaaa');
+    type(a.view, '# Aims\n\nNewer.\n');
+    await a.view.endEdit();
+    await tick(40);
+    clock.t += WINDOW_MS + 1;
+    await a.receive(card, T1);
+    await tick(40);
+    assert.ok(a.view.reverted.has('G-aaaaa'), 'an old copy is caught');
+    // Kept on B, where the same copy arrived and was caught too: A's
+    // mark settles once B's record arrives.
+    await b.receive(card, T1);
+    await tick(40);
+    assert.ok(b.view.reverted.has('G-aaaaa'));
+    clock.t += 5;
+    await b.view.keepVersion('G-aaaaa');
+    await tick(40);
+    await a.receive(rec, b.read(rec));
+    await tick(60);
+    assert.ok(!a.view.reverted.has('G-aaaaa'), 'kept on B, settled on A');
+});
+
+test('a card written with no board open, as by the review endpoint, is ' +
+     'recorded as this device\'s own text, here and for the others',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const clock = { t: 1 };
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, FILES[INDEX]);
+    const before = 'Total ==83==%%[!review] Aly, 2026-10-30: Why?%% TB.';
+    await app.vault.create(cardPath('G-aaaaa'), before);
+    const p = new DendritePlugin();
+    p.app = app;
+    p.history = new History(memoryStore(), () => clock.t);
+    p.ledger = new Ledger(app.vault, 'nix', () => clock.t, 0);
+    const f = app.vault.getAbstractFileByPath(cardPath('G-aaaaa'));
+    const index = app.vault.getAbstractFileByPath(INDEX);
+    const key = `${app.vault.getName ? app.vault.getName() : 'vault'}/` +
+        'G-aaaaa';
+    assert.equal(await p.suggestInFile(f, { quote: 'Total',
+        replace: 'All', date: '2026-10-30' }, index), null);
+    await tick(20);
+    const text = app.vault.text.get(cardPath('G-aaaaa'));
+    // A board opening later reads it as from outside: not an old copy.
+    assert.equal(await p.history.observe(key, text, text, true), null);
+    const rec = JSON.parse(app.vault.text.get('W/Grant/devices/nix.json'));
+    assert.ok(rec.cards['G-aaaaa'].wrote.h, 'in the record for the others');
 });

@@ -3,18 +3,53 @@
 // suggestion applied or dismissed. Taking one out of its card leaves no
 // trace in the cards, so this is what lets a reviewer reading the
 // threads see what was settled, and what keeps a pull or a review sent
-// again from bringing it back. One JSON object per line, appended, in
-// review-log.jsonl beside the index, so it goes where the manuscript
-// goes and a line is never rewritten.
+// again from bringing it back. One JSON object per line, appended, so a
+// line is never rewritten, beside the index, so it goes where the
+// manuscript goes.
 
 const review = require('./review.js');
 
 const NAME = 'review-log.jsonl';
 
-/** The log's path for the index at `indexPath`. */
+// Each device appends to its own file in this folder beside the index,
+// so two devices never write one file and a sync has nothing to merge;
+// the log is all of them read together, with the single file older
+// versions wrote.
+const DIR = 'review-log';
+
+/** The log's path for the index at `indexPath`, as one file. */
 function logPath(indexPath) {
     const i = indexPath.lastIndexOf('/');
     return i < 0 ? NAME : indexPath.slice(0, i + 1) + NAME;
+}
+
+/** The folder of the devices' logs for the index at `indexPath`. */
+function logDir(indexPath) {
+    const i = indexPath.lastIndexOf('/');
+    return i < 0 ? DIR : indexPath.slice(0, i + 1) + DIR;
+}
+
+/** Device `device`'s log for the index at `indexPath`. */
+function devicePath(indexPath, device) {
+    const name = String(device).replace(/[^\w.-]+/g, '_') || 'device';
+    return `${logDir(indexPath)}/${name}.jsonl`;
+}
+
+/**
+ * Entries from several logs as one, in time order, an entry in two of
+ * them, as when a file was copied, once.
+ */
+function merge(lists) {
+    const seen = new Set();
+    const out = [];
+    for (const e of lists.flat()) {
+        const k = JSON.stringify(e);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(e);
+    }
+    return out.sort((a, b) => String(a.at || '').localeCompare(
+        String(b.at || '')));
 }
 
 /**
@@ -77,4 +112,5 @@ function settled(entries, openKeys = new Set()) {
     return [...out.values()];
 }
 
-module.exports = { NAME, logPath, entry, line, parse, keysOf, settled };
+module.exports = { NAME, DIR, logPath, logDir, devicePath, merge, entry,
+                   line, parse, keysOf, settled };

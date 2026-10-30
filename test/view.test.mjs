@@ -7381,8 +7381,10 @@ test('the endpoint says which cards a sync has not settled and each ' +
     p.settings = { reviewQueue: [] };
     p.saveSettings = async () => {};
     p.openViews = () => [view];
+    p.device = 'nix';
     let st = (await p.threadsFor('G', { status: true })).json;
     assert.equal(st.board_open, true);
+    assert.equal(st.device, 'nix', 'marks are this device\'s');
     assert.deepEqual(st.sync, []);
     assert.deepEqual(Object.keys(st.versions).sort(), ['G-aaaaa', 'G-bbbbb']);
     const vb = st.versions['G-bbbbb'];
@@ -7392,7 +7394,8 @@ test('the endpoint says which cards a sync has not settled and each ' +
     view.revertedAt.set('G-aaaaa', Date.parse('2026-10-30T20:19:55Z'));
     st = (await p.threadsFor('G', { status: true })).json;
     assert.deepEqual(st.sync, [{ card: 'G-aaaaa', state: 'older_copy',
-                                 since: '2026-10-30T20:19:55.000Z' }]);
+                                 since: '2026-10-30T20:19:55.000Z',
+                                 device: 'nix' }]);
     const full = (await p.threadsFor('G')).json;
     assert.deepEqual(full.sync, st.sync, 'in the threads too');
     assert.ok(full.threads.length && full.versions['G-aaaaa']);
@@ -7427,4 +7430,56 @@ test('the endpoint says which cards a sync has not settled and each ' +
     assert.deepEqual(out.json.done, [1]);
     assert.match(view.editing.editor.value, /100 TB/);
     await view.endEdit();
+});
+
+test('the review log is each device\'s file and the older single file ' +
+     'read as one, and a card the log says was changed elsewhere but ' +
+     'still holds the change here is behind, refusing writes', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const review = require('../src/review.js');
+    const reviewlog = require('../src/reviewlog.js');
+    const A = 'Raw ==reads==%%[!suggest] Claude, 2026-10-30: read counts%% ' +
+        'from single-cell libraries.';
+    const B = 'Plain.';
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n', { 'G-aaaaa': A, 'G-bbbbb': B });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.saveSettings = async () => {};
+    p.openViews = () => [view];
+    p.device = 'nix';
+    const it = review.reviewItems(A)[0];
+    const later = new Date(Date.now() + 60000).toISOString();
+    // The older single file, and another device's file.
+    await app.vault.create('W/Grant/review-log.jsonl', reviewlog.line(
+        { at: '2026-10-29T10:00:00Z', action: 'resolve', card: 'G-bbbbb',
+          kind: 'comment', text: 'Old.', keys: ['k-old'] }));
+    app.vault.folders.add('W/Grant/review-log');
+    await app.vault.create('W/Grant/review-log/laptop.jsonl',
+        reviewlog.line(reviewlog.entry(it, 'apply', 'G-aaaaa', later)));
+    const st = (await p.threadsFor('G', { status: true })).json;
+    assert.deepEqual(st.sync, [{ card: 'G-aaaaa', state: 'behind',
+                                 since: later, device: 'nix' }]);
+    const out = await p.suggestTo({ manuscript: 'G', items: [
+        { card: 'G-aaaaa', quote: 'single-cell', replace: 'single cell' }] });
+    assert.match(out.json.refused[0].reason, /behind/);
+    // Its change arrives: no longer behind.
+    await app.vault.modify(app.vault.getAbstractFileByPath(
+        cardPath('G-aaaaa')), 'Raw read counts from single-cell libraries.');
+    assert.deepEqual((await p.threadsFor('G', { status: true })).json.sync,
+                     []);
+    const full = (await p.threadsFor('G', { resolved: true })).json;
+    assert.deepEqual(full.resolved.map((e) => e.card).sort(),
+                     ['G-aaaaa', 'G-bbbbb'], 'both files read');
+});
+
+test('review log entries from several files merge in time order, a line ' +
+     'in two of them once', () => {
+    const reviewlog = require('../src/reviewlog.js');
+    const a = { at: '2026-10-30T10:00:00Z', action: 'apply', keys: ['a'] };
+    const b = { at: '2026-10-30T09:00:00Z', action: 'resolve', keys: ['b'] };
+    assert.deepEqual(reviewlog.merge([[a], [b, a]]), [b, a]);
+    assert.equal(reviewlog.devicePath('W/Grant/Grant.md', 'my laptop'),
+                 'W/Grant/review-log/my_laptop.jsonl');
 });

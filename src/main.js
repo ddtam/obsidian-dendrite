@@ -36,7 +36,8 @@ const review = require('./review.js');
 const google = require('./google.js');
 const float = require('./float.js');
 const timing = require('./timing.js');
-const { History, idbStore } = require('./history.js');
+const { History, idbStore, hash: versionHash } = require('./history.js');
+const { Ledger } = require('./ledger.js');
 const zotero = require('./zotero.js');
 const reviewlog = require('./reviewlog.js');
 const { PdfLinks } = zotero;
@@ -302,6 +303,16 @@ function stickyNotice(key, text) {
 }
 
 /** The warning left on screen under `key`, if any, taken away. */
+/**
+ * A note's key in this device's version history: a card by its id, the
+ * index by its path, each under the vault's id.
+ */
+function historyKeyOf(app, id, path) {
+    const vault = app.appId || (app.vault.getName && app.vault.getName()) ||
+        'vault';
+    return `${vault}/${id === null ? 'index:' + path : id}`;
+}
+
 function unstickNotice(key) {
     const old = stuckNotices.get(key);
     if (old) old.hide();
@@ -930,6 +941,10 @@ class DendriteView extends ItemView {
             this.onResize(entries));
         this.registerEvent(this.app.vault.on('modify',
             (f) => this.onModify(f)));
+        // Another device's record arriving new settles what it vouches for.
+        this.registerEvent(this.app.vault.on('create', (f) => {
+            if (f instanceof TFile && this.file) this.ledgerChanged(f.path);
+        }));
         // Notes found by their names are found afresh after any of these.
         for (const e of ['create', 'delete', 'rename']) {
             this.registerEvent(this.app.vault.on(e, () => {
@@ -5190,6 +5205,7 @@ class DendriteView extends ItemView {
 
     async onModify(f) {
         if (!(f instanceof TFile) || !this.file) return;
+        if (this.ledgerChanged(f.path)) return;
         // A card's text, or the rounds, changed: what changed since sent.
         this.scheduleChanged();
         if (f === this.file) {
@@ -5353,9 +5369,57 @@ class DendriteView extends ItemView {
     // ---- versions going back ---------------------------------------------
 
     historyKey(id, path = this.file.path) {
-        const vault = this.app.appId ||
-            (this.app.vault.getName && this.app.vault.getName()) || 'vault';
-        return `${vault}/${id === null ? 'index:' + path : id}`;
+        return historyKeyOf(this.app, id, path);
+    }
+
+    /**
+     * Whether another device, by its record in the manuscript's devices
+     * folder, wrote or kept a note's text, hashed `h`, after `since`:
+     * its change, not an old copy.
+     */
+    trustFor(id) {
+        const ledger = this.plugin.ledger;
+        if (!ledger) return null;
+        const key = id === null ? 'index' : id;
+        return (h, since) => ledger.vouches(this.file, key, h, since);
+    }
+
+    /**
+     * A file changed: if it is another device's record, the notes marked
+     * as gone back that it vouches for are settled. Whether it was one.
+     */
+    ledgerChanged(path) {
+        const ledger = this.plugin.ledger;
+        if (!ledger || !ledger.changed(path)) return false;
+        this.settleVouched();
+        return true;
+    }
+
+    /** Notes marked as gone back whose text another device stands by. */
+    async settleVouched() {
+        for (const key of [...this.reverted]) {
+            const id = key === 'index' ? null : key;
+            if (id !== null && this.held.has(id)) continue;
+            if (id === null && this.dropped.size) continue;
+            const f = id === null ? this.file : this.cardFile(id);
+            if (!f) continue;
+            const text = await this.app.vault.read(f);
+            const compared = id === null ? text :
+                core.splitFrontmatter(text).body;
+            let ok = false;
+            try {
+                ok = await this.history.settleIf(this.historyKey(id), text,
+                                                 compared, this.trustFor(id));
+            } catch (err) {
+                console.error('Dendrite: version history failed', err);
+            }
+            if (!ok) continue;
+            if (id === null) this.indexReverted = false;
+            this.versionInfo.delete(key);
+            this.reverted.delete(key);
+            unstickNotice(`card:${this.file.path}:${key}`);
+        }
+        this.updateStatuses();
     }
 
     /**
@@ -5369,10 +5433,17 @@ class DendriteView extends ItemView {
         const f = id === null ? this.file : this.cardFile(id);
         const active = this.app.workspace.activeEditor;
         const here = own || !!(active && f && active.file === f);
+        // Written here: recorded for the other devices, so this text
+        // reaching them is known for a change, not an old copy.
+        if (here && this.plugin.ledger) {
+            this.plugin.ledger.wrote(this.file, id === null ? 'index' : id,
+                                     versionHash(compared));
+        }
         let r;
         try {
             r = await this.history.observe(this.historyKey(id), text,
-                                           compared, !here);
+                                           compared, !here,
+                                           this.trustFor(id));
         } catch (err) {
             console.error('Dendrite: version history failed', err);
             return;
@@ -5532,8 +5603,13 @@ class DendriteView extends ItemView {
         const f = id === null ? this.file : this.cardFile(id);
         if (!f) return;
         const text = await this.app.vault.read(f);
-        await this.history.keep(this.historyKey(id), text,
-            id === null ? text : core.splitFrontmatter(text).body);
+        const compared = id === null ? text : core.splitFrontmatter(text).body;
+        await this.history.keep(this.historyKey(id), text, compared);
+        // Kept here: the other devices settle the same mark on this text.
+        if (this.plugin.ledger) {
+            this.plugin.ledger.kept(this.file, id === null ? 'index' : id,
+                                    versionHash(compared));
+        }
         if (id === null) {
             this.dropBase = null;
             this.dropped.clear();
@@ -12003,9 +12079,18 @@ const TIMINGS = 'timings.jsonl';
 
 /** The review log of the manuscript whose index is `index`. */
 async function readReviewLog(app, index) {
-    const f = app.vault.getAbstractFileByPath(reviewlog.logPath(index.path));
-    return f instanceof TFile ? reviewlog.parse(await app.vault.read(f)) : [];
+    const dir = reviewlog.logDir(index.path) + '/';
+    const files = app.vault.getFiles().filter((f) => f.path ===
+        reviewlog.logPath(index.path) || (f.path.startsWith(dir) &&
+        f.path.endsWith('.jsonl') && !f.path.slice(dir.length).includes('/')));
+    const lists = [];
+    for (const f of files) lists.push(reviewlog.parse(await app.vault.read(f)));
+    return reviewlog.merge(lists);
 }
+
+// This device's name for its own review log, set when the plugin loads;
+// unset, the single file older versions wrote.
+let logDevice = null;
 
 // Each review log's writes, in turn: two comments resolved together
 // cannot both make the log, or append to it at once.
@@ -12016,12 +12101,24 @@ const logWrites = new Map();
  * `index`, made if there is none.
  */
 function appendReviewLog(app, index, entries) {
-    const path = reviewlog.logPath(index.path);
+    const path = logDevice ? reviewlog.devicePath(index.path, logDevice) :
+        reviewlog.logPath(index.path);
     const text = entries.map(reviewlog.line).join('');
     const run = async () => {
         const f = app.vault.getAbstractFileByPath(path);
-        if (f instanceof TFile) await app.vault.append(f, text);
-        else await app.vault.create(path, text);
+        if (f instanceof TFile) {
+            await app.vault.append(f, text);
+        } else {
+            const dir = path.slice(0, path.lastIndexOf('/'));
+            if (logDevice && !app.vault.getAbstractFileByPath(dir)) {
+                try {
+                    await app.vault.createFolder(dir);
+                } catch (err) {
+                    // Made meanwhile.
+                }
+            }
+            await app.vault.create(path, text);
+        }
     };
     const next = (logWrites.get(path) || Promise.resolve()).then(run, run);
     logWrites.set(path, next);
@@ -12030,6 +12127,7 @@ function appendReviewLog(app, index, entries) {
 
 module.exports = class DendritePlugin extends Plugin {
     onunload() {
+        if (this.ledger) this.ledger.flush();
         this.stopReviewApi();
         this.writeTimings();
     }
@@ -12132,6 +12230,8 @@ module.exports = class DendritePlugin extends Plugin {
         // Versions per device, outside the vault and data.json, which
         // sync plugins copy.
         this.history = new History(idbStore());
+        this.ledger = new Ledger(this.app.vault, this.deviceName());
+        logDevice = this.deviceName();
         // Citations linked to their PDF: asked of the Zotero Mirror plugin
         // where it can say, else found in its literature notes.
         const mirror = () => (this.app.plugins && this.app.plugins.plugins &&
@@ -12746,8 +12846,9 @@ module.exports = class DendritePlugin extends Plugin {
     /**
      * Why a program may not write to card `id` of `file` now, or null: a
      * sync left it on an older copy, or kept typing over a newer one,
-     * until Derek chooses its version; or `base`, a version it read,
-     * is no longer its text. Open in the editor is no reason: a write
+     * until Derek chooses its version; it is behind a change from
+     * another device; or `base`, a version it read, is no longer its
+     * text. Open in the editor is no reason: a write
      * goes into the editor's text, as one more change there.
      */
     async writeBlock(file, id, base = null) {
@@ -12759,6 +12860,12 @@ module.exports = class DendritePlugin extends Plugin {
                 'changed it, and Derek chooses its version on the board ' +
                 'before anything is written to it';
         }
+        // Behind another device's change: a write here could win over it.
+        if ((await this.behindCards(file)).some((x) => x.card === id)) {
+            return `card ${core.shortId(id)} is behind: the review log ` +
+                'has a change to it from another device that has not ' +
+                'reached this one';
+        }
         if (base !== null && base !== undefined && base !== '') {
             const now = await this.cardVersion(file, id, view);
             if (now !== String(base)) {
@@ -12769,10 +12876,56 @@ module.exports = class DendritePlugin extends Plugin {
         return null;
     }
 
-    /** The sync block of a manuscript's threads: its board and states. */
-    syncBlock(file) {
+    /**
+     * The sync block of a manuscript's threads: its board, this device's
+     * name, and the notes not settled here: those its board marked from
+     * this device's own history, so another device may hold none, and
+     * those behind, board open or not.
+     */
+    async syncBlock(file) {
         const view = this.openViews().find((v) => v.file === file);
-        return { board_open: !!view, sync: view ? view.syncStates() : [] };
+        const device = this.deviceName();
+        const sync = [...(view ? view.syncStates() : []),
+                      ...await this.behindCards(file)];
+        return { board_open: !!view, device,
+                 sync: sync.map((x) => ({ ...x, device })) };
+    }
+
+    /**
+     * Cards behind the review log: the log says a comment or change in
+     * one was resolved, applied, dismissed or withdrawn after its file
+     * here last changed, yet it is still open in it. Another device did
+     * it, and its card has not arrived here, or is held by the sync as a
+     * conflict: { card, state: 'behind', since }, since the newest such.
+     */
+    async behindCards(file) {
+        const gone = new Set(['resolve', 'apply', 'dismiss', 'withdraw']);
+        const byCard = new Map();
+        for (const e of await readReviewLog(this.app, file)) {
+            if (!gone.has(e.action) || !e.card || !e.at) continue;
+            if (!byCard.has(e.card)) byCard.set(e.card, []);
+            byCard.get(e.card).push(e);
+        }
+        const out = [];
+        for (const [card, list] of byCard) {
+            const f = this.app.metadataCache.getFirstLinkpathDest(card,
+                                                                file.path);
+            if (!(f instanceof TFile)) continue;
+            const mtime = f.stat ? f.stat.mtime : 0;
+            const after = list.filter((e) => Date.parse(e.at) > mtime);
+            if (!after.length) continue;
+            const body = core.splitFrontmatter(await this.app.vault.read(f))
+                .body;
+            const open = new Set(review.reviewItems(body).flatMap((it) =>
+                review.reviewKeys(it)));
+            const still = after.filter((e) => (Array.isArray(e.keys) ?
+                e.keys : []).some((k) => open.has(k)));
+            if (still.length) {
+                out.push({ card, state: 'behind',
+                           since: still[still.length - 1].at });
+            }
+        }
+        return out;
     }
 
     /**
@@ -12811,7 +12964,7 @@ module.exports = class DendritePlugin extends Plugin {
             const v = await this.cardVersion(file, n.id);
             if (v) versions[n.id] = v;
         }
-        const sync = this.syncBlock(file);
+        const sync = await this.syncBlock(file);
         if (status) {
             return { status: 200, json: { manuscript: prefixOf(app, file),
                                           ...sync, versions } };
@@ -12929,7 +13082,7 @@ module.exports = class DendritePlugin extends Plugin {
             }
             const n = !(f instanceof TFile) ? -1 :
                 await (view ? view.replyFrom(card, tid, reply) :
-                    this.replyInFile(f, tid, reply));
+                    this.replyInFile(f, tid, reply, file));
             if (n === REFUSED) {
                 refused.push({ id, reason: 'someone has replied since; ' +
                     'send a new reply instead' });
@@ -12994,7 +13147,7 @@ module.exports = class DendritePlugin extends Plugin {
             const item = { ...x, author: String(x.author || '').trim() ||
                                'Claude', date: localDay() };
             const reason = await (view ? view.suggestIn(card, item) :
-                this.suggestInFile(f, item));
+                this.suggestInFile(f, item, file));
             if (reason) refused.push({ n, reason });
             else done.push(n);
         }
@@ -13006,24 +13159,72 @@ module.exports = class DendritePlugin extends Plugin {
     }
 
     /** A suggestion written into a card's file; why not, or null. */
-    async suggestInFile(f, item) {
+    async suggestInFile(f, item, index = null) {
         let reason = null;
-        await this.app.vault.process(f, (data) => {
+        const text = await this.app.vault.process(f, (data) => {
             const { fm, body } = core.splitFrontmatter(data);
             const out = review.suggestInto(body, f.basename, item);
             reason = out.reason || null;
             return out.md === undefined ? data : fm + out.md;
         });
+        if (!reason) await this.recordOwn(index, f, text);
         return reason;
+    }
+
+    /**
+     * A card's text this plugin wrote with no board open to see it, as
+     * from the review endpoint: recorded in this device's history and
+     * its record for the other devices, so it is not later taken for an
+     * old copy, here or there.
+     */
+    async recordOwn(index, f, text) {
+        if (!index || typeof text !== 'string') return;
+        const body = core.splitFrontmatter(text).body;
+        try {
+            await this.history.observe(historyKeyOf(this.app, f.basename,
+                index.path), text, body, false);
+        } catch (err) {
+            console.error('Dendrite: version history failed', err);
+        }
+        if (this.ledger) this.ledger.wrote(index, f.basename,
+                                           versionHash(body));
+    }
+
+    /**
+     * This device's name in the manuscripts' devices folders: its host
+     * name on a computer; on a phone or tablet, a name made once and
+     * kept in this device's own storage, which no sync copies.
+     */
+    deviceName() {
+        if (this.device) return this.device;
+        let name = null;
+        try {
+            if (Platform.isDesktopApp) name = require('os').hostname();
+        } catch (err) {
+            name = null;
+        }
+        if (!name) {
+            const app = this.app;
+            name = app.loadLocalStorage && app.loadLocalStorage(
+                'dendrite-device');
+            if (!name) {
+                name = 'mobile-' + Math.random().toString(36).slice(2, 8);
+                if (app.saveLocalStorage) {
+                    app.saveLocalStorage('dendrite-device', name);
+                }
+            }
+        }
+        this.device = name;
+        return name;
     }
 
     /**
      * A reply written into a card's file; the comment's index, -1 where
      * it is not there, or REFUSED where it would replace and cannot.
      */
-    async replyInFile(f, tid, reply) {
+    async replyInFile(f, tid, reply, index = null) {
         let n = -1;
-        await this.app.vault.process(f, (data) => {
+        const text = await this.app.vault.process(f, (data) => {
             const { fm, body } = core.splitFrontmatter(data);
             n = review.threadIds(review.reviewItems(body)).indexOf(tid);
             const out = n < 0 ? null : withReply(body, n, reply);
@@ -13031,6 +13232,7 @@ module.exports = class DendritePlugin extends Plugin {
             else if (n >= 0 && out === null) n = REFUSED;
             return typeof out !== 'string' ? data : fm + out;
         });
+        if (n >= 0) await this.recordOwn(index, f, text);
         return n;
     }
 
@@ -13726,10 +13928,11 @@ module.exports = class DendritePlugin extends Plugin {
         }
         const f = this.app.metadataCache.getFirstLinkpathDest(id, file.path);
         if (!(f instanceof TFile)) return;
-        await this.app.vault.process(f, (data) => {
+        const text = await this.app.vault.process(f, (data) => {
             const { fm, body } = core.splitFrontmatter(data);
             return fm + review.setPriority(body, n, p);
         });
+        await this.recordOwn(file, f, text);
     }
 
     /** Whether review is on: the comment list open. */
