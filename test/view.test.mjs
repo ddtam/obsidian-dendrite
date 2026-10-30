@@ -3043,7 +3043,7 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
                       'Undo', 'Redo', 'Preview', 'All', 'Printed',
-                      'Export', 'Review']);
+                      'Export', 'Review', 'Comments']);
     // The mode comes after the buttons; the name is the pane's title.
     const kids = [...view.contentEl.querySelector('.dendrite-bar').children];
     assert.ok(kids.indexOf(view.modeEl) > kids.indexOf(bar[5]));
@@ -6567,4 +6567,158 @@ test('one column at a time: a swipe lands on the children or the parent ' +
     } finally {
         DendriteView.prototype.isNarrow = was;
     }
+});
+
+test('the comment list in the sidebar lists the open comments in reading ' +
+     'order, filters them, the preview showing only those it keeps, and ' +
+     'a click goes to one in the preview', async () => {
+    const { DendritePreview, DendriteComments } =
+        require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n- [[G-bbbbb|Methods]]\n- [[G-ccccc|Was]]\n');
+    await app.vault.create(cardPath('G-aaaaa'),
+        '# Aims\n\nThe ==cohort==%%[!review] Aly, 2026-10-23: How many?%% is ' +
+        'large, ==old==%%[!suggest] Aly, 2026-10-23: new%% here.');
+    await app.vault.create(cardPath('G-bbbbb'),
+        'We ==sequence==%%[!review] Me, 2026-10-24: @Claude right?%% it.');
+    await app.vault.create(cardPath('G-ccccc'),
+        '---\ndendrite_superseded: true\n---\nAn ==old==%%[!review] Aly, ' +
+        '2026-10-22: Gone?%% one.');
+    const leaves = { 'dendrite-preview': [], 'dendrite-comments': [] };
+    app.workspace.getLeavesOfType = (t) => leaves[t] || [];
+    const focused = [];
+    const plugin = { settings: { headingTop: 1 },
+        commentFilterState: { author: '', waiting: '', kind: '' },
+        selfNames: () => new Set(['Me']),
+        focusCard: (f, id) => focused.push(id),
+        previewLeaf: () => leaves['dendrite-preview'][0] || null };
+    plugin.commentFilter = () => {
+        const f = plugin.commentFilterState;
+        return Object.values(f).some(Boolean) &&
+            leaves['dendrite-comments'].length ? f : null;
+    };
+    const pv = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await pv.onOpen();
+    await pv.setState({ file: INDEX, showComments: false });
+    leaves['dendrite-preview'].push({ view: pv });
+    const list = new DendriteComments({ app }, plugin);
+    leaves['dendrite-comments'].push({ view: list });
+    await list.onOpen();
+    await list.show(app.vault.getAbstractFileByPath(INDEX));
+    plugin.setCommentFilter = (change) => {
+        Object.assign(plugin.commentFilterState, change);
+        list.showFilter();
+        list.draw();
+    };
+    const rows = () => [...list.contentEl.querySelectorAll(
+        '.dendrite-cthread')].map((el) => el.querySelector(
+        '.dendrite-cthread-text').textContent);
+    assert.deepEqual(rows(), ['How many?', 'Suggests: new',
+                              '@Claude right?', 'Gone?'], 'in reading order');
+    assert.equal(list.countEl.textContent, '4 open comments');
+    const where = [...list.contentEl.querySelectorAll(
+        '.dendrite-cgroup')].map((el) => el.textContent);
+    assert.deepEqual(where, ['Aims', 'Methods', 'Was'],
+                     'under its heading, or the card\'s name, once');
+    const gone = [...list.contentEl.querySelectorAll(
+        '.dendrite-cthread-unprinted')].map((el) => el.textContent);
+    assert.deepEqual(gone, ['Old version: does not print'],
+                     'why the preview does not show it');
+    const authors = [...list.authorEl.options].map((o) => o.text);
+    assert.deepEqual(authors, ['Anyone', 'Me', 'Aly']);
+    [...list.contentEl.querySelectorAll('.dendrite-seg-btn')]
+        .find((b) => b.textContent === 'Claude').click();
+    assert.deepEqual(rows(), ['@Claude right?']);
+    assert.equal(list.countEl.textContent, '1 of 4 open comments');
+    // A click: the preview shows its comments, those the filter keeps.
+    list.contentEl.querySelector('.dendrite-cthread').click();
+    await tick(50);
+    assert.ok(pv.showComments, 'comments shown in the preview');
+    assert.deepEqual(pv.reviewList.map((x) => x.item.text),
+                     ['@Claude right?'], 'only the one kept');
+    assert.equal(pv.reviewAt, 0, 'gone to');
+    assert.deepEqual(focused, ['G-bbbbb'], 'and its card selected');
+    assert.ok(!pv.doc.querySelector('mark.dendrite-review-mark') ||
+        [...pv.doc.querySelectorAll('mark.dendrite-review-mark')]
+            .every((m) => m.textContent === 'sequence'),
+        'the other comments drawn as plain text');
+    // Pointing at it in the list marks its passage in the preview.
+    const item = list.contentEl.querySelector('.dendrite-cthread');
+    item.dispatchEvent(new h.window.MouseEvent('mouseenter'));
+    const marks = pv.passagesOf(pv.reviewList[0]);
+    assert.ok(marks.length && marks.every((el) =>
+        el.classList.contains('is-hover')), 'its passage marked');
+    item.dispatchEvent(new h.window.MouseEvent('mouseleave'));
+    assert.ok(!marks.some((el) => el.classList.contains('is-hover')));
+    // Without the list, every comment again.
+    leaves['dendrite-comments'] = [];
+    await pv.refresh();
+    assert.equal(pv.reviewList.length, 3);
+    await pv.onClose();
+});
+
+test('a comment gone to in the preview stays in view when its card is ' +
+     'then selected on the board, which would bring the card to the ' +
+     'middle', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|One]]\n- [[G-bbbbb|Two]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'Plain text.');
+    await app.vault.create(cardPath('G-bbbbb'),
+        'A ==long==%%[!review] Aly, 2026-10-23: Why?%% card.');
+    const plugin = { settings: { headingTop: 1 } };
+    const pv = new DendritePreview({ app, updateHeader() {} }, plugin);
+    plugin.focusCard = (f, id) => pv.highlight(id);
+    await pv.onOpen();
+    await pv.setState({ file: INDEX, showComments: true });
+    await tick(50);
+    const moves = [];
+    pv.glideTo = (top) => moves.push(top);
+    pv.scrollToText = (t) => { moves.push(t); return true; };
+    pv.highlight('G-aaaaa');
+    assert.equal(moves.length, 1, 'another card: brought to the middle');
+    moves.length = 0;
+    pv.reviewAt = 0;
+    await pv.goComment();
+    const after = moves.length;
+    assert.equal(pv.active, 'G-bbbbb', 'its card selected');
+    pv.highlight('G-bbbbb');
+    assert.equal(moves.length, after,
+                 'its card selected again: the comment stays in view');
+    await pv.onClose();
+});
+
+test('a comment gone to far down the preview has the parts around it ' +
+     'drawn before it is aimed at, so they do not push it past', async () => {
+    const { DendritePreview } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|One]]\n- [[G-bbbbb|Two]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'Plain text.');
+    await app.vault.create(cardPath('G-bbbbb'),
+        'A ==long==%%[!review] Aly, 2026-10-23: Why?%% card.');
+    const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+    const pv = new DendritePreview({ app, updateHeader() {} }, plugin);
+    await pv.onOpen();
+    await pv.setState({ file: INDEX, showComments: true });
+    await tick(50);
+    for (const x of pv.blocks.values()) x.el.addClass('is-pending');
+    const order = [];
+    const render = pv.renderBlock.bind(pv);
+    pv.renderBlock = async (id) => {
+        order.push(id);
+        await render(id);
+    };
+    pv.scrollToText = () => { order.push('aim'); return true; };
+    pv.inView = () => false;
+    pv.reviewAt = 0;
+    await pv.goComment();
+    assert.deepEqual(order, ['G-aaaaa', 'G-bbbbb', 'aim'],
+                     'the part above it drawn, then aimed at');
+    await pv.onClose();
 });

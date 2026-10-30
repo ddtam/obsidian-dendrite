@@ -1410,6 +1410,7 @@ body {
    the accent, a change told from a comment by its dashed edge. */
 .dendrite-board,
 .dendrite-preview,
+.dendrite-comments,
 .modal {
     --dendrite-review: var(--interactive-accent);
     --dendrite-suggest: var(--interactive-accent);
@@ -2740,4 +2741,85 @@ button.dendrite-done {
 
 .dendrite.is-narrow .dendrite-card:has(> .dendrite-kids) {
     padding-right: 34px;
+}
+
+/* The comment list in the sidebar: the filter, then each open comment as
+   a card in its reviewer's colour, as the preview's bubbles. */
+.dendrite-comments-filter {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+.dendrite-comments-filter label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+}
+.dendrite-comments-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+}
+.dendrite-comments-filter select {
+    flex: 0 1 60%;
+    min-width: 0;
+}
+.dendrite-comments-count {
+    margin-bottom: 8px;
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+}
+.dendrite-comments-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.dendrite-cthread {
+    padding: 6px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 3px solid var(--dendrite-review);
+    border-radius: 6px;
+    background: var(--background-primary);
+    font-size: var(--font-ui-small);
+    line-height: 1.4;
+    cursor: pointer;
+}
+.dendrite-cthread.is-suggest {
+    border-left-style: dashed;
+    border-left-color: var(--dendrite-suggest);
+}
+.dendrite-cthread:hover {
+    background: var(--background-modifier-hover);
+}
+.dendrite-cgroup {
+    margin-top: 6px;
+    font-size: var(--font-ui-smaller);
+    font-weight: var(--font-semibold);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dendrite-cthread-meta {
+    color: var(--text-muted);
+}
+.dendrite-cthread-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+}
+/* A comment in text that does not print: not in the preview to go to. */
+.dendrite-cthread.is-unprinted {
+    opacity: 0.6;
+}
+.dendrite-cthread-unprinted {
+    color: var(--text-faint);
+    font-style: italic;
 }

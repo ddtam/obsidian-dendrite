@@ -1090,6 +1090,33 @@ function awaits(it, name, self) {
         to(r));
 }
 
+/**
+ * Whether a comment passes the comment list's filter, whose parts are
+ * each '' for any: `author`, a name or 'me' for any name in `self`;
+ * `waiting`, 'me' where someone else has the last word, 'Claude' where
+ * Claude was asked, with @Claude, and has not answered since, or
+ * 'resolve' where the last reply suggests resolving it; and `kind`,
+ * 'comment' or 'suggest'.
+ */
+function passesFilter(it, f, self) {
+    if (!f) return true;
+    const suggest = it.kind === 'suggest';
+    if (f.kind === 'comment' && suggest) return false;
+    if (f.kind === 'suggest' && !suggest) return false;
+    if (f.author === 'me' ? !self.has(it.author) :
+        f.author && it.author !== f.author) return false;
+    const rs = it.replies || [];
+    if (f.waiting === 'me') {
+        return !self.has(rs.length ? rs[rs.length - 1].author : it.author);
+    }
+    if (f.waiting === 'Claude') {
+        const asked = [it, ...rs].some((x) => addressed(x).to === 'Claude');
+        return asked && awaits(it, 'Claude', self);
+    }
+    if (f.waiting === 'resolve') return readyToResolve(it);
+    return true;
+}
+
 // A link in a comment, [[o5yps]] or [[o5yps|its text]].
 const WIKILINK = /\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g;
 
@@ -1977,13 +2004,16 @@ function countComments(items) {
     return firstOfComment(items).filter((f, i) => f === i).length;
 }
 
-function renderMarkdown(md, colourOf = null) {
+function renderMarkdown(md, colourOf = null, keep = null) {
     let n = 0;
     // A Google comment on several passages keeps one number for them.
     const numbers = new Map();
     const { items } = scan(md);
     // A start marker is drawn knowing whose comment it opens.
     const byId = new Map(items.filter((x) => x.id).map((x) => [x.id, x]));
+    // Which comments are drawn, by their index, as reviewItems counts
+    // them; the rest are left as their text, unmarked and unnumbered.
+    const kept = (k) => !keep || keep(k);
     const tintOf = (body) => {
         const h = HEAD.exec(body.replace(/^\s+/, ''));
         const c = colourOf && h ? colourOf(h[1]) : null;
@@ -1996,11 +2026,14 @@ function renderMarkdown(md, colourOf = null) {
     return md.replace(SCAN, (m, openId, passage, id, kind, body) => {
         if (openId !== undefined) {
             const it = byId.get(openId);
-            if (!it) return '';
+            if (!it || !kept(items.indexOf(it))) return '';
             return '<span class="dendrite-review-from dendrite-rid-' +
                 `${openId}${it.kind === 'suggest' ? ' is-suggest' : ''}` +
                 `${tintOf(it.body)}"></span>`;
         }
+        item++;
+        const marked = id !== undefined && byId.has(id);
+        if (!kept(item)) return marked ? '' : passage || '';
         const g = kind === 'review' ? googleOf({ kind, text:
             (HEAD.exec(body.replace(/^\s+/, '')) || [])[3] || body }) : null;
         let num;
@@ -2013,10 +2046,8 @@ function renderMarkdown(md, colourOf = null) {
         const text = h ? h[3] : body.trim();
         // The reviewer's colour, where the manuscript gives them one.
         const tint = tintOf(body);
-        const marked = id !== undefined && byId.has(id);
         const rid = marked ? ` dendrite-rid-${id}` : '';
         const cls = (kind === 'suggest' ? ' is-suggest' : '') + tint;
-        item++;
         const sup = `<sup class="dendrite-review-n${cls}${rid} ` +
             `dendrite-item-${item}">${num}</sup>`;
         // Between markers: the end of its passage, which is marked once
@@ -2554,7 +2585,8 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    fillLinked, rowSuggestion, suggestionText,
                    findSuggestion, reviseSuggestion,
                    threadIds, forReviewers, replyRow,
-                   addressed, awaits, replaceReplies, fillAddressed,
+                   addressed, awaits, passesFilter,
+                   replaceReplies, fillAddressed,
                    suggestInto,
                    firstOfComment, countComments,
                    itemText,

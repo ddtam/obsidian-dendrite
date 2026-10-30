@@ -1831,7 +1831,7 @@ module.exports = {
     inlineToReferences, inlineFootnotes, footnoteNumbers,
     footnoteLabel, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
-    lineDiff, charDiff, printedOnly,
+    lineDiff, charDiff, printedOnly, HEADING,
     deriveLabel, stripComments, validPrefix, newId, withPrefix,
     formerPrefixes, makeNode, makeRoot,
     insertSibling, appendChild, moveWithin, indent, outdent, remove,

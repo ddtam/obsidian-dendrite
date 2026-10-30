@@ -1646,3 +1646,43 @@ test('a card with comments is drawn, and its comments keyed, where there ' +
         globalThis.Buffer = was;
     }
 });
+
+test('the comment list\'s filter: who wrote a comment, whose answer it ' +
+     'waits for, and whether it is a comment or a suggestion', () => {
+    const md = 'A ==one==%%[!review] Aly, 2026-10-23: Why?%% then ' +
+        '==two==%%[!review] Aly, 2026-10-23: How?%%%%[!reply] Me, ' +
+        '2026-10-24: Like so.%% then ==three==%%[!review] Me, ' +
+        '2026-10-24: @Claude is this right?%% then ==four==%%[!review] ' +
+        'Claude, 2026-10-24: Cite it.%%%%[!reply] Claude, 2026-10-25: ' +
+        '[resolve] Done.%% and ==old==%%[!suggest] Aly, 2026-10-23: new%%.';
+    const items = r.reviewItems(md);
+    const self = new Set(['Derek', 'Me']);
+    const pick = (f) => items.map((it, k) => k)
+        .filter((k) => r.passesFilter(items[k], f, self));
+    assert.deepEqual(pick({}), [0, 1, 2, 3, 4], 'no filter: all');
+    assert.deepEqual(pick(null), [0, 1, 2, 3, 4]);
+    assert.deepEqual(pick({ author: 'Aly' }), [0, 1, 4]);
+    assert.deepEqual(pick({ author: 'me' }), [2]);
+    assert.deepEqual(pick({ waiting: 'me' }), [0, 3, 4],
+                     'someone else has the last word');
+    assert.deepEqual(pick({ waiting: 'Claude' }), [2]);
+    assert.deepEqual(pick({ waiting: 'resolve' }), [3]);
+    assert.deepEqual(pick({ kind: 'suggest' }), [4]);
+    assert.deepEqual(pick({ kind: 'comment', author: 'Aly' }), [0, 1]);
+});
+
+test('the preview draws only the comments a filter keeps, the rest as ' +
+     'plain text, numbered from one, each still named by its index', () => {
+    const md = 'A ==one==%%[!review] Aly, 2026-10-23: Why?%% then ' +
+        '==old==%%[!suggest] R, 2026-10-24: new%% and %%{1%%held%%}1 ' +
+        '[!review] R, 2026-10-24: Here.%% end.';
+    const html = r.renderMarkdown(md, null, (k) => k === 2);
+    assert.equal(html, 'A one then old and <span class="dendrite-review-' +
+        'from dendrite-rid-1"></span>held<span class="dendrite-review-upto' +
+        ' dendrite-rid-1"></span><sup class="dendrite-review-n ' +
+        'dendrite-rid-1 dendrite-item-2">1</sup> end.');
+    assert.equal(r.renderMarkdown(md, null, () => false),
+                 'A one then old and held end.');
+    assert.equal(r.renderMarkdown(md, null, () => true),
+                 r.renderMarkdown(md), 'all kept: as without a filter');
+});

@@ -1346,6 +1346,7 @@ var require_core = __commonJS({
       lineDiff,
       charDiff,
       printedOnly,
+      HEADING,
       deriveLabel,
       stripComments,
       validPrefix,
@@ -2570,6 +2571,23 @@ var require_review = __commonJS({
       if (j < 0 && it.author !== name) return true;
       return rs.slice(j + 1).some((r) => asked || !self.has(r.author) || to(r));
     }
+    function passesFilter(it, f, self) {
+      if (!f) return true;
+      const suggest = it.kind === "suggest";
+      if (f.kind === "comment" && suggest) return false;
+      if (f.kind === "suggest" && !suggest) return false;
+      if (f.author === "me" ? !self.has(it.author) : f.author && it.author !== f.author) return false;
+      const rs = it.replies || [];
+      if (f.waiting === "me") {
+        return !self.has(rs.length ? rs[rs.length - 1].author : it.author);
+      }
+      if (f.waiting === "Claude") {
+        const asked = [it, ...rs].some((x) => addressed(x).to === "Claude");
+        return asked && awaits(it, "Claude", self);
+      }
+      if (f.waiting === "resolve") return readyToResolve(it);
+      return true;
+    }
     var WIKILINK = /\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g;
     function fillLinked(el, text, linkOf = null) {
       const doc = el.ownerDocument;
@@ -3192,11 +3210,12 @@ var require_review = __commonJS({
     function countComments(items) {
       return firstOfComment(items).filter((f, i) => f === i).length;
     }
-    function renderMarkdown(md, colourOf = null) {
+    function renderMarkdown(md, colourOf = null, keep = null) {
       let n = 0;
       const numbers = /* @__PURE__ */ new Map();
       const { items } = scan(md);
       const byId = new Map(items.filter((x) => x.id).map((x) => [x.id, x]));
+      const kept = (k) => !keep || keep(k);
       const tintOf = (body) => {
         const h = HEAD.exec(body.replace(/^\s+/, ""));
         const c = colourOf && h ? colourOf(h[1]) : null;
@@ -3207,9 +3226,12 @@ var require_review = __commonJS({
       return md.replace(SCAN, (m, openId, passage, id, kind, body) => {
         if (openId !== void 0) {
           const it = byId.get(openId);
-          if (!it) return "";
+          if (!it || !kept(items.indexOf(it))) return "";
           return `<span class="dendrite-review-from dendrite-rid-${openId}${it.kind === "suggest" ? " is-suggest" : ""}${tintOf(it.body)}"></span>`;
         }
+        item++;
+        const marked = id !== void 0 && byId.has(id);
+        if (!kept(item)) return marked ? "" : passage || "";
         const g = kind === "review" ? googleOf({ kind, text: (HEAD.exec(body.replace(/^\s+/, "")) || [])[3] || body }) : null;
         let num;
         if (g && numbers.has(g)) num = numbers.get(g);
@@ -3220,10 +3242,8 @@ var require_review = __commonJS({
         const h = HEAD.exec(body.replace(/^\s+/, ""));
         const text = h ? h[3] : body.trim();
         const tint = tintOf(body);
-        const marked = id !== void 0 && byId.has(id);
         const rid = marked ? ` dendrite-rid-${id}` : "";
         const cls = (kind === "suggest" ? " is-suggest" : "") + tint;
-        item++;
         const sup = `<sup class="dendrite-review-n${cls}${rid} dendrite-item-${item}">${num}</sup>`;
         const upto = marked ? `<span class="dendrite-review-upto${rid}"></span>` : "";
         if (kind === "suggest" && (marked || !passage)) {
@@ -3662,6 +3682,7 @@ var require_review = __commonJS({
       replyRow,
       addressed,
       awaits,
+      passesFilter,
       replaceReplies,
       fillAddressed,
       suggestInto,
@@ -6557,6 +6578,9 @@ var STATUS_ITEMS = [
   ["revise", "Status: revise", "flag", "3"]
 ];
 var PREVIEW = "dendrite-preview";
+var DRAW_MARGIN = 800;
+var COMMENTS = "dendrite-comments";
+var COMMENT_FILTER = Object.freeze({ author: "", waiting: "", kind: "" });
 var NOTES_AT = {
   section: "Footnotes collected under each section",
   end: "Footnotes collected at the end",
@@ -7544,6 +7568,7 @@ var DendriteView = class extends ItemView {
     btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e), true).addClass("dendrite-bar-gap-before");
     this.reviewBtn = btn("inbox", "Review", "Bring in review comments: from the linked Google Doc, a returned Word file, or programs", (e) => this.reviewMenu(e), true);
     this.showInboxBadge();
+    btn("messages-square", "Comments", "List the open comments in the sidebar, to filter them by who wrote them and whose answer they wait for", () => this.plugin.showCommentList());
     this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
     this.showMode();
     this.totalEl = bar.createDiv({ cls: "dendrite-total" });
@@ -8193,6 +8218,7 @@ var DendriteView = class extends ItemView {
     m.addItem((i) => i.setTitle("Export\u2026").setIcon("file-output").onClick(() => this.exportMenu(null, e)));
     const waiting = (this.inbox || []).length;
     m.addItem((i) => i.setTitle("Review\u2026" + (waiting ? ` (${waiting} waiting)` : "")).setIcon("inbox").onClick(() => this.reviewMenu(e)));
+    m.addItem((i) => i.setTitle("Comment list").setIcon("messages-square").onClick(() => this.plugin.showCommentList()));
     m.addSeparator();
     m.addItem((i) => i.setTitle("This manuscript's settings").setIcon("settings").onClick(() => this.openManuscriptSettings()));
     m.addItem((i) => i.setTitle("Open the index note").setIcon("file-text").onClick(() => this.plugin.openAsMarkdown(this.file)));
@@ -13824,7 +13850,7 @@ var DendritePreview = class extends ItemView {
     this.scope.register([], "Escape", () => false);
     this.observer = new IntersectionObserver(
       (entries) => this.onVisible(entries),
-      { root: null, rootMargin: "800px 0px" }
+      { root: null, rootMargin: `${DRAW_MARGIN}px 0px` }
     );
     const changed = (f) => {
       if (!(f instanceof TFile) || !this.file) return;
@@ -14156,12 +14182,23 @@ var DendritePreview = class extends ItemView {
       roleOf,
       kindOf
     ) : null;
+    const filter = this.plugin.commentFilter ? this.plugin.commentFilter() : null;
+    const self = filter ? this.plugin.selfNames() : null;
+    const keepOf = (body) => {
+      if (!filter) return null;
+      const items = review.reviewItems(body);
+      return (k) => review.passesFilter(items[k], filter, self);
+    };
     const segs = core.gatherFootnotes(
       core.renumberFootnotes(
         core.exportSegments(root.children, (id) => {
           const b = this.bodies.get(id);
           if (!b) return "";
-          return this.showComments ? review.renderMarkdown(b.body, colourOf) : b.body;
+          return this.showComments ? review.renderMarkdown(
+            b.body,
+            colourOf,
+            keepOf(b.body)
+          ) : b.body;
         }, headingTop, numbers, roleOf, { kindOf })
       ).segments,
       this.notesAt
@@ -14257,6 +14294,15 @@ var DendritePreview = class extends ItemView {
     for (const el of this.passagesOf(cur)) el.addClass("is-current");
     this.scheduleBubbles();
   }
+  /** A comment pointed at in the comment list, marked as on hover. */
+  pointAt(id, n, on) {
+    const entry = this.reviewList.find((x) => (x.parts || [x]).some((p) => p.id === id && p.n === n));
+    if (!entry) return;
+    for (const p of this.passagesOf(entry)) p.toggleClass("is-hover", on);
+    const b = this.bubbleOf(entry.id, entry.n);
+    if (b) b.toggleClass("is-hover", on);
+    if (this.gutterEl) this.gutterEl.toggleClass("has-hover", on);
+  }
   bubbleOf(id, n) {
     return this.gutterEl ? [...this.gutterEl.children].find((el) => el.dataset.id === id && Number(el.dataset.n) === n) || null : null;
   }
@@ -14348,12 +14394,16 @@ var DendritePreview = class extends ItemView {
     const r = el.getBoundingClientRect();
     return v.height > 0 && r.top >= v.top && r.bottom <= v.bottom;
   }
-  /** Bring the comment gone to into view, and select its card. */
+  /**
+   * Bring the comment gone to into view, and select its card. The
+   * parts that will be drawn around it once it is in view are drawn
+   * first: drawn after, they would push it on past where it was aimed.
+   */
   async goComment() {
     const cur = this.reviewList[this.reviewAt];
     if (!cur) return;
     const b = this.blocks.get(cur.id);
-    if (b && b.el.hasClass("is-pending")) await this.renderBlock(cur.id);
+    if (b) await this.drawAround(b.el);
     this.showPos();
     const at = b && this.passageOf(b.el, cur.n)[0];
     if (at && !this.inView(at)) {
@@ -14366,6 +14416,15 @@ var DendritePreview = class extends ItemView {
       }
     }
     if (this.file) this.plugin.focusCard(this.file, cur.id, false);
+  }
+  /** The parts not yet drawn that would be, with `el` in view. */
+  async drawAround(el) {
+    const reach = 2 * (this.doc ? this.doc.clientHeight : 0) + DRAW_MARGIN;
+    for (const [id, x] of [...this.blocks]) {
+      if (x.el.hasClass("is-pending") && Math.abs(x.el.offsetTop - el.offsetTop) <= reach) {
+        await this.renderBlock(id);
+      }
+    }
   }
   /**
    * The gutter right of the text that holds every card's comments, one
@@ -14819,7 +14878,8 @@ var DendritePreview = class extends ItemView {
     this.fadeBubbles();
     this.scheduleBubbles();
     const b = this.blocks.get(id);
-    if (b) {
+    const going = this.reviewList && this.reviewList[this.reviewAt];
+    if (b && !going) {
       const view = this.doc ? this.doc.clientHeight : 0;
       const tall = view && b.el.offsetHeight > view * 0.8;
       const y = tall ? 16 : (view - b.el.offsetHeight) / 2;
@@ -14942,6 +15002,305 @@ function quotaSetting(container, name, desc, current, required, draft) {
     emit();
   }));
 }
+var DendriteComments = class extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.file = null;
+    this.threads = [];
+    this.colours = /* @__PURE__ */ new Map();
+    this.names = /* @__PURE__ */ new Map();
+  }
+  getViewType() {
+    return COMMENTS;
+  }
+  getIcon() {
+    return "messages-square";
+  }
+  getDisplayText() {
+    return "Comments";
+  }
+  getState() {
+    return { filter: { ...this.plugin.commentFilterState } };
+  }
+  async setState(state, result) {
+    if (state && state.filter) {
+      this.plugin.commentFilterState = {
+        ...COMMENT_FILTER,
+        ...state.filter
+      };
+      this.showFilter();
+      this.draw();
+    }
+    return super.setState(state, result);
+  }
+  async onOpen() {
+    const el = this.contentEl;
+    el.empty();
+    el.addClass("dendrite-comments");
+    const bar = el.createDiv({ cls: "dendrite-comments-filter" });
+    const row = bar.createEl("label");
+    row.createSpan({ text: "Written by" });
+    this.authorEl = row.createEl("select", { cls: "dropdown" });
+    this.authorEl.addEventListener("change", () => this.plugin.setCommentFilter({ author: this.authorEl.value }));
+    this.switchRows = {};
+    for (const [key, label] of [
+      ["waiting", "Waiting on"],
+      ["kind", "Kind"]
+    ]) {
+      const r = bar.createDiv({ cls: "dendrite-comments-row" });
+      r.createSpan({ text: label });
+      this.switchRows[key] = r.createDiv();
+    }
+    this.countEl = el.createDiv({ cls: "dendrite-comments-count" });
+    this.listEl = el.createDiv({ cls: "dendrite-comments-list" });
+    const ws = this.app.workspace;
+    this.registerEvent(ws.on(
+      "active-leaf-change",
+      (leaf) => this.follow(leaf)
+    ));
+    const changed = (f2) => {
+      if (!(f2 instanceof TFile) || !this.file) return;
+      if (f2 === this.file || this.ids && this.ids.has(f2.basename)) {
+        this.scheduleRefresh();
+      }
+    };
+    this.registerEvent(this.app.vault.on("modify", changed));
+    this.registerEvent(this.app.metadataCache.on("changed", changed));
+    const last = ws.getActiveViewOfType && (ws.getActiveViewOfType(DendriteView) || ws.getActiveViewOfType(DendritePreview));
+    const board = ws.getLeavesOfType(VIEW)[0];
+    const f = last ? last.file : board && board.view.file;
+    await this.show(f || null);
+  }
+  async onClose() {
+    clearTimeout(this.timer);
+    if (this.plugin.refreshPreviews) this.plugin.refreshPreviews();
+  }
+  /** The manuscript of a board or preview made active. */
+  follow(leaf) {
+    const v = leaf && leaf.view;
+    if (!(v instanceof DendriteView || v instanceof DendritePreview)) {
+      return;
+    }
+    if (v.file && v.file !== this.file) this.show(v.file);
+  }
+  async show(file) {
+    this.file = file;
+    await this.refresh();
+  }
+  scheduleRefresh() {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.refresh(), 300);
+  }
+  /** Every open comment of the manuscript, read from its cards. */
+  async refresh() {
+    const file = this.file;
+    const app = this.app;
+    this.threads = [];
+    this.ids = /* @__PURE__ */ new Set();
+    if (file) {
+      const text = await app.vault.cachedRead(file);
+      const root = core.parseIndex(core.splitFrontmatter(text).body).root;
+      const fm = (app.metadataCache.getFileCache(file) || {}).frontmatter || {};
+      this.colours = review.reviewerColours(
+        fm.dendrite_reviewer_colours
+      );
+      this.names = review.reviewerNames(fm.dendrite_reviewer_colours);
+      const s = this.plugin.settings || {};
+      const signed = s.replyName;
+      if (signed && signed !== "Me" && this.colours.has(signed)) {
+        this.colours.set("Me", this.colours.get(signed));
+      }
+      if (s.presentName) {
+        this.names.set(signed || "Me", s.presentName);
+        this.names.set("Me", s.presentName);
+      }
+      const fileOf = (id) => {
+        const f = app.metadataCache.getFirstLinkpathDest(
+          id,
+          file.path
+        );
+        return f instanceof TFile ? f : null;
+      };
+      const props = (id) => {
+        const f = fileOf(id);
+        return f && app.metadataCache.getFileCache(f)?.frontmatter || {};
+      };
+      const kindOf = (id) => {
+        const k = props(id).dendrite_kind;
+        return core.KINDS.includes(k) ? k : null;
+      };
+      const roleOf = core.withKinds(
+        (id) => core.cardRole(props(id)),
+        kindOf
+      );
+      const bodies = /* @__PURE__ */ new Map();
+      for (const n of core.allNodes(root)) {
+        const f = fileOf(n.id);
+        if (f) {
+          bodies.set(n.id, core.splitFrontmatter(
+            await app.vault.cachedRead(f)
+          ).body);
+        }
+      }
+      const headingOf = (id) => {
+        const line = (bodies.get(id) || "").trim().split("\n")[0];
+        const h = core.HEADING.exec(line || "");
+        return h ? h[2] : null;
+      };
+      const numbers = fm.dendrite_number_sections === true ? core.sectionNumbers(
+        root.children,
+        (id) => !!headingOf(id),
+        roleOf,
+        kindOf
+      ) : null;
+      const seen = /* @__PURE__ */ new Set();
+      const walk = (node, under, out) => {
+        const role = core.roleFor(node, roleOf);
+        const own = headingOf(node.id);
+        const where = own ? (numbers && numbers.get(node.id) ? numbers.get(node.id) + " " : "") + own : under;
+        const gone = out || (props(node.id).dendrite_superseded ? "Old version" : role === "notes" ? "Left out" : null);
+        this.ids.add(node.id);
+        const body = bodies.get(node.id);
+        if (body !== void 0) {
+          const printed = core.printedOnly(body, role);
+          review.reviewItems(body).forEach((it, k) => {
+            const g = review.googleOf(it);
+            if (g && seen.has(g)) return;
+            if (g) seen.add(g);
+            const shown = printed.slice(it.start, it.end).trim();
+            this.threads.push({
+              id: node.id,
+              n: k,
+              it,
+              where: where || node.label || core.shortId(node.id),
+              unprinted: gone || (shown ? null : role === "scaffolding" ? "Scaffolding" : "Under a heading only")
+            });
+          });
+        }
+        for (const c of node.children) walk(c, where, gone);
+      };
+      for (const n of root.children) walk(n, null, null);
+    }
+    if (this.file !== file) return;
+    this.showFilter();
+    this.draw();
+  }
+  /** The filter's choices, with every name that wrote a comment. */
+  showFilter() {
+    if (!this.authorEl) return;
+    const f = this.plugin.commentFilterState;
+    const self = this.plugin.selfNames();
+    const nameOf = (who) => this.names.get(who) || who;
+    const authors = [...new Set(this.threads.map((t) => t.it.author).filter((a) => a && !self.has(a)))].sort();
+    if (f.author && f.author !== "me" && !authors.includes(f.author)) {
+      authors.push(f.author);
+    }
+    const sel = this.authorEl;
+    sel.empty();
+    for (const [value, text] of [
+      ["", "Anyone"],
+      ["me", "Me"],
+      ...authors.map((a) => [a, nameOf(a)])
+    ]) {
+      sel.createEl("option", { value, text });
+    }
+    sel.value = f.author || "";
+    const flip = (key, title, views) => {
+      const r = this.switchRows[key];
+      r.empty();
+      barSwitch(r, title, views, f[key] || "", (v) => this.plugin.setCommentFilter({ [key]: v }));
+    };
+    flip("waiting", "Whose answer a comment waits for", [
+      ["", "Any", "Every comment"],
+      ["me", "Me", "Someone else has the last word"],
+      ["Claude", "Claude", "Asked with @Claude, not answered since"],
+      ["resolve", "Resolve", "The last reply suggests resolving it"]
+    ]);
+    flip("kind", "Comments or suggested changes", [
+      ["", "All", "Comments and suggested changes"],
+      ["comment", "Comments", "Comments only"],
+      ["suggest", "Changes", "Suggested changes only"]
+    ]);
+  }
+  draw() {
+    if (!this.listEl) return;
+    const list = this.listEl;
+    list.empty();
+    if (!this.file) {
+      this.countEl.setText("Open a manuscript to list its comments.");
+      return;
+    }
+    const f = this.plugin.commentFilterState;
+    const self = this.plugin.selfNames();
+    const shown = this.threads.filter((t) => review.passesFilter(t.it, f, self));
+    const all = this.threads.length;
+    this.countEl.setText(shown.length === all ? `${all} open comment${all === 1 ? "" : "s"}` : `${shown.length} of ${all} open comments`);
+    const nameOf = (who) => this.names.get(who);
+    let under = null;
+    for (const t of shown) {
+      const { it } = t;
+      if (t.where !== under) {
+        under = t.where;
+        list.createDiv({ cls: "dendrite-cgroup", text: t.where });
+      }
+      const suggest = it.kind === "suggest";
+      const c = this.colours.get(it.author || "Reviewer");
+      const el = list.createDiv({ cls: "dendrite-cthread" + (suggest ? " is-suggest" : "") + (c ? ` is-c-${c}` : "") + (t.unprinted ? " is-unprinted" : "") });
+      const who = el.createDiv({ cls: "dendrite-cthread-meta" });
+      review.shownAs(
+        who.createEl("b"),
+        it.author || "Reviewer",
+        nameOf
+      );
+      const rs = it.replies || [];
+      who.appendText(` \xB7 ${review.shortDate(it.date)}` + (rs.length ? ` \xB7 ${rs.length} repl${rs.length === 1 ? "y" : "ies"}` : ""));
+      el.createDiv({ cls: "dendrite-cthread-text", text: (suggest ? review.suggestionText(it) : review.noteLink(it.text).text).replace(/\s+/g, " ").trim() });
+      if (t.unprinted) {
+        el.createDiv({
+          cls: "dendrite-cthread-unprinted",
+          text: `${t.unprinted}: does not print`
+        });
+      }
+      if (it.passage) {
+        el.title = `On: ${core.stripComments(it.passage).trim()}`;
+      }
+      el.addEventListener("mouseenter", () => this.hover(t, true));
+      el.addEventListener("mouseleave", () => this.hover(t, false));
+      el.addEventListener("click", () => this.go(t));
+    }
+  }
+  /** A comment pointed at: its passage and bubble in the preview. */
+  hover(t, on) {
+    const leaf = this.file && this.plugin.previewLeaf ? this.plugin.previewLeaf(this.file) : null;
+    if (leaf && leaf.view.pointAt) {
+      leaf.view.pointAt(t.id, t.n, on);
+    }
+  }
+  /**
+   * To a comment: in the preview, its comments shown, as stepping to
+   * it there, which selects its card; without one, its card selected.
+   */
+  async go(t) {
+    if (!this.file) return;
+    const leaf = this.plugin.previewLeaf ? this.plugin.previewLeaf(this.file) : null;
+    const pv = leaf && leaf.view;
+    if (pv) {
+      if (!pv.showComments) {
+        pv.showComments = true;
+        pv.build();
+        await pv.refresh();
+      }
+      const k = pv.reviewList.findIndex((x) => (x.parts || [x]).some((p) => p.id === t.id && p.n === t.n));
+      if (k >= 0) {
+        pv.reviewAt = k;
+        await pv.goComment();
+        return;
+      }
+    }
+    await this.plugin.focusCard(this.file, t.id, false);
+  }
+};
 var ManuscriptModal = class _ManuscriptModal extends Modal {
   constructor(view) {
     super(view.app);
@@ -16607,6 +16966,16 @@ module.exports = class DendritePlugin extends Plugin {
     }
     this.registerView(VIEW, (leaf) => new DendriteView(leaf, this));
     this.registerView(PREVIEW, (leaf) => new DendritePreview(leaf, this));
+    this.commentFilterState = { ...COMMENT_FILTER };
+    this.registerView(
+      COMMENTS,
+      (leaf) => new DendriteComments(leaf, this)
+    );
+    this.addCommand({
+      id: "show-comments",
+      name: "Show the comment list",
+      callback: () => this.showCommentList()
+    });
     this.addCommand({
       id: "open-preview",
       name: "Open the manuscript preview",
@@ -17792,6 +18161,37 @@ module.exports = class DendritePlugin extends Plugin {
       state: { file: file.path }
     });
   }
+  /** The comment list in the right sidebar, opened if it is not. */
+  async showCommentList() {
+    const ws = this.app.workspace;
+    let leaf = ws.getLeavesOfType(COMMENTS)[0];
+    if (!leaf) {
+      leaf = ws.getRightLeaf(false);
+      await leaf.setViewState({ type: COMMENTS, active: true });
+    }
+    ws.revealLeaf(leaf);
+  }
+  /** The comment list's filter while the list is open, or null. */
+  commentFilter() {
+    const f = this.commentFilterState;
+    if (!f || !Object.values(f).some(Boolean)) return null;
+    return this.app.workspace.getLeavesOfType(COMMENTS).length ? f : null;
+  }
+  /** A change to the comment list's filter, for the list and previews. */
+  setCommentFilter(change) {
+    this.commentFilterState = { ...this.commentFilterState, ...change };
+    for (const l of this.app.workspace.getLeavesOfType(COMMENTS)) {
+      l.view.showFilter();
+      l.view.draw();
+    }
+    this.app.workspace.requestSaveLayout();
+    this.refreshPreviews();
+  }
+  refreshPreviews() {
+    for (const l of this.app.workspace.getLeavesOfType(PREVIEW)) {
+      l.view.scheduleRefresh();
+    }
+  }
   /** From the preview: select a card on the board, or edit it. */
   async focusCard(file, id, edit, at = null) {
     const leaf = this.app.workspace.getLeavesOfType(VIEW).find((l) => l.view.file === file);
@@ -17940,6 +18340,7 @@ dendrite_prefix: ${prefix}
 module.exports.core = core;
 module.exports.DendriteView = DendriteView;
 module.exports.DendritePreview = DendritePreview;
+module.exports.DendriteComments = DendriteComments;
 module.exports.DendriteSettings = DendriteSettings;
 module.exports.exportStyle = exportStyle;
 module.exports.callers = callers;
