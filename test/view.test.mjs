@@ -3045,6 +3045,11 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                              b.getAttribute('aria-label')),
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
+                      'Back to the card you were on, in its editor if ' +
+                      'you were typing; Obsidian\'s Navigate back, its ' +
+                      'hotkey and the mouse\'s back button do the same',
+                      'Forward again; Obsidian\'s Navigate forward does ' +
+                      'the same',
                       'Undo', 'Redo', 'All', 'Printed', 'Preview',
                       'Comments', 'Tables & Figures', 'Export', 'Review',
                       'Inbox']);
@@ -7373,7 +7378,7 @@ test('the endpoint says which cards a sync has not settled and each ' +
     const DendritePlugin = require('../src/main.js');
     const A = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%% ' +
         'is large.';
-    const B = 'Storage is 83 TB.';
+    const B = 'Storage is 83 TB on Fir.';
     const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
         '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n', { 'G-aaaaa': A, 'G-bbbbb': B });
     const p = new DendritePlugin();
@@ -7420,6 +7425,14 @@ test('the endpoint says which cards a sync has not settled and each ' +
     out = await p.suggestTo({ manuscript: 'G', items: [
         { card: 'G-bbbbb', quote: 'Storage', replace: 'Disk', base: vb }] });
     assert.deepEqual(out.json.done, [1]);
+    // The card's new version comes back, to chain the next write on.
+    const next = out.json.versions['G-bbbbb'];
+    assert.ok(next && next !== vb);
+    out = await p.suggestTo({ manuscript: 'G', items: [
+        { card: 'G-bbbbb', quote: 'on Fir', replace: 'on Narval',
+          base: next }] });
+    assert.deepEqual(out.json.done, [1],
+                     'chained without a read: ' + JSON.stringify(out.json));
     // Open in the editor: reported, and written into the editor's text.
     await view.startEdit('G-bbbbb');
     st = (await p.threadsFor('G', { status: true })).json;
@@ -7522,4 +7535,59 @@ test('Dendrite\'s own files are moved under _dendrite beside the index: ' +
         'W/Grant/_dendrite/devices/nix.json')).cards['G-aaaaa'].wrote.h, 'x');
     assert.deepEqual((await readReviewLog(app, index)).map((x) => x.keys[0]),
                      ['old', 'mine', 'theirs'], 'all of it read');
+});
+
+test('back and forward go between the cards jumped to through the ' +
+     'pane\'s own history, steps by key are not kept, and a card left ' +
+     'while typed in is opened again with its selection', async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n- [[G-ccccc|C]]\n',
+        { 'G-aaaaa': 'Alpha text here.', 'G-bbbbb': 'Beta.',
+          'G-ccccc': 'Gamma.' });
+    // The pane as Obsidian's: its history state, a history that keeps
+    // what is pushed on it, and back and forward that set a kept state.
+    const leaf = view.leaf;
+    let reads = 0;
+    const reload = view.reload.bind(view);
+    view.reload = async () => { reads++; return reload(); };
+    const now = () => ({ state: { type: 'dendrite-view',
+                                  state: view.getState() } });
+    const go = async (from, to) => {
+        const st = leaf.history[from].pop();
+        leaf.history[to].push(now());
+        await view.setState(st.state.state, { history: false });
+    };
+    leaf.getHistoryState = now;
+    leaf.history = { backHistory: [], forwardHistory: [],
+        pushState(st) {
+            this.backHistory.push(st);
+            this.forwardHistory = [];
+        },
+        back: () => go('backHistory', 'forwardHistory'),
+        forward: () => go('forwardHistory', 'backHistory') };
+    const back = () => view.goBack();
+    const forward = () => view.goForward();
+    await view.select('G-aaaaa');
+    await view.select('G-ccccc');
+    assert.deepEqual(leaf.history.backHistory.map((x) => x.state.state.card),
+                     ['G-aaaaa'], 'the jump kept, from where it was');
+    await back();
+    assert.equal(view.active, 'G-aaaaa');
+    await forward();
+    assert.equal(view.active, 'G-ccccc');
+    assert.equal(reads, 0, 'the board not read again');
+    // A step by key is not kept.
+    view.navigate('up');
+    await tick(10);
+    assert.equal(view.active, 'G-bbbbb');
+    assert.equal(leaf.history.backHistory.length, 1);
+    // Typing in A, a click away, and back: A open, selection kept.
+    await view.startEdit('G-aaaaa');
+    view.editing.ta.setSelectionRange(6, 10);
+    await view.select('G-ccccc');
+    assert.equal(view.editing, null);
+    await back();
+    assert.equal(view.editing && view.editing.id, 'G-aaaaa');
+    assert.deepEqual(view.editing.editor.selection(), [6, 10]);
+    await view.endEdit();
 });

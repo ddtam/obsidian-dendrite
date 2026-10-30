@@ -29,7 +29,9 @@
 //   Writes (reply, suggest, revise) are refused on a card that is
 //        `older_copy`, `typing_kept` or `behind`, and, given `base`, a version
 //        read, where the card has changed since; `editing` is written
-//        into the open editor
+//        into the open editor. Reply and suggest answer with `versions`,
+//        each card written's version after the write, to send as the
+//        next `base`
 //   POST /dendrite/reply         { manuscript, thread, text, author? }
 //        a reply written under the comment whose id is `thread`, at
 //        once, as `author`, Claude if not given; up to 500 characters.

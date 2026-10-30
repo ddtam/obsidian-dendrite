@@ -899,12 +899,20 @@ class DendriteView extends ItemView {
 
     getState() {
         return { file: this.file ? this.file.path : null,
-                 printOnly: this.printOnly };
+                 printOnly: this.printOnly, ...this.place() };
     }
 
     async setState(state, result) {
         const f = state && state.file &&
             this.app.vault.getAbstractFileByPath(state.file);
+        // The manuscript already shown, going to a card in it, as a jump
+        // or back or forward: moved to it, the board not read again.
+        if (f instanceof TFile && f === this.file && this.root &&
+            state.card && this.byId.has(state.card)) {
+            if (this.jumping && result) result.history = true;
+            await this.arrive(state);
+            return super.setState(state, result);
+        }
         if (f instanceof TFile) {
             this.file = f;
             if (state.printOnly !== undefined) {
@@ -925,6 +933,27 @@ class DendriteView extends ItemView {
             this.contentEl.focus();
         }
         return super.setState(state, result);
+    }
+
+    /**
+     * At a place from the pane's state: its card selected, or opened in
+     * its editor with the selection it had.
+     */
+    async arrive(state) {
+        this.travelling = true;
+        try {
+            if (state.edit) {
+                await this.startEdit(state.card, false,
+                    state.sel ? { offset: state.sel } : null);
+            } else {
+                if (this.editing) await this.endEdit();
+                if (state.card === this.active) this.applyActive();
+                else await this.select(state.card);
+            }
+        } finally {
+            this.travelling = false;
+        }
+        this.showNavButtons();
     }
 
     async onOpen() {
@@ -1488,6 +1517,15 @@ class DendriteView extends ItemView {
         btn('file-text', '', 'Open the index note as markdown',
             () => this.plugin.openAsMarkdown(this.file))
             .addClass('dendrite-bar-gap');
+        this.backBtn = btn('arrow-left', '', 'Back to the card you were ' +
+            'on, in its editor if you were typing; Obsidian\'s Navigate ' +
+            'back, its hotkey and the mouse\'s back button do the same',
+            () => this.goBack());
+        this.forwardBtn = btn('arrow-right', '', 'Forward again; ' +
+            'Obsidian\'s Navigate forward does the same',
+            () => this.goForward());
+        this.forwardBtn.addClass('dendrite-bar-gap');
+        this.showNavButtons();
         btn('undo-2', 'Undo', 'Undo the last change to the tree: moves, ' +
             'new and deleted cards, roles and statuses (Ctrl+Z). A card\'s ' +
             'text is undone inside the card.', () => this.doUndo());
@@ -2380,8 +2418,13 @@ class DendriteView extends ItemView {
         for (let k = p; to && to.id && k > d; k--) to = this.upOf(to);
         if (!to || !to.id) to = from || this.topCard(d);
         if (!to) return;
-        if (to.id === this.active) this.centre(true);
-        else this.select(to.id);
+        if (to.id === this.active) {
+            this.centre(true);
+        } else {
+            this.stepping = true;
+            this.select(to.id);
+            this.stepping = false;
+        }
     }
 
     onResize(entries = []) {
@@ -3497,6 +3540,10 @@ class DendriteView extends ItemView {
         // Going to a card not picked lets the picked ones go.
         if (id && !this.picked.has(id)) this.clearPicked();
         if (!id || id === this.active) return;
+        if (this.isJump(id)) {
+            await this.jumpTo(id);
+            return;
+        }
         if (this.editing) await this.endEdit();
         const node = this.byId.get(id);
         const parent = node && this.upOf(node);
@@ -3514,7 +3561,115 @@ class DendriteView extends ItemView {
         else this.highlight();
     }
 
+    // ---- back and forward ---------------------------------------------
+    //
+    // Through Obsidian's own history of the pane: a jump to another card
+    // is a change of the board's state, from one card to the other, which
+    // Obsidian keeps, so its back and forward, their hotkeys and the
+    // mouse's buttons go between cards as between notes.
+
+    /**
+     * Where the board is: the active card, and, while it is edited, the
+     * selection in its editor, to come back to.
+     */
+    place() {
+        const ed = this.editing;
+        const editing = !!(ed && ed.id === this.active);
+        return { card: this.active, edit: editing,
+                 sel: editing && ed.editor.selection ?
+                     ed.editor.selection() : null };
+    }
+
+    /**
+     * Whether a move to card `id` is a jump to keep in the pane's history:
+     * not a step from card to card by key, not going back or forward
+     * itself, and not to the card already there.
+     */
+    isJump(id) {
+        const leaf = this.leaf;
+        const keeps = !!leaf && (!!(leaf.getHistoryState && leaf.history &&
+            leaf.history.pushState) || !!leaf.setViewState);
+        return keeps && !this.stepping && !this.travelling &&
+            !!this.active && id !== this.active;
+    }
+
+    /**
+     * A jump to card `id` made through the pane, which keeps where the
+     * board was as a step back. The move itself is made by setState.
+     */
+    async jumpTo(id) {
+        const leaf = this.leaf;
+        // The pane's own record of a step, as a note's link followed
+        // makes: where it was taken, the board moved, then kept. Pushed
+        // on the pane's history itself: the pane's recordHistory passes
+        // over a step within one note, as a scroll is, and so over this.
+        const h = leaf.history;
+        if (leaf.getHistoryState && h && h.pushState) {
+            const was = leaf.getHistoryState();
+            await this.arrive({ card: id, edit: false });
+            h.pushState(was);
+            this.showNavButtons();
+            return;
+        }
+        this.jumping = true;
+        try {
+            await leaf.setViewState({ type: VIEW, state: {
+                ...this.getState(), card: id, edit: false, sel: null } });
+        } finally {
+            this.jumping = false;
+        }
+    }
+
+    /** Back, as Obsidian's back for this pane. */
+    goBack() {
+        return this.runNav('app:go-back');
+    }
+
+    /** Forward, as Obsidian's forward for this pane. */
+    goForward() {
+        return this.runNav('app:go-forward');
+    }
+
+    /**
+     * Back or forward in the pane's history, as Obsidian's own commands
+     * and the mouse's buttons go: by the pane's history where it has
+     * one, else by the command.
+     */
+    async runNav(command) {
+        const h = this.leaf && this.leaf.history;
+        const dir = command === 'app:go-back' ? 'back' : 'forward';
+        if (h && typeof h[dir] === 'function') {
+            await h[dir]();
+        } else {
+            const cmds = this.app.commands;
+            if (!cmds || !cmds.executeCommandById) return;
+            this.app.workspace.setActiveLeaf(this.leaf, { focus: true });
+            cmds.executeCommandById(command);
+        }
+        setTimeout(() => this.showNavButtons(), 50);
+    }
+
+    /** The back and forward buttons, each faded with nowhere to go. */
+    showNavButtons() {
+        const h = this.leaf && this.leaf.history;
+        if (!h) return;
+        const on = (btn, list) => {
+            if (btn) btn.toggleClass('is-disabled', !(list && list.length));
+        };
+        on(this.backBtn, h.backHistory);
+        on(this.forwardBtn, h.forwardHistory);
+    }
+
     navigate(dir) {
+        this.stepping = true;
+        try {
+            this.navigateStep(dir);
+        } finally {
+            this.stepping = false;
+        }
+    }
+
+    navigateStep(dir) {
         const node = this.active && this.byId.get(this.active);
         if (!node) return;
         if (dir === 'left') {
@@ -3842,8 +3997,11 @@ class DendriteView extends ItemView {
         if (this.refuseWhileArriving()) return;
         if (this.editing) {
             if (this.editing.id === id) return;
-            await this.endEdit();
         }
+        // Another card: kept as a step back first, in its editor if one
+        // was open, then this one is opened.
+        if (this.isJump(id)) await this.jumpTo(id);
+        if (this.editing) await this.endEdit();
         if (id !== this.active) {
             this.active = id;
             this.applyActive();
@@ -3983,6 +4141,13 @@ class DendriteView extends ItemView {
      * or its end.
      */
     focusEditor(editor, atStart, at = null) {
+        // A selection kept to come back to, as from going back.
+        if (at && at.offset && editor.kind !== 'float' && editor.focusAt) {
+            const len = editor.value.length;
+            editor.focusAt(Math.min(at.offset[0], len),
+                           Math.min(at.offset[1], len));
+            return;
+        }
         const off = at && editor.kind !== 'float' && editor.focusAt ?
             review.offsetAt(editor.value, at.before, at.after) : null;
         if (off === null) editor.focus(atStart);
@@ -4314,7 +4479,9 @@ class DendriteView extends ItemView {
         const node = this.active && this.byId.get(this.active);
         const col = node ? this.cols[node.depth] : this.cols[0];
         if (!col || !col.length) return;
+        this.stepping = true;
         this.select((top ? col[0] : col[col.length - 1]).id);
+        this.stepping = false;
     }
 
     /** Follow a card's label in memory; true if it changed. */
@@ -13136,7 +13303,17 @@ module.exports = class DendritePlugin extends Plugin {
             new Notice(`Dendrite: ${reply.author} replied on ` +
                        `${done.map((x) => x.split('/')[0]).join(', ')}.`);
         }
-        return { status: 201, json: { done, missing, refused } };
+        // Each card written's version now, to send as `base` next.
+        const versions = {};
+        for (const id of done) {
+            const f = this.app.metadataCache.getFirstLinkpathDest(
+                id.split('/')[0], file.path);
+            if (f instanceof TFile && !versions[f.basename]) {
+                versions[f.basename] = await this.cardVersion(file,
+                                                              f.basename);
+            }
+        }
+        return { status: 201, json: { done, missing, refused, versions } };
     }
 
     /**
@@ -13162,6 +13339,7 @@ module.exports = class DendritePlugin extends Plugin {
         const view = this.openViews().find((v) => v.file === file);
         const done = [];
         const refused = [];
+        const written = new Set();
         for (const [k, x] of data.items.entries()) {
             const n = k + 1;
             const card = x && String(x.card || '');
@@ -13181,13 +13359,20 @@ module.exports = class DendritePlugin extends Plugin {
             const reason = await (view ? view.suggestIn(card, item) :
                 this.suggestInFile(f, item, file));
             if (reason) refused.push({ n, reason });
-            else done.push(n);
+            else {
+                done.push(n);
+                written.add(f.basename);
+            }
+        }
+        const versions = {};
+        for (const id of written) {
+            versions[id] = await this.cardVersion(file, id);
         }
         if (done.length) {
             new Notice(`Dendrite: ${done.length} suggested change` +
                        `${done.length === 1 ? '' : 's'} from Claude.`);
         }
-        return { status: 201, json: { done, refused } };
+        return { status: 201, json: { done, refused, versions } };
     }
 
     /** A suggestion written into a card's file; why not, or null. */

@@ -99,6 +99,11 @@
     color: var(--text-faint);
 }
 
+/* Back or forward with nowhere to go. */
+.dendrite-bar-btn.is-disabled {
+    opacity: 0.35;
+}
+
 /* Space between the bar's groups of buttons. */
 .dendrite-bar-gap {
     margin-right: 8px;
@@ -2189,7 +2194,7 @@ button.dendrite-review-btn.is-suggested:hover,
 
 /* A table edited in place: its number above it, and the editor's text,
    the table's grid included, in the manuscript's font and size. */
-.dendrite-float-edit:not(.is-plain) .dendrite-float-number {
+.dendrite-float-number {
     font-family: var(--dendrite-float-font, inherit);
     font-size: var(--dendrite-float-size, inherit);
     font-weight: var(--font-bold);
@@ -2201,14 +2206,11 @@ button.dendrite-review-btn.is-suggested:hover,
     font-family: var(--dendrite-float-font, inherit);
     font-size: var(--dendrite-float-size, inherit);
 }
-/* Shown as text: the editor's font and size, and no number above it,
-   as the table is in any note. */
+/* Shown as editor: the table in the editor's font and size, as in any
+   note; its number above it stays as it prints. */
 .dendrite-float-edit.is-plain .dendrite-float-table {
     font-family: var(--font-text);
     font-size: var(--font-text-size);
-}
-.dendrite-float-edit.is-plain .dendrite-float-number {
-    display: none;
 }
 /* In a popout's quirks mode the grid's table does not inherit its font,
    so it takes it from the field, in either look. */
