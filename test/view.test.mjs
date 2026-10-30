@@ -3612,7 +3612,7 @@ test('a review submitted for a manuscript is queued with where its ' +
     assert.ok(view.inboxBtn.classList.contains('is-hidden'),
               'and no Inbox button');
     h.obsidian.lastModal = null;
-    view.openInboxList();
+    await view.openInboxList();
     assert.equal(h.obsidian.lastModal, null, 'nothing opens when empty');
     assert.deepEqual((await p.reviewStatus(out.json.id)).json.state,
                      'added');
@@ -7236,4 +7236,133 @@ test('the figures and tables list goes to a card on a click and copies ' +
     await tick(10);
     assert.deepEqual(copied, ['[[G-bbbbb]]'], 'its link copied');
     assert.deepEqual(focused, ['G-bbbbb'], 'the copy does not go to it');
+});
+
+test('a request whose suggestions are gone from their cards closes as ' +
+     'stale, its sender can withdraw one still pending, and its status ' +
+     'lists each item with its state', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'Total ==83==%%[!suggest] Claude, 2026-10-28: 100%% TB and ' +
+        '==40==%%[!suggest] Claude, 2026-10-28: 58%% TB.';
+    const B = 'Storage ==83 TB==%%[!suggest] Claude, 2026-10-28: 101 TB%%.';
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n', { 'G-aaaaa': A, 'G-bbbbb': B });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.saveSettings = async () => {};
+    p.openViews = () => [view];
+    view.plugin.reviewQueue = () => p.reviewQueue();
+    const first = await p.submitRevision({ manuscript: 'G', items: [
+        { card: 'aaaaa', quote: '83', replace: '101' },
+        { card: 'aaaaa', quote: '40', replace: '59' }] });
+    const second = await p.submitRevision({ manuscript: 'G', items: [
+        { card: 'bbbbb', quote: '83 TB', replace: '100 TB' }] });
+    // Pending: each item waiting, with what it would change.
+    let st = (await p.reviewStatus(first.json.id)).json;
+    assert.equal(st.kind, 'revise');
+    assert.deepEqual(st.items.map((i) => [i.card, i.quote, i.replace,
+                                          i.state]),
+        [['G-aaaaa', '83', '101', 'pending'],
+         ['G-aaaaa', '40', '59', 'pending']]);
+    assert.deepEqual(st.closed, []);
+    // One suggestion applied in the card: its item closes as stale, the
+    // request stays for the other.
+    await app.vault.modify(app.vault.getAbstractFileByPath(
+        cardPath('G-aaaaa')), 'Total 100 TB and ' +
+        '==40==%%[!suggest] Claude, 2026-10-28: 58%% TB.');
+    st = (await p.reviewStatus(first.json.id)).json;
+    assert.equal(st.state, 'pending');
+    assert.deepEqual(st.items.map((i) => i.quote), ['40']);
+    assert.deepEqual(st.closed.map((i) => [i.quote, i.state]),
+                     [['83', 'stale']]);
+    assert.ok(st.closed[0].reason);
+    // The other dismissed too: the request closes as stale.
+    await app.vault.modify(app.vault.getAbstractFileByPath(
+        cardPath('G-aaaaa')), 'Total 100 TB and 40 TB.');
+    st = (await p.reviewStatus(first.json.id)).json;
+    assert.equal(st.state, 'stale');
+    assert.ok(st.decided);
+    // Withdrawn by its sender, not by anyone else, and only once.
+    const other = await p.withdrawRequest({ manuscript: 'G',
+        batch: second.json.id, author: 'Aly' });
+    assert.equal(other.status, 403);
+    const done = await p.withdrawRequest({ manuscript: 'G',
+        batch: second.json.id });
+    assert.deepEqual(done.json, { id: second.json.id, state: 'withdrawn' });
+    assert.equal((await p.withdrawRequest({ manuscript: 'G',
+        batch: second.json.id })).status, 409);
+    assert.equal((await p.reviewStatus(second.json.id)).json.items[0].state,
+                 'withdrawn');
+    view.refreshInbox();
+    assert.equal(view.inbox.length, 0, 'nothing waits');
+});
+
+test('the comment list and the tables and figures share one pane beside ' +
+     'a popout board, as two tabs; a button whose list is behind brings ' +
+     'it forward, and one in front closes it', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const popout = { name: 'popout' };
+    const leaves = { 'dendrite-comments': [], 'dendrite-floats': [],
+                     'dendrite-preview': [] };
+    const split = [];
+    const inGroup = [];
+    let front = null;
+    const leafIn = (parent) => {
+        const l = { parent, getContainer: () => popout,
+            async setViewState(st) {
+                this.state = st;
+                leaves[st.type].push(this);
+                this.view = { file: null, async show() {} };
+            },
+            detach() {
+                const list = leaves[this.state.type];
+                list.splice(list.indexOf(this), 1);
+                parent.children.splice(parent.children.indexOf(this), 1);
+            } };
+        parent.children.push(l);
+        return l;
+    };
+    const board = { getContainer: () => popout };
+    board.view = { leaf: board, file: { path: INDEX } };
+    const ws = { rootSplit: {},
+        getLeavesOfType: (t) => leaves[t] || [],
+        createLeafBySplit(from) {
+            const group = { children: [] };
+            split.push(group);
+            return leafIn(group);
+        },
+        createLeafInParent(group, at) {
+            inGroup.push(at);
+            return leafIn(group);
+        },
+        async revealLeaf(l) { front = l; },
+        getRightLeaf: () => null };
+    const p = new DendritePlugin();
+    p.app = { workspace: ws };
+    p.fitPanes = () => true;
+    p.openViews = () => [];
+    p.reviewChanged = () => {};
+    // Shown is the tab in front of its pane.
+    p.sideShown = (l) => front === l;
+    await p.toggleSide('dendrite-comments', board.view);
+    assert.equal(split.length, 1, 'a pane split off for the first');
+    await p.toggleSide('dendrite-floats', board.view);
+    assert.equal(split.length, 1, 'no second pane');
+    assert.deepEqual(inGroup, [1], 'a tab beside it in the same pane');
+    const [comments] = leaves['dendrite-comments'];
+    const [floats] = leaves['dendrite-floats'];
+    assert.equal(comments.parent, floats.parent);
+    assert.equal(front, floats);
+    // Comments behind: its button brings it forward, not closing it.
+    await p.toggleSide('dendrite-comments', board.view);
+    assert.equal(front, comments);
+    assert.equal(leaves['dendrite-comments'].length, 1);
+    // In front: closed; then the other closed too, the pane gone.
+    await p.toggleSide('dendrite-comments', board.view);
+    assert.equal(leaves['dendrite-comments'].length, 0);
+    front = floats;
+    await p.toggleSide('dendrite-floats', board.view);
+    assert.equal(leaves['dendrite-floats'].length, 0);
+    assert.equal(split[0].children.length, 0, 'the pane emptied');
 });

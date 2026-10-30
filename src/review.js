@@ -1578,6 +1578,9 @@ function alreadyIn(md, item) {
  */
 function suggestInto(md, id, s) {
     if (Array.isArray(s.row)) return suggestRow(md, s);
+    if (s.row !== undefined && s.column !== undefined) {
+        return suggestCell(md, s);
+    }
     const author = clean(s.author) || 'Claude';
     if (typeof s.replace !== 'string') {
         return { reason: 'no replace: the new text, or "" to delete' };
@@ -1604,6 +1607,15 @@ function suggestInto(md, id, s) {
         let n = 0;
         for (let k = hay.indexOf(want); k >= 0;
              k = hay.indexOf(want, k + 1)) n++;
+        // In a table cell, a short quote has too little around it to
+        // place: say so, and how to name the cell instead.
+        if (tableRowsIn(md).some((r) => r.cells.some((c) =>
+            normalise(printedCell(c.text)).text.includes(want)))) {
+            return { reason: 'found in a table cell, where the text ' +
+                'around it cannot place it; send row (its first cell), ' +
+                'column (its header, or its number from 1) and was ' +
+                'instead of quote' };
+        }
         return { reason: n > 1 ? `found ${n} times, so more than once; ` +
             'send before or after to say which' :
             'not found exactly in the card' };
@@ -1776,6 +1788,96 @@ function suggestRow(md, s) {
     const pos = row.cells[row.cells.length - 1].end;
     return { md: md.slice(0, pos) + itemText('suggest', '', author, s.date,
         text) + md.slice(pos) };
+}
+
+/**
+ * A card's markdown with a suggested change to one table cell, `s`
+ * { row, column, was?, replace, author?, date }: { md }, or { reason }.
+ * The row is named by its first cell's printed text, the column by its
+ * header's or by its number from 1, and `was` is the part of the cell to
+ * change, the whole cell without it. Each must name exactly one.
+ */
+function suggestCell(md, s) {
+    const author = clean(s.author) || 'Claude';
+    if (typeof s.replace !== 'string') {
+        return { reason: 'no replace: the new text, or "" to delete' };
+    }
+    if (/\n/.test(s.replace)) {
+        return { reason: 'a table cell cannot hold a line break' };
+    }
+    // Rows grouped into their tables: the next line, or the one after a
+    // delimiter row, continues one.
+    const tables = [];
+    let prev = null;
+    for (const row of tableRowsIn(md)) {
+        const gap = prev ? md.slice(prev.end, row.start) : null;
+        if (!prev || !/^\n(?:[ \t]*\|?[\s:|-]+\n)?$/.test(gap)) {
+            tables.push([]);
+        }
+        tables[tables.length - 1].push(row);
+        prev = row;
+    }
+    const want = normalise(printedCell(String(s.row))).text;
+    const hits = [];
+    for (const t of tables) {
+        for (const row of t.slice(1)) {
+            const first = row.cells[0] ? row.cells[0].text : '';
+            if (normalise(printedCell(first)).text === want) {
+                hits.push({ t, row });
+            }
+        }
+    }
+    if (!hits.length) {
+        return { reason: `no table row whose first cell is "${s.row}"` };
+    }
+    if (hits.length > 1) {
+        return { reason: `${hits.length} table rows begin "${s.row}"` };
+    }
+    const { t, row } = hits[0];
+    const head = t[0].cells.map((c) => normalise(printedCell(c.text)).text);
+    let k = -1;
+    if (/^\d+$/.test(String(s.column))) {
+        k = Number(s.column) - 1;
+    } else {
+        const name = normalise(printedCell(String(s.column))).text;
+        k = head.indexOf(name);
+        if (k < 0 || head.indexOf(name, k + 1) >= 0) {
+            return { reason: k < 0 ? `no column "${s.column}"; the ` +
+                `headers are ${head.map((h) => `"${h}"`).join(', ')}` :
+                `two columns are "${s.column}"; give its number` };
+        }
+    }
+    const cell = row.cells[k];
+    if (!cell) {
+        return { reason: `the row has ${row.cells.length} cells, not ` +
+                         `${k + 1}` };
+    }
+    // The part of the cell to change, found in its printed text.
+    const src = md.slice(cell.start, cell.end);
+    const plain = plainMap(src);
+    const norm = normalise(plain.text);
+    const shown = norm.text;
+    const was = s.was !== undefined && s.was !== null ?
+        normalise(String(s.was)).text : shown;
+    const at = shown.indexOf(was);
+    if (!was || at < 0) {
+        return { reason: `the cell reads "${printedCell(src)}"` +
+            (was ? `, not "${s.was}"` : '; it is empty') };
+    }
+    if (shown.indexOf(was, at + 1) >= 0) {
+        return { reason: `"${s.was}" is in the cell more than once` };
+    }
+    const start = cell.start + plain.map[norm.map[at]];
+    const end = cell.start + plain.map[norm.map[at + was.length - 1]] + 1;
+    // A pipe in the new text would end the cell.
+    const text = s.replace.replace(/(^|[^\\])\|/g, '$1\\|');
+    if (reviewItems(md).some((x) => x.kind === 'suggest' &&
+        x.author === author && x.text === clean(text, true) &&
+        x.start <= start && end <= x.end)) {
+        return { reason: 'already suggested' };
+    }
+    return { md: addItems(md, [{ kind: 'suggest', start, end, author,
+        date: s.date, text }]) };
 }
 
 /** `md` with a suggested row's line put beside the line holding `at`. */

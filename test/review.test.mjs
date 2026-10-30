@@ -919,6 +919,10 @@ test('the review endpoint takes POST /dendrite/reply as JSON, with its ' +
         async suggest(data) {
             got.push(data);
             return { status: 201, json: { done: [1], refused: [] } };
+        },
+        async withdraw(data) {
+            got.push(data);
+            return { status: 200, json: { id: 'b1', state: 'withdrawn' } };
         } });
     const base = `http://127.0.0.1:${server.address().port}`;
     const post = async (body, headers) => {
@@ -940,6 +944,13 @@ test('the review endpoint takes POST /dendrite/reply as JSON, with its ' +
             method: 'POST', headers: json, body: '{"items":[]}' });
         assert.deepEqual(await res.json(), { done: [1], refused: [] });
         assert.deepEqual(got[got.length - 1], { items: [] });
+        const w = await fetch(base + '/dendrite/withdraw', {
+            method: 'POST', headers: json,
+            body: '{"manuscript":"G","batch":"b1"}' });
+        assert.deepEqual([w.status, await w.json()],
+                         [200, { id: 'b1', state: 'withdrawn' }]);
+        assert.deepEqual(got[got.length - 1], { manuscript: 'G',
+                                                batch: 'b1' });
     } finally {
         server.close();
     }
@@ -1861,4 +1872,40 @@ test('a table a table editor split at a priority\'s pipe is mended: the ' +
     // Outside a table, a tag's pipe is plain and is left.
     const plain = 'A ==b==%%[!review|p1] J, 2026-10-23: x%%';
     assert.equal(r.mendSplitTags(plain), plain);
+});
+
+test('a suggested change to a table cell, named by its row\'s first cell ' +
+     'and its column, is placed on that cell\'s text alone', () => {
+    const md = 'Sizes.\n\n| Storage | Request | Total |\n' +
+        '| --- | ---: | ---: |\n' +
+        '| /project (TB)          |    100 |    83 |\n' +
+        '| %%{1%%/nearline (TB)%%}1 [!review\\|p3] Aly, 2026-10-23: ' +
+        'Why?%% |  83 | 120 |\n';
+    const out = r.suggestInto(md, 'G-aaaaa', { row: '/project (TB)',
+        column: 'Total', was: '83', replace: '100', date: '2026-10-30' });
+    assert.equal(out.reason, undefined);
+    const lines = out.md.split('\n');
+    assert.match(lines[4], /\| +100 \| +%%\{\d+%%83%%\}\d+ \[!suggest\] Claude, 2026-10-30: 100%% \|$/);
+    assert.equal(lines[5], md.split('\n')[5], 'the 83 in the next row kept');
+    const items = r.reviewItems(out.md).filter((x) => x.kind === 'suggest');
+    assert.equal(items.length, 1);
+    // By number, from 1, and by a row whose first cell holds a comment.
+    const two = r.suggestInto(md, 'G-aaaaa', { row: '/nearline (TB)',
+        column: 2, was: '83', replace: '90', date: '2026-10-30' });
+    assert.equal(two.reason, undefined);
+    assert.match(two.md.split('\n')[5], /\| +%%\{\d+%%83%%\}\d+ \[!suggest\] Claude, 2026-10-30: 90%% \| 120 \|$/);
+    // Refused, saying why.
+    assert.match(r.suggestInto(md, 'G-aaaaa', { row: '/project (TB)',
+        column: 'Total', was: '84', replace: '100' }).reason,
+        /reads "83"/);
+    assert.match(r.suggestInto(md, 'G-aaaaa', { row: '/scratch',
+        column: 'Total', was: '83', replace: '100' }).reason,
+        /no table row/);
+    assert.match(r.suggestInto(md, 'G-aaaaa', { row: '/project (TB)',
+        column: 'Used', was: '83', replace: '100' }).reason,
+        /no column "used"/i);
+    // A short quote that falls in a table says so, and what to send.
+    assert.match(r.suggestInto(md, 'G-aaaaa', { quote: '83',
+        replace: '100', date: '2026-10-30' }).reason,
+        /table cell.*row.*column/);
 });

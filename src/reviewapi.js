@@ -8,7 +8,6 @@
 // from the board, which is its approval.
 //
 //   POST /dendrite/review        { manuscript, title?, items: [...] }
-//   GET  /dendrite/review/<id>   the review's state
 //   GET  /dendrite/threads?manuscript=<prefix>[&author=<name>]
 //        [&awaiting=<name>][&card=<id>][&resolved=1]
 //        the manuscript's open comments, each with its id and replies, and
@@ -44,8 +43,19 @@
 //        withdraw: true }] }
 //        changes to the sender's own pending suggestions, queued as a
 //        review is, each accepted or not on the board; one replied to
-//        is refused. Answers { id, state, found, missing }, and
-//        GET /dendrite/review/<id> its state
+//        is refused. Answers { id, state, found, missing, superseded }.
+//        An earlier pending request for the same suggestions gives them
+//        up to it, closing as `superseded` once it has none left; one
+//        whose suggestions are gone from their cards closes as `stale`
+//   POST /dendrite/withdraw      { manuscript, batch, author? }
+//        a pending review or request closed by its sender as
+//        `withdrawn`; refused (409) once decided, or (403) where any of
+//        its items is not `author`'s, Claude if not given
+//   GET  /dendrite/review/<id>   { id, kind, state, manuscript, title,
+//        received, decided, items: [{ card, quote, ..., state }],
+//        closed: [{ card, quote, ..., state, reason?, by? }] }: each
+//        item waiting or as the request was decided, and those closed
+//        before it, as `stale` or `superseded`
 //
 // Every request carries `Authorization: Bearer <key>`. A request with an
 // Origin header comes from a web page and is refused, and no CORS header
@@ -88,7 +98,8 @@ async function handle(opts, req, res) {
     const take = { '/dendrite/review': opts.submit,
                    '/dendrite/reply': opts.reply,
                    '/dendrite/suggest': opts.suggest,
-                   '/dendrite/revise': opts.revise }[url.pathname];
+                   '/dendrite/revise': opts.revise,
+                   '/dendrite/withdraw': opts.withdraw }[url.pathname];
     if (take && req.method === 'POST') {
         if (!/^application\/json\b/.test(req.headers['content-type'] ||
                                          '')) {

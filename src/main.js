@@ -1495,14 +1495,14 @@ class DendriteView extends ItemView {
         this.commentsBtn = btn('messages-square', 'Comments', 'Review on ' +
             'or off: the list of open comments, to filter them by who ' +
             'wrote them and whose answer they wait for, and the comments ' +
-            'beside the preview\'s text', () => this.plugin.setReview(this,
-                !this.plugin.reviewOn()));
+            'beside the preview\'s text', () => this.plugin.toggleSide(
+                COMMENTS, this));
         this.commentsBtn.addClass('is-toggle');
         this.showReviewOn();
         this.floatsBtn = btn('table-2', 'Tables & Figures', 'A list ' +
             'of the tables and figures by number, to go to one or copy ' +
-            'a link to it, or close it', () => this.plugin.setFloats(this,
-                !this.plugin.floatsOn()));
+            'a link to it, or close it', () => this.plugin.toggleSide(
+                FLOATS, this));
         this.floatsBtn.addClass('is-toggle');
         this.floatsBtn.addClass('dendrite-bar-gap');
         this.showFloatsOn();
@@ -6229,7 +6229,8 @@ class DendriteView extends ItemView {
     }
 
     /** What waits, as an inbox, each opening it; nothing when none. */
-    openInboxList() {
+    async openInboxList() {
+        if (this.plugin.pruneRevisions) await this.plugin.pruneRevisions();
         if (!(this.inbox || []).length) return;
         new InboxModal(this).open();
     }
@@ -12302,7 +12303,8 @@ module.exports = class DendritePlugin extends Plugin {
             threads: (m, opts) => this.threadsFor(m, opts),
             reply: (d) => this.replyTo(d),
             suggest: (d) => this.suggestTo(d),
-            revise: (d) => this.submitRevision(d) });
+            revise: (d) => this.submitRevision(d),
+            withdraw: (d) => this.withdrawRequest(d) });
         try {
             try {
                 this.reviewServer = await start(want);
@@ -12339,6 +12341,7 @@ module.exports = class DendritePlugin extends Plugin {
             url: `${base}/review`, threads: `${base}/threads`,
             reply: `${base}/reply`, suggest: `${base}/suggest`,
             revise: `${base}/revise`,
+            withdraw: `${base}/withdraw`,
             key: s.reviewApiKey, vault: this.app.vault.getName(),
             pid: process.pid }, null, 2) + '\n', { mode: 0o600 });
     }
@@ -12622,6 +12625,7 @@ module.exports = class DendritePlugin extends Plugin {
         }
         const title = String(data.title || '').trim() ||
             'Changes to suggestions';
+        await this.pruneRevisions();
         const key = String(require('./docx.js').crc32(Buffer.from(
             JSON.stringify([current, 'revise', items]), 'utf8')));
         const queue = this.settings.reviewQueue =
@@ -12652,6 +12656,8 @@ module.exports = class DendritePlugin extends Plugin {
                 }
                 if (!gone.length) continue;
                 old.items = keep;
+                old.closed = [...(old.closed || []), ...gone.map((i) =>
+                    ({ ...i, state: 'superseded', by: entry.id }))];
                 if (!keep.some((i) => i.current !== undefined)) {
                     old.state = 'superseded';
                     old.decided = new Date().toISOString();
@@ -12916,11 +12922,113 @@ module.exports = class DendritePlugin extends Plugin {
     }
 
     async reviewStatus(id) {
+        await this.pruneRevisions();
         const r = this.reviewQueue().find((x) => x.id === id);
-        return r ? { status: 200, json: { id, state: r.state,
-                                          manuscript: r.manuscript,
-                                          title: r.title } } :
-            { status: 404, json: { error: 'no such review' } };
+        if (!r) return { status: 404, json: { error: 'no such review' } };
+        // Each item as sent, and its state: waiting while the request
+        // does, else the request's; those closed before it, as stale or
+        // superseded, with why.
+        const brief = (i) => {
+            const out = { card: i.card || null, quote: i.quote || null };
+            if (r.kind === 'revise') {
+                out.replace = i.withdraw ? null : i.replace;
+                if (i.withdraw) out.withdraw = true;
+            } else {
+                out.kind = i.kind || 'review';
+                out.text = i.text || i.insert || null;
+            }
+            return out;
+        };
+        const items = r.items.map((i) => ({ ...brief(i),
+            state: r.state === 'pending' ? 'pending' : r.state }));
+        const closed = (r.closed || []).map((i) => ({ ...brief(i),
+            state: i.state, ...(i.reason ? { reason: i.reason } : {}),
+            ...(i.by ? { by: i.by } : {}) }));
+        return { status: 200, json: { id, kind: r.kind || 'review',
+            state: r.state, manuscript: r.manuscript, title: r.title,
+            received: r.received, decided: r.decided || null,
+            ...(r.by ? { by: r.by } : {}),
+            ...(r.replaces ? { replaces: r.replaces } : {}),
+            items, closed } };
+    }
+
+    /**
+     * Pending requests to change suggestions checked against the cards:
+     * an item whose suggestion is no longer there, applied, resolved or
+     * dismissed, is closed as stale with why, and a request left with
+     * nothing to accept closes as stale; true if any changed.
+     */
+    async pruneRevisions() {
+        const queue = this.reviewQueue();
+        let changed = false;
+        for (const r of queue) {
+            if (r.kind !== 'revise' || r.state !== 'pending') continue;
+            const file = this.indexWithPrefix(r.manuscript);
+            if (!file) continue;
+            const keep = [];
+            for (const item of r.items) {
+                const f = this.app.metadataCache.getFirstLinkpathDest(
+                    item.card, file.path);
+                const got = !(f instanceof TFile) ?
+                    { reason: `no card ${item.card}` } :
+                    item.current === undefined ? null :
+                    review.findSuggestion(core.splitFrontmatter(
+                        await this.app.vault.read(f)).body,
+                    { ...item, was: item.current });
+                if (got && got.reason) {
+                    r.closed = [...(r.closed || []), { ...item,
+                        state: 'stale', reason: got.reason }];
+                    changed = true;
+                } else keep.push(item);
+            }
+            r.items = keep;
+            if (!keep.some((i) => i.current !== undefined)) {
+                r.state = 'stale';
+                r.decided = new Date().toISOString();
+                unstickNotice(`review:${file.path}:${r.id}`);
+                changed = true;
+            }
+        }
+        if (changed) {
+            await this.saveSettings();
+            for (const v of this.openViews()) v.refreshInbox();
+        }
+        return changed;
+    }
+
+    /**
+     * A pending request closed by its sender, `data` { manuscript,
+     * batch, author? }, as withdrawn: refused once it was decided, or
+     * where any of its items is another author's.
+     */
+    async withdrawRequest(data) {
+        const bad = (status, error) => ({ status, json: { error } });
+        if (!data || typeof data !== 'object' || !data.batch) {
+            return bad(400, 'send { manuscript, batch, author? }');
+        }
+        const prefix = String(data.manuscript || '').trim();
+        const file = prefix && this.indexWithPrefix(prefix);
+        if (!file) return bad(404, `no manuscript has the prefix ${prefix}`);
+        const current = prefixOf(this.app, file);
+        const r = this.reviewQueue().find((x) => x.id === data.batch &&
+                                          x.manuscript === current);
+        if (!r) return bad(404, `no request ${data.batch} for ${current}`);
+        if (r.state !== 'pending') {
+            return bad(409, `request ${r.id} is ${r.state}, not pending`);
+        }
+        const author = String(data.author || '').trim() || 'Claude';
+        const others = [...new Set(r.items.map((i) =>
+            String(i.author || 'Reviewer')).filter((a) => a !== author))];
+        if (others.length) {
+            return bad(403, `request ${r.id} holds items by ` +
+                       `${others.join(', ')}, not only ${author}`);
+        }
+        r.state = 'withdrawn';
+        r.decided = new Date().toISOString();
+        await this.saveSettings();
+        unstickNotice(`review:${file.path}:${r.id}`);
+        for (const v of this.openViews()) v.refreshInbox();
+        return { status: 200, json: { id: r.id, state: r.state } };
     }
 
     /**
@@ -13402,6 +13510,31 @@ module.exports = class DendritePlugin extends Plugin {
         await this.showSide(FLOATS, from, 'floatsFor');
     }
 
+    /**
+     * A side list's button on board `from`: opened if it is not, brought
+     * to the front if it is a tab behind the other, else closed.
+     */
+    async toggleSide(type, from) {
+        const ws = this.app.workspace;
+        const where = from && from.leaf && from.leaf.getContainer ?
+            from.leaf.getContainer() : ws.rootSplit;
+        const leaf = ws.getLeavesOfType(type).find((l) =>
+            !l.getContainer || l.getContainer() === where) ||
+            ws.getLeavesOfType(type)[0];
+        if (leaf && !this.sideShown(leaf)) {
+            await ws.revealLeaf(leaf);
+            return;
+        }
+        if (type === COMMENTS) await this.setReview(from, !leaf);
+        else await this.setFloats(from, !leaf);
+    }
+
+    /** Whether `leaf` is the tab shown in its pane. */
+    sideShown(leaf) {
+        const el = leaf.containerEl || (leaf.view && leaf.view.containerEl);
+        return !el || typeof el.isShown !== 'function' || el.isShown();
+    }
+
     /** Whether the list of tables and figures is open. */
     floatsOn() {
         return this.app.workspace.getLeavesOfType(FLOATS).length > 0;
@@ -13441,12 +13574,19 @@ module.exports = class DendritePlugin extends Plugin {
         let leaf = ws.getLeavesOfType(type).find(inWindow);
         const file = from && from.file || null;
         this[forKey] = file;
-        if (!leaf && popout) {
-            const beside = [COMMENTS, FLOATS, PREVIEW].map((t) =>
-                ws.getLeavesOfType(t).find((l) => l.view && inWindow(l) &&
-                    (t !== PREVIEW || l.view.file === from.file)))
-                .find(Boolean);
-            leaf = ws.createLeafBySplit(beside || from.leaf, 'vertical');
+        // The other side list open here: this one a tab in its pane, so
+        // the two share one sidebar's width rather than halving it.
+        const mate = [COMMENTS, FLOATS].filter((t) => t !== type)
+            .map((t) => ws.getLeavesOfType(t).find(inWindow))[0];
+        if (!leaf && popout && mate && mate.parent &&
+            ws.createLeafInParent) {
+            const at = (mate.parent.children || []).indexOf(mate) + 1;
+            leaf = ws.createLeafInParent(mate.parent, at);
+            await leaf.setViewState({ type, active: false });
+        } else if (!leaf && popout) {
+            const pv = ws.getLeavesOfType(PREVIEW).find((l) =>
+                l.view && l.view.file === from.file && inWindow(l));
+            leaf = ws.createLeafBySplit(pv || from.leaf, 'vertical');
             this.fitPanes(leaf, 'side');
             await leaf.setViewState({ type, active: false });
         } else if (!leaf) {
