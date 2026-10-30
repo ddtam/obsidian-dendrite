@@ -3044,7 +3044,9 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
                       'Undo', 'Redo', 'Preview', 'All', 'Printed',
-                      'Export', 'Review', 'Comments']);
+                      'Export', 'Review', 'Inbox', 'Comments']);
+    assert.ok(view.inboxBtn.classList.contains('is-hidden'),
+              'Inbox hidden while nothing waits');
     // The mode comes after the buttons; the name is the pane's title.
     const kids = [...view.contentEl.querySelector('.dendrite-bar').children];
     assert.ok(kids.indexOf(view.modeEl) > kids.indexOf(bar[5]));
@@ -3574,15 +3576,25 @@ test('a review submitted for a manuscript is queued with where its ' +
     const chips = () => [...view.statusEl.querySelectorAll(
         '.dendrite-status-chip')].filter((s) =>
         /^review/.test(s.textContent)).map((s) => s.textContent);
-    assert.deepEqual(chips(), ['review: 2 from Claude']);
-    // The Review button carries how many reviews wait.
+    assert.deepEqual(chips(), [], 'not among the board\'s chips');
+    // The Inbox button shows while one waits, with how many.
     const badge = () => view.contentEl.querySelector(
         '.dendrite-bar .dendrite-bar-badge');
     assert.equal(badge()?.textContent, '1');
-    assert.ok(view.reviewBtn.classList.contains('is-waiting'),
-              'the button outlined while one waits');
+    assert.ok(!view.inboxBtn.classList.contains('is-hidden'),
+              'the Inbox button shown');
+    assert.ok(!view.reviewBtn.classList.contains('is-waiting'),
+              'the Review button is only its menu');
+    // Clicked: a list of what waits, as an inbox, each opening it.
+    view.inboxBtn.onclick();
+    const list = h.obsidian.lastModal;
+    const rows = [...list.contentEl.querySelectorAll('.dendrite-inbox-row')];
+    assert.equal(rows.length, 1);
+    assert.match(rows[0].textContent, /Claude.*RAC review.*2 comments/);
+    rows[0].click();
+    await tick(10);
     // Cancel leaves it; Add takes it.
-    await view.openInbox(view.inbox[0]);
+    assert.match(h.obsidian.lastModal.titleEl.textContent, /RAC review/);
     const m = h.obsidian.lastModal;
     assert.match(m.titleEl.textContent, /RAC review/);
     [...m.contentEl.querySelectorAll('button')]
@@ -3592,9 +3604,12 @@ test('a review submitted for a manuscript is queued with where its ' +
     await h.obsidian.lastModal.contentEl.querySelector('.mod-cta').onclick();
     assert.match(text(cardPath('G-aaaaa')),
                  /%%\{1%%paired samples%%\}1 \[!review\] Claude/);
-    assert.deepEqual(chips(), []);
     assert.equal(badge(), null, 'none left waiting');
-    assert.ok(!view.reviewBtn.classList.contains('is-waiting'));
+    assert.ok(view.inboxBtn.classList.contains('is-hidden'),
+              'and no Inbox button');
+    h.obsidian.lastModal = null;
+    view.openInboxList();
+    assert.equal(h.obsidian.lastModal, null, 'nothing opens when empty');
     assert.deepEqual((await p.reviewStatus(out.json.id)).json.state,
                      'added');
     // Sent again once added: queued, but what is already in the card
@@ -4102,8 +4117,8 @@ test('pasting the Google client in the settings unlocks signing in ' +
     assert.equal(button.disabled, true, 'locked again when cleared');
 });
 
-test('the Review menu offers linking a doc when none is, and each review ' +
-     'waiting from a program', async () => {
+test('the Review menu offers linking a doc when none is, and holds only ' +
+     'its actions, what waits being in the Inbox', async () => {
     const { view } = await open(
         '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n',
         { 'G-aaaaa': 'Text.' });
@@ -4115,9 +4130,8 @@ test('the Review menu offers linking a doc when none is, and each review ' +
     const titles = h.obsidian.lastMenu.items.map((i) => i.title);
     assert.deepEqual(titles, ['Link a Google Doc…',
         'Import a Word or JSON file…', 'Reviewers…',
-        'Mark as sent for review…', 'RAC review: 2 from Claude']);
-    await h.obsidian.lastMenu.items[4].click();
-    assert.equal(opened.id, 'r1');
+        'Mark as sent for review…']);
+    assert.equal(opened, null);
 });
 
 test('the manuscript settings are in tabs, the header and footer as a ' +
@@ -6992,4 +7006,57 @@ test('the command to mend tables split at a priority mends every card\'s ' +
     await view.doUndo();
     await tick(20);
     assert.equal(text(cardPath('G-aaaaa')), torn, 'undone');
+});
+
+test('a newer revision of the same suggestions replaces the earlier one ' +
+     'still pending, which keeps the rest and is superseded once empty',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const A = 'Total ==83==%%[!suggest] Claude, 2026-10-28: 100%% TB and ' +
+        '==40==%%[!suggest] Claude, 2026-10-28: 58%% TB.';
+    const B = 'Storage ==83 TB==%%[!suggest] Claude, 2026-10-28: 101 TB%%.';
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n', { 'G-aaaaa': A, 'G-bbbbb': B });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.saveSettings = async () => {};
+    p.openViews = () => [view];
+    view.plugin.reviewQueue = () => p.reviewQueue();
+    const first = await p.submitRevision({ manuscript: 'G', items: [
+        { card: 'aaaaa', quote: '83', replace: '101' },
+        { card: 'aaaaa', quote: '40', replace: '59' },
+        { card: 'bbbbb', quote: '83 TB', replace: '101 TB' }] });
+    const second = await p.submitRevision({ manuscript: 'G', items: [
+        { card: 'aaaaa', quote: '83', replace: '100' },
+        { card: 'bbbbb', quote: '83 TB', replace: '100 TB' }] });
+    assert.equal(second.status, 202);
+    assert.notEqual(second.json.id, first.json.id);
+    assert.deepEqual(second.json.superseded, [{ batch: first.json.id,
+        items: [{ card: 'G-aaaaa', quote: '83' },
+                { card: 'G-bbbbb', quote: '83 TB' }] }]);
+    const old = p.reviewQueue().find((r) => r.id === first.json.id);
+    assert.equal(old.state, 'pending', 'its other item stays');
+    assert.deepEqual(old.items.map((i) => i.quote), ['40']);
+    const now = p.reviewQueue().find((r) => r.id === second.json.id);
+    assert.deepEqual(now.replaces, [first.json.id]);
+    // The inbox entry says what it replaced.
+    view.refreshInbox();
+    const modal = await view.openInbox(now);
+    assert.match(modal.contentEl.textContent, /Replaces an earlier request/);
+    modal.close();
+    // The rest replaced too: the earlier one superseded, as GET says.
+    const third = await p.submitRevision({ manuscript: 'G', items: [
+        { card: 'aaaaa', quote: '40', replace: '57' }] });
+    assert.deepEqual(third.json.superseded.map((s) => s.batch),
+                     [first.json.id]);
+    assert.equal((await p.reviewStatus(first.json.id)).json.state,
+                 'superseded');
+    assert.equal(p.reviewQueue().find((r) => r.id === second.json.id).state,
+                 'pending', 'one for other suggestions is untouched');
+    // The same batch sent again replaces nothing, itself included.
+    const again = await p.submitRevision({ manuscript: 'G', items: [
+        { card: 'aaaaa', quote: '40', replace: '57' }] });
+    assert.equal(again.json.id, third.json.id);
+    assert.deepEqual(again.json.superseded, []);
 });

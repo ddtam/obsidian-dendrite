@@ -6865,6 +6865,11 @@ function stickyNotice(key, text) {
   stuckNotices.set(key, n);
   return n;
 }
+function unstickNotice(key) {
+  const old = stuckNotices.get(key);
+  if (old) old.hide();
+  stuckNotices.delete(key);
+}
 function dismissNotices() {
   const n = stuckNotices.size;
   for (const x of stuckNotices.values()) x.hide();
@@ -7797,7 +7802,14 @@ var DendriteView = class extends ItemView {
       }
     );
     btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e), true).addClass("dendrite-bar-gap-before");
-    this.reviewBtn = btn("inbox", "Review", "Bring in review comments: from the linked Google Doc, a returned Word file, or programs", (e) => this.reviewMenu(e), true);
+    this.reviewBtn = btn(
+      "message-square-plus",
+      "Review",
+      "Bring in review comments: from the linked Google Doc or a returned Word file; reviewers, and marking it sent",
+      (e) => this.reviewMenu(e),
+      true
+    );
+    this.inboxBtn = btn("inbox", "Inbox", "Reviews and requests waiting for you to add or ignore", () => this.openInboxList());
     this.showInboxBadge();
     this.commentsBtn = btn("messages-square", "Comments", "Review on or off: the list of open comments, to filter them by who wrote them and whose answer they wait for, and the comments beside the preview's text", () => this.plugin.setReview(
       this,
@@ -8453,7 +8465,10 @@ var DendriteView = class extends ItemView {
     m.addItem((i) => i.setTitle(this.printOnly ? "Show every card" : "Show only the cards that print").setIcon("filter").onClick(() => this.togglePrintOnly()));
     m.addItem((i) => i.setTitle("Export\u2026").setIcon("file-output").onClick(() => this.exportMenu(null, e)));
     const waiting = (this.inbox || []).length;
-    m.addItem((i) => i.setTitle("Review\u2026" + (waiting ? ` (${waiting} waiting)` : "")).setIcon("inbox").onClick(() => this.reviewMenu(e)));
+    if (waiting) {
+      m.addItem((i) => i.setTitle(`Inbox (${waiting})`).setIcon("inbox").onClick(() => this.openInboxList()));
+    }
+    m.addItem((i) => i.setTitle("Review\u2026").setIcon("message-square-plus").onClick(() => this.reviewMenu(e)));
     const reviewing = this.plugin.reviewOn && this.plugin.reviewOn();
     m.addItem((i) => i.setTitle(reviewing ? "Close the comments" : "Comments").setIcon("messages-square").onClick(() => this.plugin.setReview(this, !reviewing)));
     m.addSeparator();
@@ -12099,12 +12114,6 @@ var DendriteView = class extends ItemView {
     m.addItem((i) => i.setTitle("Import a Word or JSON file\u2026").onClick(() => this.importReview()));
     m.addItem((i) => i.setTitle("Reviewers\u2026").onClick(() => new ReviewersModal(this).open()));
     m.addItem((i) => i.setTitle("Mark as sent for review\u2026").onClick(() => new RoundModal(this).open()));
-    if (this.inbox.length) {
-      m.addSeparator();
-      for (const entry of this.inbox) {
-        m.addItem((i) => i.setTitle(`${entry.title}: ${entry.items.length} ${entry.kind === "revise" ? "changes " : ""}from ` + reviewAuthors(entry.items)).onClick(() => this.openInbox(entry)));
-      }
-    }
     if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
     return m;
   }
@@ -12140,15 +12149,16 @@ var DendriteView = class extends ItemView {
     if (changed) this.updateStatuses();
   }
   /**
-   * How many reviews wait to be added, on the Review button: outlined
-   * while any wait, the count in a block on its right.
+   * The Inbox button, shown only while reviews or requests wait, the
+   * count in a block on its right.
    */
   showInboxBadge() {
-    const b = this.reviewBtn;
+    const b = this.inboxBtn;
     if (!b) return;
     const old = b.querySelector(".dendrite-bar-badge");
     if (old) old.remove();
     const n = (this.inbox || []).length;
+    b.toggleClass("is-hidden", !n);
     b.toggleClass("is-waiting", n > 0);
     if (!n) return;
     const badge = b.createSpan({
@@ -12156,6 +12166,11 @@ var DendriteView = class extends ItemView {
       text: String(n)
     });
     badge.setAttr("aria-label", `${n} review${n === 1 ? "" : "s"} waiting to be added`);
+  }
+  /** What waits, as an inbox, each opening it; nothing when none. */
+  openInboxList() {
+    if (!(this.inbox || []).length) return;
+    new InboxModal(this).open();
   }
   /** Show a submitted review's comments to add, or ignore it. */
   async openInbox(entry) {
@@ -13080,14 +13095,6 @@ var DendriteView = class extends ItemView {
         });
         s.setAttr("aria-label", "Renamed on another device; some card notes have not arrived under their new names. The board changes nothing until they do");
         s.onclick = () => this.refuseWhileArriving();
-      }
-      for (const entry of this.inbox) {
-        const s = this.statusEl.createSpan({
-          cls: "dendrite-status-chip is-revise",
-          text: `${entry.kind === "revise" ? "revisions" : "review"}: ${entry.items.length} from ` + reviewAuthors(entry.items)
-        });
-        s.setAttr("aria-label", `${entry.title}, submitted ${entry.received.slice(0, 10)}. Click to see its comments and choose which to add; nothing is written until you do`);
-        s.onclick = () => this.openInbox(entry);
       }
       if (this.oldCopies.length) {
         const n = this.oldCopies.length;
@@ -16136,6 +16143,56 @@ var SuggestModal = class extends VersionModal {
     row.createEl("button", { text: "Cancel" }).onclick = () => this.close();
   }
 };
+var InboxModal = class extends Modal {
+  constructor(view) {
+    super(view.app);
+    this.view = view;
+  }
+  onOpen() {
+    const { contentEl, view } = this;
+    this.titleEl.setText("Inbox");
+    this.modalEl.addClass("dendrite-inbox-modal");
+    const list = contentEl.createDiv({ cls: "dendrite-inbox" });
+    const when = (iso) => {
+      const d = new Date(iso);
+      if (isNaN(d)) return "";
+      const today = (/* @__PURE__ */ new Date()).toDateString() === d.toDateString();
+      return today ? d.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit"
+      }) : review.shortDate(localDay(d));
+    };
+    const entries = [...view.inbox].sort((a, b) => String(b.received).localeCompare(String(a.received)));
+    for (const entry of entries) {
+      const revise = entry.kind === "revise";
+      const row = list.createDiv({ cls: "dendrite-inbox-row" });
+      setIcon(
+        row.createDiv({ cls: "dendrite-inbox-icon" }),
+        revise ? "pencil" : "message-square-plus"
+      );
+      const main = row.createDiv({ cls: "dendrite-inbox-main" });
+      const top = main.createDiv({ cls: "dendrite-inbox-top" });
+      top.createSpan({
+        cls: "dendrite-inbox-from",
+        text: reviewAuthors(entry.items)
+      });
+      top.createSpan({
+        cls: "dendrite-inbox-when",
+        text: when(entry.received)
+      });
+      main.createDiv({ cls: "dendrite-inbox-title", text: entry.title });
+      const n = entry.items.length;
+      main.createDiv({ cls: "dendrite-inbox-what", text: (revise ? `${n} change${n === 1 ? "" : "s"} to suggestions` : `${n} comment${n === 1 ? "" : "s"} to add`) + (entry.replaces && entry.replaces.length ? " \xB7 replaces an earlier request" : "") });
+      row.addEventListener("click", () => {
+        this.close();
+        view.openInbox(entry);
+      });
+    }
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var ReviseModal = class extends Modal {
   constructor(view, entry, rows) {
     super(view.app);
@@ -16148,6 +16205,12 @@ var ReviseModal = class extends Modal {
     this.modalEl.addClass("dendrite-wide");
     this.titleEl.setText(entry.title);
     contentEl.createEl("p", { text: `${reviewAuthors(entry.items)} asks to change ${rows.length} of its pending suggestion${rows.length === 1 ? "" : "s"}. Nothing is written until you accept; each card changed is one step for Ctrl+Z on the board.` });
+    if (entry.replaces && entry.replaces.length) {
+      contentEl.createEl("p", {
+        cls: "dendrite-review-replaces",
+        text: "Replaces an earlier request for the same suggestions, which no longer asks for them."
+      });
+    }
     const list = contentEl.createDiv({ cls: "dendrite-review-rows" });
     const count = () => rows.filter((x) => x.use).length;
     let go = null;
@@ -17699,7 +17762,7 @@ module.exports = class DendritePlugin extends Plugin {
       await this.saveSettings();
       stickyNotice(
         `review:${file.path}:${entry.id}`,
-        `Dendrite: ${title}: ${items.length} comment${items.length === 1 ? "" : "s"} from ${reviewAuthors(items)}, for ${file.basename}. Click "review" on its board's bar to choose which to add.`
+        `Dendrite: ${title}: ${items.length} comment${items.length === 1 ? "" : "s"} from ${reviewAuthors(items)}, for ${file.basename}. Click Inbox on its board's bar to choose which to add.`
       );
       for (const v of this.openViews()) v.refreshInbox();
     }
@@ -17736,6 +17799,24 @@ module.exports = class DendritePlugin extends Plugin {
     const items = [];
     const missing = [];
     let found = 0;
+    const bodies = /* @__PURE__ */ new Map();
+    const bodyOf = async (f) => {
+      if (!bodies.has(f.path)) {
+        bodies.set(f.path, core.splitFrontmatter(
+          await this.app.vault.read(f)
+        ).body);
+      }
+      return bodies.get(f.path);
+    };
+    const targetOf = async (item) => {
+      const f = this.app.metadataCache.getFirstLinkpathDest(
+        item.card,
+        file.path
+      );
+      if (!(f instanceof TFile)) return null;
+      const got = review.findSuggestion(await bodyOf(f), item);
+      return got.it ? `${item.card}/${review.threadId(got.it)}` : null;
+    };
     for (const [k, x] of data.items.entries()) {
       const n = k + 1;
       const id = x && cardNamed(ids, String(x.card || ""));
@@ -17759,9 +17840,7 @@ module.exports = class DendritePlugin extends Plugin {
       else if (!item.withdraw && item.replace === null) {
         reason = "no replace: the new text, or withdraw: true";
       } else {
-        const got = review.findSuggestion(core.splitFrontmatter(
-          await this.app.vault.read(f)
-        ).body, item);
+        const got = review.findSuggestion(await bodyOf(f), item);
         if (got.reason) reason = got.reason;
         else item.current = got.it.text;
       }
@@ -17781,6 +17860,7 @@ module.exports = class DendritePlugin extends Plugin {
     )));
     const queue = this.settings.reviewQueue = this.settings.reviewQueue || [];
     let entry = queue.find((r) => r.key === key && r.state === "pending");
+    const superseded = [];
     if (!entry && found) {
       entry = {
         id: Math.random().toString(16).slice(2, 10),
@@ -17792,11 +17872,37 @@ module.exports = class DendritePlugin extends Plugin {
         items,
         state: "pending"
       };
+      const mine = /* @__PURE__ */ new Set();
+      for (const item of items) {
+        const t = await targetOf(item);
+        if (t) mine.add(t);
+      }
+      for (const old of queue) {
+        if (old.kind !== "revise" || old.state !== "pending" || old.manuscript !== current) continue;
+        const keep = [];
+        const gone = [];
+        for (const item of old.items) {
+          const t = await targetOf(item);
+          (t && mine.has(t) ? gone : keep).push(item);
+        }
+        if (!gone.length) continue;
+        old.items = keep;
+        if (!keep.some((i) => i.current !== void 0)) {
+          old.state = "superseded";
+          old.decided = (/* @__PURE__ */ new Date()).toISOString();
+          old.by = entry.id;
+          unstickNotice(`review:${file.path}:${old.id}`);
+        }
+        superseded.push({ batch: old.id, items: gone.map((i) => ({ card: i.card, quote: i.quote })) });
+      }
+      if (superseded.length) {
+        entry.replaces = superseded.map((s) => s.batch);
+      }
       queue.push(entry);
       await this.saveSettings();
       stickyNotice(
         `review:${file.path}:${entry.id}`,
-        `Dendrite: ${reviewAuthors(items)} asks to change ${found} of its suggestions in ${file.basename}. Click "revisions" on its board's bar to choose which to accept.`
+        `Dendrite: ${reviewAuthors(items)} asks to change ${found} of its suggestions in ${file.basename}. Click Inbox on its board's bar to choose which to accept.`
       );
       for (const v of this.openViews()) v.refreshInbox();
     }
@@ -17808,7 +17914,8 @@ module.exports = class DendritePlugin extends Plugin {
       state: entry.state,
       manuscript: current,
       found,
-      missing
+      missing,
+      superseded
     } };
   }
   /**

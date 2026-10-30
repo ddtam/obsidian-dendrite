@@ -2888,3 +2888,51 @@ button.dendrite-prio:disabled {
     cursor: default;
     opacity: 1;
 }
+
+/* The Inbox button, only while something waits. */
+.dendrite-bar-btn.is-hidden {
+    display: none;
+}
+/* The inbox: one row for each review or request waiting, as a mail
+   client lists messages, who sent it and when above its title and what
+   it holds. */
+.dendrite-inbox {
+    display: flex;
+    flex-direction: column;
+}
+.dendrite-inbox-row {
+    display: flex;
+    gap: 10px;
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    cursor: pointer;
+}
+.dendrite-inbox-row:hover {
+    background: var(--background-modifier-hover);
+}
+.dendrite-inbox-icon {
+    color: var(--text-accent);
+    padding-top: 2px;
+}
+.dendrite-inbox-main {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.dendrite-inbox-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+}
+.dendrite-inbox-from {
+    font-weight: var(--font-semibold);
+}
+.dendrite-inbox-when,
+.dendrite-inbox-what {
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+}
+.dendrite-inbox-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
