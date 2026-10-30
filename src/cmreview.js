@@ -108,6 +108,13 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
                 const meta = div('dendrite-review-meta', main);
                 const who = doc.createElement('b');
                 review.shownAs(who, c.author || 'Reviewer', nameOf);
+                // Shown here, set on the board: in the editor every
+                // change is the text's.
+                if (c.priority) {
+                    const chip = review.priorityChip(doc, c.priority);
+                    chip.disabled = true;
+                    meta.append(chip);
+                }
                 meta.append(who, ` · ${review.shortDate(c.date)}`);
                 const { text: said } = review.noteLink(c.text);
                 const shown = div('dendrite-review-text', main);
@@ -120,10 +127,9 @@ function reviewExtension(colourOf = () => null, nameOf = (x) => x,
                     main.append(review.replyRow(doc, r, nameOf, colourOf,
                                                 linkOf));
                 }
-                // Folded at first, so a long thread does not push the
-                // text being typed away.
-                review.foldable(note, meta, c, true,
-                                () => view.requestMeasure());
+                // Folded, so a long thread does not push the text being
+                // typed away.
+                review.foldable(note, meta, c, () => view.requestMeasure());
             }
             return box;
         }

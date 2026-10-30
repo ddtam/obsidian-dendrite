@@ -92,6 +92,8 @@ const DEFAULTS = {
     autosaveMs: 600,
     openInDendrite: true,
     vimKeys: true,
+    // Comments folded until clicked, and folded again when left.
+    foldComments: true,
     manageLinter: true,
     lintCards: true,
     obsidianEditor: true,
@@ -464,6 +466,11 @@ function clickedText(body, e) {
 
 function ownKeys(app, el) {
     const scope = new Scope(app.scope);
+    // Ctrl+Enter is the box's, to send, before any hotkey of Obsidian's.
+    scope.register(['Mod'], 'Enter', () => {
+        if (el.dendriteSend) el.dendriteSend();
+        return false;
+    });
     el.addEventListener('focus', () => {
         if (app.keymap) app.keymap.pushScope(scope);
     });
@@ -571,31 +578,37 @@ function withReply(body, n, reply) {
 }
 
 /**
- * A comment's triage priority as a small button, p1 to p3, or faint with
- * none, that opens a menu of them, the one set ticked; `pick(p)` with
- * the one chosen, null for none.
+ * A comment's triage priority as a chip, review.priorityChip, that opens
+ * priorityMenu; `pick(p)` with the one chosen.
  */
 function priorityButton(parent, p, pick) {
-    const b = parent.createEl('button', { cls: 'dendrite-prio' +
-        (p ? ` is-${p}` : ' is-none'), text: p || 'p–' });
-    b.setAttr('aria-label', p ? `Priority ${p}` : 'Set a priority');
+    const b = review.priorityChip(parent.ownerDocument, p);
+    parent.append(b);
     b.addEventListener('click', (e) => {
         e.stopPropagation();
-        const m = dendriteMenu(false);
-        for (const [value, title] of [['p1', 'p1'], ['p2', 'p2'],
-                                      ['p3', 'p3'], [null, 'None']]) {
-            m.addItem((i) => {
-                i.setTitle(title).onClick(() => {
-                    if (value !== (p || null)) pick(value);
-                });
-                if (typeof i.setChecked === 'function') {
-                    i.setChecked(value === (p || null));
-                }
-            });
-        }
-        if (m.showAtMouseEvent) m.showAtMouseEvent(e);
+        priorityMenu(e, p, pick);
     });
     return b;
+}
+
+/**
+ * The priorities as a menu at mouse event `e`, `p` the one set, ticked;
+ * `pick(p)` with another chosen, null for none.
+ */
+function priorityMenu(e, p, pick) {
+    const m = dendriteMenu(false);
+    for (const [value, title] of [['p1', 'p1'], ['p2', 'p2'],
+                                  ['p3', 'p3'], [null, 'None']]) {
+        m.addItem((i) => {
+            // The one set too: setting it again mends a tag a table
+            // editor split.
+            i.setTitle(title).onClick(() => pick(value));
+            if (typeof i.setChecked === 'function') {
+                i.setChecked(value === (p || null));
+            }
+        });
+    }
+    if (m.showAtMouseEvent) m.showAtMouseEvent(e);
 }
 
 function localDay(d = new Date()) {
@@ -1379,7 +1392,7 @@ class DendriteView extends ItemView {
         this.showInboxBadge();
         btn('messages-square', 'Comments', 'List the open comments in ' +
             'the sidebar, to filter them by who wrote them and whose ' +
-            'answer they wait for', () => this.plugin.showCommentList());
+            'answer they wait for', () => this.plugin.showCommentList(this));
         this.modeEl = bar.createDiv({ cls: 'dendrite-mode' });
         this.showMode();
         this.totalEl = bar.createDiv({ cls: 'dendrite-total' });
@@ -1869,7 +1882,7 @@ class DendriteView extends ItemView {
             if (notes.length) {
                 review.wrapPassages(out);
                 review.decorate(out, notes,
-                    (n, what, arg) => this.reviewAction(id, n, what, arg),
+                    (n, what, arg) => this.reviewAct(id, n, what, arg),
                     (n, e, k) => this.commentMenu(id, n, e, k),
                     this.colourOf(), (el) => ownKeys(this.app, el),
                     this.nameOf(), id, this.cardLinker());
@@ -2087,7 +2100,7 @@ class DendriteView extends ItemView {
             .onClick(() => this.reviewMenu(e)));
         m.addItem((i) => i.setTitle('Comment list')
             .setIcon('messages-square')
-            .onClick(() => this.plugin.showCommentList()));
+            .onClick(() => this.plugin.showCommentList(this)));
         m.addSeparator();
         m.addItem((i) => i.setTitle('This manuscript\'s settings')
             .setIcon('settings').onClick(() =>
@@ -4782,7 +4795,7 @@ class DendriteView extends ItemView {
         if (notes.length) {
             review.wrapPassages(out);
             review.decorate(out, notes,
-                (n, what, arg) => this.reviewAction(id, n, what, arg),
+                (n, what, arg) => this.reviewAct(id, n, what, arg),
                 (n, e, k) => this.commentMenu(id, n, e, k),
                 this.colourOf(), (el) => ownKeys(this.app, el),
                 this.nameOf(), id, this.cardLinker());
@@ -6606,6 +6619,19 @@ class DendriteView extends ItemView {
         const out = review.suggestInto(body, id, item);
         if (out.reason) return out.reason;
         await this.reviewAction(id, 0, 'text', out.md);
+        return null;
+    }
+
+    /** A comment's button on a card: its priority's menu, or the rest. */
+    reviewAct(id, n, what, arg) {
+        if (what !== 'priority-menu') {
+            return this.reviewAction(id, n, what, arg);
+        }
+        const b = this.bodies && this.bodies.get(id);
+        const body = b && b.body || '';
+        const it = review.reviewItems(body)[n];
+        priorityMenu(arg, it && it.priority, (p) =>
+            this.reviewAction(id, n, 'priority', p));
         return null;
     }
 
@@ -8768,8 +8794,7 @@ class DendritePreview extends ItemView {
             });
             review.restoreDraft(el, it, id, send,
                                 (box) => ownKeys(this.app, box));
-            review.foldable(el, meta, it, false,
-                            () => this.scheduleBubbles());
+            review.foldable(el, meta, it, () => this.scheduleBubbles());
         }
         // In reading order, as they are gone through.
         const order = new Map(this.reviewList.map((x, k) =>
@@ -11259,6 +11284,19 @@ class DendriteSettings extends PluginSettingTab {
             }));
 
         heading('Review');
+        new Setting(containerEl).setName('Fold comments until clicked')
+            .setDesc('A comment shows its first line and its latest reply ' +
+                     'until you click it, and folds again when you click ' +
+                     'elsewhere, on the board, in a card and in the ' +
+                     'preview. Off, comments are open, and fold only by ' +
+                     'their ▸ toggle.')
+            .addToggle((tg) => tg.setValue(s.foldComments).onChange((v) => {
+                s.foldComments = v;
+                review.setFoldUntilClicked(v);
+                save();
+                this.plugin.rerender();
+                if (this.plugin.refreshPreviews) this.plugin.refreshPreviews();
+            }));
         new Setting(containerEl).setName('Your name, on replies')
             .setDesc('Replies you write to review comments are signed ' +
                      'with this, as a reviewer\'s comments are with theirs.')
@@ -11553,6 +11591,7 @@ module.exports = class DendritePlugin extends Plugin {
 
     async onload() {
         this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+        review.setFoldUntilClicked(this.settings.foldComments);
         timing.setOn(this.settings.recordTimings && Platform.isDesktopApp);
         this.registerInterval(window.setInterval(() => this.writeTimings(),
                                                  10000));
@@ -11588,7 +11627,9 @@ module.exports = class DendritePlugin extends Plugin {
         this.addCommand({
             id: 'show-comments',
             name: 'Show the comment list',
-            callback: () => this.showCommentList(),
+            callback: () => this.showCommentList(
+                this.app.workspace.getActiveViewOfType(DendriteView) ||
+                this.app.workspace.getActiveViewOfType(DendritePreview)),
         });
         this.addCommand({
             id: 'open-preview',
@@ -12756,11 +12797,26 @@ module.exports = class DendritePlugin extends Plugin {
                                   state: { file: file.path } });
     }
 
-    /** The comment list in the right sidebar, opened if it is not. */
-    async showCommentList() {
+    /**
+     * The comment list, opened if it is not: in the right sidebar, or,
+     * for a board `from` in a popout window, which has no sidebar, beside
+     * it in that window, right of its preview there if it has one.
+     */
+    async showCommentList(from = null) {
         const ws = this.app.workspace;
-        let leaf = ws.getLeavesOfType(COMMENTS)[0];
-        if (!leaf) {
+        const where = from && from.leaf && from.leaf.getContainer ?
+            from.leaf.getContainer() : ws.rootSplit;
+        const popout = where && where !== ws.rootSplit;
+        const inWindow = (l) => !popout ||
+            (l.getContainer && l.getContainer() === where);
+        let leaf = ws.getLeavesOfType(COMMENTS).find(inWindow);
+        if (!leaf && popout) {
+            const pv = ws.getLeavesOfType(PREVIEW).find((l) =>
+                l.view && l.view.file === from.file && inWindow(l));
+            leaf = ws.createLeafBySplit(pv || from.leaf, 'vertical');
+            narrowSplit(leaf, 1 / 4);
+            await leaf.setViewState({ type: COMMENTS, active: false });
+        } else if (!leaf) {
             leaf = ws.getRightLeaf(false);
             await leaf.setViewState({ type: COMMENTS, active: true });
         }

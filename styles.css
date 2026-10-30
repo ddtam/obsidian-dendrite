@@ -2858,3 +2858,16 @@ button.dendrite-prio.is-none {
     background: transparent;
     color: var(--text-faint);
 }
+
+/* On a card, an unset priority's chip shows only while the comment is
+   pointed at, so cards are not dotted with placeholders. */
+.dendrite-review-notes .dendrite-prio.is-none {
+    visibility: hidden;
+}
+.dendrite-review-note:hover .dendrite-prio.is-none {
+    visibility: visible;
+}
+button.dendrite-prio:disabled {
+    cursor: default;
+    opacity: 1;
+}

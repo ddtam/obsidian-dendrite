@@ -2138,7 +2138,8 @@ test('settings are grouped under headings by what they affect', () => {
         'Typewriter scrolling', 'Autosave delay',
         '## PDF and Word export', 'Pandoc', 'PDF engine', 'Zotero port',
         'Fallback .bib',
-        '## Review', 'Your name, on replies',
+        '## Review', 'Fold comments until clicked',
+        'Your name, on replies',
         'Accept reviews from programs on this computer',
         'Review port',
         '## Google Docs', 'Google OAuth client', 'Google Picker API key',
@@ -4914,7 +4915,7 @@ test('a comment deleted here leaves the card and is not remembered, so a ' +
     await view.renderCard('G-aaaaa');
     const note = view.cardEls.get('G-aaaaa')
         .querySelector('.dendrite-review-note');
-    assert.deepEqual([...note.querySelectorAll('button')]
+    assert.deepEqual([...note.querySelectorAll('button:not(.dendrite-prio)')]
         .map((b) => b.textContent), ['Resolve', 'Reply']);
     h.obsidian.lastMenu = null;
     note.dispatchEvent(new h.window.MouseEvent('contextmenu',
@@ -6786,4 +6787,100 @@ test('a comment\'s triage priority: set by Claude through the endpoint, ' +
     p.commentFilterState.priority = 'none';
     await list.refresh();
     assert.deepEqual(rows(), [['p–', 'How many?']]);
+});
+
+test('the comment list opens beside the board in a popout window, which ' +
+     'has no sidebar, and in the right sidebar in the main window',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const main = { name: 'main' };
+    const popout = { name: 'popout' };
+    const made = [];
+    const leafIn = (where, view = null) => ({ view,
+        getContainer: () => where,
+        async setViewState(s) { this.state = s; } });
+    const board = leafIn(popout);
+    board.view = { leaf: board, file: { path: INDEX } };
+    const preview = leafIn(popout);
+    preview.view = { file: board.view.file };
+    const side = leafIn(main);
+    const ws = { rootSplit: main, comments: [],
+        getLeavesOfType: (t) => t === 'dendrite-comments' ? ws.comments :
+            t === 'dendrite-preview' ? [preview] : [],
+        createLeafBySplit(from, dir) {
+            const l = leafIn(from.getContainer());
+            made.push([from, dir, l]);
+            return l;
+        },
+        getRightLeaf: () => side,
+        revealLeaf() {} };
+    const p = new DendritePlugin();
+    p.app = { workspace: ws };
+    await p.showCommentList(board.view);
+    assert.equal(made.length, 1, 'split off in the popout');
+    assert.equal(made[0][0], preview, 'beside the preview there');
+    assert.equal(made[0][1], 'vertical');
+    assert.equal(made[0][2].state.type, 'dendrite-comments');
+    assert.equal(side.state, undefined, 'not in the main window\'s sidebar');
+    // In the main window: the right sidebar.
+    const mainBoard = leafIn(main);
+    mainBoard.view = { leaf: mainBoard, file: { path: 'other.md' } };
+    await p.showCommentList(mainBoard.view);
+    assert.equal(side.state.type, 'dendrite-comments');
+    assert.equal(made.length, 1);
+});
+
+test('a comment on a card shows its priority as a chip whose menu sets ' +
+     'it, undone as a change to the card', async () => {
+    const A = 'The ==cohort==%%[!review|p2] Aly, 2026-10-23: How many?%% ' +
+        'is large.';
+    const { view, text } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', { 'G-aaaaa': A });
+    await view.select('G-aaaaa');
+    await tick(20);
+    const chip = view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-note .dendrite-prio');
+    assert.equal(chip.textContent, 'p2');
+    assert.ok(chip.classList.contains('is-p2'));
+    chip.click();
+    const menu = h.obsidian.lastMenu;
+    assert.deepEqual(menu.items.map((i) => i.title),
+                     ['p1', 'p2', 'p3', 'None']);
+    await menuItem(menu, 'p1').click();
+    await tick(20);
+    assert.match(text(cardPath('G-aaaaa')), /%%\[!review\|p1\] Aly/);
+    await view.doUndo();
+    await tick(20);
+    assert.match(text(cardPath('G-aaaaa')), /%%\[!review\|p2\] Aly/);
+});
+
+test('Ctrl+Enter in a reply box sends the reply, held by the box ahead of ' +
+     'Obsidian\'s hotkeys, and sends it once', async () => {
+    const A = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%% ' +
+        'is large.';
+    const { app, view, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|a]]\n', { 'G-aaaaa': A });
+    const pushed = [];
+    app.keymap = { pushScope: (s) => pushed.push(s), popScope() {} };
+    await view.select('G-aaaaa');
+    await tick(20);
+    const note = view.cardEls.get('G-aaaaa')
+        .querySelector('.dendrite-review-note');
+    [...note.querySelectorAll('button')].find((b) =>
+        b.textContent === 'Reply').click();
+    await tick(10);
+    const box = note.querySelector('textarea');
+    box.dispatchEvent(new h.window.FocusEvent('focus'));
+    box.value = 'Forty.';
+    const own = pushed[pushed.length - 1];
+    const send = own && own.keys.find((k) => k.key === 'Enter' &&
+                                      k.mods.includes('Mod'));
+    assert.ok(send, 'the box holds Ctrl+Enter');
+    send.fn();
+    box.dispatchEvent(new h.window.KeyboardEvent('keydown',
+        { key: 'Enter', ctrlKey: true, bubbles: true }));
+    await tick(30);
+    const replies = text(cardPath('G-aaaaa')).match(/\[!reply\]/g) || [];
+    assert.equal(replies.length, 1, 'sent once');
+    assert.match(text(cardPath('G-aaaaa')), /Forty\./);
 });

@@ -151,7 +151,7 @@ function deriveLabel(body, aliases) {
  */
 function stripComments(text) {
     return text
-        .replace(/==([^=\n]+?)==(?=%%\[!(?:review|suggest)[\]|])/g, '$1')
+        .replace(/==([^=\n]+?)==(?=%%\[!(?:review|suggest)[\]|\\\s])/g, '$1')
         .replace(/%%[\s\S]*?%%/g, '');
 }
 
@@ -1640,7 +1640,8 @@ function findPatterns(query, opts = {}) {
 // reviewer, its date and what it says, the last ending in an optional
 // link to its thread.
 const REVIEW_NOTE = new RegExp('%%(?:\\}[a-z0-9]+\\s+)?' +
-    '\\[!(review|suggest|reply)(?:\\|p[123])?\\]\\s*' +
+    '\\[!(review|suggest|reply)(?:\\s*\\\\?\\|\\s*p[123])?\\s*\\]' +
+    '\\s*' +
     '([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%', 'g');
 
 /**

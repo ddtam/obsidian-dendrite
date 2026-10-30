@@ -920,12 +920,22 @@ function place(c, s, e, how) {
 // %%{1%%passage%%}1 [!review] …%%.
 const SCAN = new RegExp('%%\\{([a-z0-9]+)%%|' +
     '(?:==([^=\\n]+?)==)?%%(?:\\}([a-z0-9]+)\\s+)?' +
-    '\\[!(review|suggest)(?:\\|p[123])?\\]\\s*([\\s\\S]*?)%%' +
+    '\\[!(review|suggest)(?:\\s*\\\\?\\|\\s*p[123])?\\s*\\]' +
+    '\\s*([\\s\\S]*?)%%' +
     '((?:%%\\[!reply\\][\\s\\S]*?%%)*)', 'g');
 
 // A comment's triage priority, for the writer to work through: a tag on
-// its marker, [!review|p1], kept by Dendrite and never exported.
-const PRIORITY = /\[!(review|suggest)(?:\|(p[123]))?\]/;
+// its marker, [!review|p1], kept by Dendrite and never exported. In a
+// table row its pipe is escaped, [!review\|p1], as a cell's must be; one
+// a table editor took for a cell's edge, [!review   | p1], is read too.
+const PRIORITY = /\[!(review|suggest)(?:\s*\\?\|\s*(p[123]))?\s*\]/;
+
+/** A priority's tag for a marker at `at` in md: escaped in a table row. */
+function priorityTag(md, at, p) {
+    if (!PRIORITIES.includes(p)) return '';
+    const line = md.slice(md.lastIndexOf('\n', at - 1) + 1, at);
+    return (/^\s*\|/.test(line) ? '\\|' : '|') + p;
+}
 const PRIORITIES = ['p1', 'p2', 'p3'];
 
 /**
@@ -1038,7 +1048,7 @@ function setPriority(md, n, p) {
     const m = PRIORITY.exec(md.slice(it.noteStart, it.end));
     if (!m) return md;
     const at = it.noteStart + m.index;
-    const tag = PRIORITIES.includes(p) ? `|${p}` : '';
+    const tag = priorityTag(md, at, p);
     return md.slice(0, at) + `[!${m[1]}${tag}]` +
         md.slice(at + m[0].length);
 }
@@ -1184,25 +1194,46 @@ function fillAddressed(el, text, colourOf = null, linkOf = null) {
     fillLinked(el, rest, linkOf);
 }
 
-// Threads folded or opened by hand, by thread id, kept for the session,
-// so a card drawn again or opened in the editor keeps them so.
-const folds = new Map();
+/**
+ * A comment's triage priority as a chip, p1 to p3 in its colour, or a
+ * faint p– where none is set; its menu is the caller's to add.
+ */
+function priorityChip(doc, p) {
+    const b = doc.createElement('button');
+    b.className = 'dendrite-prio' + (p ? ` is-${p}` : ' is-none');
+    b.textContent = p || 'p–';
+    b.setAttribute('aria-label', p ? `Priority ${p}` : 'Set a priority');
+    // Its own, not the card's or the comment's under it.
+    for (const ev of ['mousedown', 'pointerdown', 'dblclick']) {
+        b.addEventListener(ev, (e) => e.stopPropagation());
+    }
+    return b;
+}
+
+// Whether comments are folded until clicked and fold again when left,
+// the setting's; off, they are open and folded only by hand.
+let foldUntilClicked = true;
+
+function setFoldUntilClicked(on) {
+    foldUntilClicked = !!on;
+}
 
 /**
  * Let comment `it`'s callout `note` fold to the first line of its text,
  * a count of the replies before the latest, and the latest in full, the
- * one usually to act on, by a toggle at the start of `meta`, its name
- * line; folded at first if `byDefault`, unless folded or opened by hand
- * before. Call it once the replies are drawn. A thread with nothing to
- * hide has no toggle. `onToggle(folded)` is told of each change, as for
- * a redraw.
+ * one usually to act on. It is folded at first, opened by a click on it,
+ * and folded again when a press or the focus goes anywhere outside it,
+ * so only the comment being read is open, unless that setting is off,
+ * when it is open; a toggle at the start of `meta`, its name line, folds
+ * and opens it by hand. Call it once the
+ * replies are drawn. A thread with nothing to hide has no toggle.
+ * `onToggle(folded)` is told of each change, as for a redraw.
  */
-function foldable(note, meta, it, byDefault = false, onToggle = null) {
+function foldable(note, meta, it, onToggle = null) {
     const earlier = Math.max(0, (it.replies || []).length - 1);
     if (!earlier && String(it.text || '').length <= 140) return;
     const rows = note.querySelectorAll('.dendrite-review-reply');
     if (rows.length) rows[rows.length - 1].classList.add('is-latest');
-    const key = threadId(it);
     const doc = note.ownerDocument;
     const btn = doc.createElement('span');
     btn.className = 'dendrite-review-fold';
@@ -1214,18 +1245,44 @@ function foldable(note, meta, it, byDefault = false, onToggle = null) {
         ` · ${earlier} earlier repl${earlier === 1 ? 'y' : 'ies'}` : '';
     meta.prepend(btn);
     meta.append(count);
-    const set = (f) => {
+    const auto = foldUntilClicked;
+    let heard = null;
+    // Open, it listens for a press elsewhere in its window to fold.
+    const away = (e) => {
+        if (!note.isConnected || !note.contains(e.target)) set(true, true);
+    };
+    const set = (f, told = false) => {
+        if (note.classList.contains('is-folded') === f &&
+            btn.textContent) return;
         note.classList.toggle('is-folded', f);
         btn.textContent = f ? '▸' : '▾';
+        // A press, or a click without one, as a keyboard's or a program's,
+        // in the document it is in when opened: it may be drawn in
+        // another before it is placed.
+        for (const ev of heard ? ['pointerdown', 'click'] : []) {
+            heard.removeEventListener(ev, away, true);
+        }
+        heard = !f && auto ? note.ownerDocument : null;
+        for (const ev of heard ? ['pointerdown', 'click'] : []) {
+            heard.addEventListener(ev, away, true);
+        }
+        if (told && onToggle) onToggle(f);
     };
-    set(folds.has(key) ? folds.get(key) : byDefault);
+    set(auto);
+    note.addEventListener('click', () => {
+        if (auto && note.classList.contains('is-folded')) set(false, true);
+    });
+    // The focus moved on to something else; a press elsewhere, which
+    // may leave no element focused, is told by `away`.
+    note.addEventListener('focusout', (e) => {
+        if (auto && e.relatedTarget && !note.contains(e.relatedTarget)) {
+            set(true, true);
+        }
+    });
     btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const f = !note.classList.contains('is-folded');
-        folds.set(key, f);
-        set(f);
-        if (onToggle) onToggle(f);
+        set(!note.classList.contains('is-folded'), true);
     });
     for (const ev of ['mousedown', 'pointerdown', 'dblclick']) {
         btn.addEventListener(ev, (e) => e.stopPropagation());
@@ -1562,7 +1619,7 @@ function reviseSuggestion(md, n, text, date) {
     const h = seg.search(PRIORITY);
     const close = h < 0 ? -1 : seg.indexOf('%%', h);
     if (close < 0) return md;
-    const tag = it.priority ? `|${it.priority}` : '';
+    const tag = priorityTag(md, it.start + h, it.priority);
     const head = `[!suggest${tag}] ${clean(it.author) || 'Reviewer'}, ` +
         `${date}: ` +
         clean(text, true);
@@ -1940,7 +1997,7 @@ function editorRanges(md) {
         return { from: x.noteStart, to: x.end, n: num, author: x.author,
                  date: x.date, kind: x.kind, text: x.text,
                  passage: !!x.passage, replies: x.replies,
-                 first: firsts[i] === i };
+                 priority: x.priority, first: firsts[i] === i };
     });
     const marks = items.filter((x) => x.open).map((x) => ({
         from: x.open.end, to: x.noteStart, author: x.author,
@@ -2371,13 +2428,18 @@ function replyBox(parent, send, typing = null, start = '', key = null,
         box.blur();
         form.remove();
     };
+    // Sent once, though Ctrl+Enter may reach it both as the hotkey the
+    // box holds and as the key itself.
+    let sent = false;
     go.onclick = async (e) => {
         if (e && e.stopPropagation) e.stopPropagation();
         const t = box.value.trim();
-        if (!t) return;
+        if (!t || sent) return;
+        sent = true;
         done();
         await send(t);
     };
+    box.dendriteSend = () => go.onclick();
     no.onclick = (e) => {
         if (e && e.stopPropagation) e.stopPropagation();
         done();
@@ -2482,7 +2544,13 @@ function decorate(root, items, act, onMenu = null, colourOf = null,
             meta.className = 'dendrite-review-meta';
             const who = doc.createElement('b');
             shownAs(who, it.author || 'Reviewer', nameOf);
-            meta.append(who, ` · ${shortDate(it.date)}`);
+            // Its priority, set from a menu the board shows.
+            const chip = priorityChip(doc, it.priority);
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                act(i, 'priority-menu', e);
+            });
+            meta.append(chip, who, ` · ${shortDate(it.date)}`);
             if (passages(i) > 1) meta.append(` · ${passages(i)} passages`);
             const text = doc.createElement('div');
             text.className = 'dendrite-review-text';
@@ -2613,6 +2681,7 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    findSuggestion, reviseSuggestion,
                    threadIds, forReviewers, replyRow,
                    addressed, awaits, passesFilter, setPriority, PRIORITIES,
+                   setFoldUntilClicked, priorityChip,
                    replaceReplies, fillAddressed,
                    suggestInto,
                    firstOfComment, countComments,

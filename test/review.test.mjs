@@ -338,7 +338,7 @@ test('on the board a comment\'s passage is marked and numbered, with a ' +
                             'dendrite-review-notes']);
     const notes = root.querySelectorAll('.dendrite-review-note');
     assert.equal(notes[0].querySelector('.dendrite-review-meta').textContent,
-                 'Aly Karsan · 23 Oct');
+                 'p–Aly Karsan · 23 Oct', 'its priority\'s chip, unset');
     assert.equal(notes[1].className, 'dendrite-review-note is-suggest');
     assert.equal(notes[1].querySelector('.dendrite-review-text').textContent,
                  'Suggests: new');
@@ -350,8 +350,12 @@ test('on the board a comment\'s passage is marked and numbered, with a ' +
     assert.equal(bar.nextElementSibling.className, 'dendrite-review-meta');
     assert.equal(notes[0].querySelectorAll(':scope > button').length, 0);
     for (const b of root.querySelectorAll('button')) b.click();
-    assert.deepEqual(acts, [[0, 'resolve'], [1, 'apply'], [1, 'dismiss'],
-                            [2, 'resolve']]);
+    assert.deepEqual(acts.filter((a) => a[1] !== 'priority-menu'),
+                     [[0, 'resolve'], [1, 'apply'], [1, 'dismiss'],
+                      [2, 'resolve']]);
+    // Each one's priority chip asks for its menu.
+    assert.deepEqual(acts.filter((a) => a[1] === 'priority-menu')
+        .map((a) => a[0]), [0, 1, 2]);
     // Right-click on a comment: its own menu, through `act`.
     const menus = [];
     root.innerHTML = html.split('\n\n').map((x) => `<p>${x}</p>`).join('');
@@ -1463,8 +1467,8 @@ test('a link to a card in a comment or reply, [[o5yps]] or with its own ' +
 });
 
 test('a comment\'s thread folds to its first line and a count of its ' +
-     'replies, folded or not as it was left, on the board open at first',
-     () => {
+     'replies: folded at first, opened by a click on it, and folded again ' +
+     'once a click or the focus is elsewhere', () => {
     const { JSDOM } = require('jsdom');
     const win = new JSDOM('<div id="root"></div>').window;
     const doc = win.document;
@@ -1479,33 +1483,61 @@ test('a comment\'s thread folds to its first line and a count of its ' +
         return root.querySelector('.dendrite-review-note');
     };
     let note = draw();
-    assert.ok(!note.classList.contains('is-folded'), 'open on the board');
-    const fold = note.querySelector('.dendrite-review-fold');
-    assert.ok(fold, 'a fold toggle');
-    fold.click();
-    assert.ok(note.classList.contains('is-folded'));
+    assert.ok(note.classList.contains('is-folded'), 'folded at first');
     assert.equal(note.querySelector('.dendrite-review-count').textContent,
                  ' · 1 earlier reply');
     const rows = [...note.querySelectorAll('.dendrite-review-reply')];
     assert.deepEqual(rows.map((x) => x.classList.contains('is-latest')),
                      [false, true], 'the latest reply stays in full');
-    note = draw();
-    assert.ok(note.classList.contains('is-folded'), 'kept when redrawn');
-    note.querySelector('.dendrite-review-fold').click();
+    // A click on it opens it; one anywhere else folds it again.
+    const press = (el) => el.dispatchEvent(new win.MouseEvent(
+        'pointerdown', { bubbles: true }));
+    note.querySelector('.dendrite-review-text').click();
+    assert.ok(!note.classList.contains('is-folded'), 'opened by a click');
+    press(note.querySelector('.dendrite-review-text'));
+    assert.ok(!note.classList.contains('is-folded'), 'a press inside: open');
+    const outside = doc.createElement('p');
+    doc.body.append(outside);
+    press(outside);
+    assert.ok(note.classList.contains('is-folded'), 'folded again');
+    // And when the focus leaves it.
+    note.click();
+    const box = doc.createElement('textarea');
+    note.append(box);
+    box.focus();
+    const away = doc.createElement('input');
+    doc.body.append(away);
+    away.focus();
+    assert.ok(note.classList.contains('is-folded'), 'focus gone: folded');
+    // The toggle folds and opens it by hand.
+    const fold = note.querySelector('.dendrite-review-fold');
+    fold.click();
     assert.ok(!note.classList.contains('is-folded'));
-    // Folded at first where asked, as in the card editor.
-    const other = doc.createElement('div');
-    const it = r.reviewItems(md.replace('How many', 'How big'))[0];
-    const meta = doc.createElement('div');
-    other.append(meta);
-    r.foldable(other, meta, it, true);
-    assert.ok(other.classList.contains('is-folded'));
+    fold.click();
+    assert.ok(note.classList.contains('is-folded'));
+    note = draw();
+    assert.ok(note.classList.contains('is-folded'), 'redrawn folded');
+    // With the setting off: open, folded only by hand.
+    r.setFoldUntilClicked(false);
+    try {
+        note = draw();
+        assert.ok(!note.classList.contains('is-folded'), 'open');
+        note.querySelector('.dendrite-review-fold').click();
+        assert.ok(note.classList.contains('is-folded'), 'folded by hand');
+        note.querySelector('.dendrite-review-text').click();
+        assert.ok(note.classList.contains('is-folded'), 'a click: as is');
+        note.querySelector('.dendrite-review-fold').click();
+        press(outside);
+        assert.ok(!note.classList.contains('is-folded'), 'left: as is');
+    } finally {
+        r.setFoldUntilClicked(true);
+    }
     // A comment with nothing under it and short text has no toggle.
     const bare = doc.createElement('div');
     const bm = doc.createElement('div');
     bare.append(bm);
     r.foldable(bare, bm, r.reviewItems('a ==b==%%[!review] A, ' +
-        '2026-10-23: Short.%%')[0], true);
+        '2026-10-23: Short.%%')[0]);
     assert.equal(bare.querySelector('.dendrite-review-fold'), null);
     assert.ok(!bare.classList.contains('is-folded'));
 });
@@ -1729,4 +1761,49 @@ test('a comment\'s triage priority is a tag on its marker, read and set ' +
                                                     self)), [true, false]);
     assert.deepEqual(was.map((it) => r.passesFilter(it,
         { priority: 'none' }, self)), [true, true]);
+});
+
+test('a comment drawn in another document before it is placed, as the ' +
+     'board draws a card, folds again on a click outside it once placed',
+     () => {
+    const { JSDOM } = require('jsdom');
+    const page = new JSDOM('<p id="other">x</p>').window;
+    const off = page.document.implementation.createHTMLDocument('');
+    const md = 'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%%' +
+        '%%[!reply] Me, 2026-10-24: Forty.%%%%[!reply] Claude, ' +
+        '2026-10-24: Say so.%% is large.';
+    const root = off.createElement('div');
+    root.innerHTML = `<p>${r.renderMarkdown(md)}</p>`;
+    r.decorate(root, r.reviewItems(md), () => {});
+    page.document.body.append(root);
+    const note = page.document.querySelector('.dendrite-review-note');
+    note.querySelector('.dendrite-review-text').click();
+    assert.ok(!note.classList.contains('is-folded'), 'opened');
+    page.document.getElementById('other').click();
+    assert.ok(note.classList.contains('is-folded'), 'folded again');
+});
+
+test('in a table row a priority is written with its pipe escaped, so ' +
+     'the row keeps its cells, and one a table editor split is read and ' +
+     'mended when set again', () => {
+    const core = require('../src/core.js');
+    const row = (cell) => `| ${cell} | 175 |`;
+    const md = '| Data | n |\n| --- | --- |\n' +
+        row('%%{1%%WGS%%}1 [!review] Josh, 2026-10-23: Size?%%') + '\n';
+    const set = r.setPriority(md, 0, 'p3');
+    assert.match(set, /\[!review\\\|p3\] Josh/, 'escaped');
+    const cells = (t) => t.split('\n')[2].split(/(?<!\\)\|/).length;
+    assert.equal(cells(set), cells(md), 'the same cells');
+    assert.equal(r.reviewItems(set)[0].priority, 'p3');
+    assert.equal(r.reviewItems(set)[0].text, 'Size?');
+    assert.equal(core.stripComments(set), core.stripComments(md));
+    // Split by a table editor that took the pipe for a cell's edge.
+    const torn = md.replace('[!review]', '[!review      | p3]');
+    assert.equal(r.reviewItems(torn)[0].priority, 'p3', 'still read');
+    assert.equal(r.reviewItems(torn)[0].text, 'Size?');
+    assert.equal(r.setPriority(torn, 0, 'p3'), set, 'mended when set');
+    assert.equal(r.setPriority(torn, 0, null), md);
+    // Out of a table, plain.
+    assert.match(r.setPriority('A ==b==%%[!review] J, 2026-10-23: x%%', 0,
+                               'p1'), /\[!review\|p1\]/);
 });

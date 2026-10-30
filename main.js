@@ -110,7 +110,7 @@ var require_core = __commonJS({
       return cleanLabel(words.length > LABEL_WORDS ? cut + "\u2026" : cut);
     }
     function stripComments(text) {
-      return text.replace(/==([^=\n]+?)==(?=%%\[!(?:review|suggest)[\]|])/g, "$1").replace(/%%[\s\S]*?%%/g, "");
+      return text.replace(/==([^=\n]+?)==(?=%%\[!(?:review|suggest)[\]|\\\s])/g, "$1").replace(/%%[\s\S]*?%%/g, "");
     }
     function validPrefix(prefix) {
       return PREFIX.test(prefix || "");
@@ -1151,7 +1151,7 @@ var require_core = __commonJS({
       const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return { patterns: terms.map((t) => new RegExp(esc(t), flags)) };
     }
-    var REVIEW_NOTE = new RegExp("%%(?:\\}[a-z0-9]+\\s+)?\\[!(review|suggest|reply)(?:\\|p[123])?\\]\\s*([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%", "g");
+    var REVIEW_NOTE = new RegExp("%%(?:\\}[a-z0-9]+\\s+)?\\[!(review|suggest|reply)(?:\\s*\\\\?\\|\\s*p[123])?\\s*\\]\\s*([^%\\n]*?),\\s*\\d{4}-\\d{2}-\\d{2}:\\s?([\\s\\S]*?)%%", "g");
     function reviewText(body) {
       const out = [];
       REVIEW_NOTE.lastIndex = 0;
@@ -2444,8 +2444,13 @@ var require_review = __commonJS({
       const end = e > s ? c.src(e - 1) + 1 : start;
       return { id: c.id, start, end: e > s ? end : start, how };
     }
-    var SCAN = new RegExp("%%\\{([a-z0-9]+)%%|(?:==([^=\\n]+?)==)?%%(?:\\}([a-z0-9]+)\\s+)?\\[!(review|suggest)(?:\\|p[123])?\\]\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)", "g");
-    var PRIORITY = /\[!(review|suggest)(?:\|(p[123]))?\]/;
+    var SCAN = new RegExp("%%\\{([a-z0-9]+)%%|(?:==([^=\\n]+?)==)?%%(?:\\}([a-z0-9]+)\\s+)?\\[!(review|suggest)(?:\\s*\\\\?\\|\\s*p[123])?\\s*\\]\\s*([\\s\\S]*?)%%((?:%%\\[!reply\\][\\s\\S]*?%%)*)", "g");
+    var PRIORITY = /\[!(review|suggest)(?:\s*\\?\|\s*(p[123]))?\s*\]/;
+    function priorityTag(md, at, p) {
+      if (!PRIORITIES.includes(p)) return "";
+      const line = md.slice(md.lastIndexOf("\n", at - 1) + 1, at);
+      return (/^\s*\|/.test(line) ? "\\|" : "|") + p;
+    }
     var PRIORITIES = ["p1", "p2", "p3"];
     function scan(md) {
       const opens = /* @__PURE__ */ new Map();
@@ -2541,7 +2546,7 @@ var require_review = __commonJS({
       const m = PRIORITY.exec(md.slice(it.noteStart, it.end));
       if (!m) return md;
       const at = it.noteStart + m.index;
-      const tag = PRIORITIES.includes(p) ? `|${p}` : "";
+      const tag = priorityTag(md, at, p);
       return md.slice(0, at) + `[!${m[1]}${tag}]` + md.slice(at + m[0].length);
     }
     function addReply(md, n, reply) {
@@ -2632,13 +2637,25 @@ var require_review = __commonJS({
       el.append(at, " ");
       fillLinked(el, rest, linkOf);
     }
-    var folds = /* @__PURE__ */ new Map();
-    function foldable(note, meta, it, byDefault = false, onToggle = null) {
+    function priorityChip(doc, p) {
+      const b = doc.createElement("button");
+      b.className = "dendrite-prio" + (p ? ` is-${p}` : " is-none");
+      b.textContent = p || "p\u2013";
+      b.setAttribute("aria-label", p ? `Priority ${p}` : "Set a priority");
+      for (const ev of ["mousedown", "pointerdown", "dblclick"]) {
+        b.addEventListener(ev, (e) => e.stopPropagation());
+      }
+      return b;
+    }
+    var foldUntilClicked = true;
+    function setFoldUntilClicked(on) {
+      foldUntilClicked = !!on;
+    }
+    function foldable(note, meta, it, onToggle = null) {
       const earlier = Math.max(0, (it.replies || []).length - 1);
       if (!earlier && String(it.text || "").length <= 140) return;
       const rows = note.querySelectorAll(".dendrite-review-reply");
       if (rows.length) rows[rows.length - 1].classList.add("is-latest");
-      const key = threadId(it);
       const doc = note.ownerDocument;
       const btn = doc.createElement("span");
       btn.className = "dendrite-review-fold";
@@ -2649,18 +2666,37 @@ var require_review = __commonJS({
       count.textContent = earlier ? ` \xB7 ${earlier} earlier repl${earlier === 1 ? "y" : "ies"}` : "";
       meta.prepend(btn);
       meta.append(count);
-      const set = (f) => {
+      const auto = foldUntilClicked;
+      let heard = null;
+      const away = (e) => {
+        if (!note.isConnected || !note.contains(e.target)) set(true, true);
+      };
+      const set = (f, told = false) => {
+        if (note.classList.contains("is-folded") === f && btn.textContent) return;
         note.classList.toggle("is-folded", f);
         btn.textContent = f ? "\u25B8" : "\u25BE";
+        for (const ev of heard ? ["pointerdown", "click"] : []) {
+          heard.removeEventListener(ev, away, true);
+        }
+        heard = !f && auto ? note.ownerDocument : null;
+        for (const ev of heard ? ["pointerdown", "click"] : []) {
+          heard.addEventListener(ev, away, true);
+        }
+        if (told && onToggle) onToggle(f);
       };
-      set(folds.has(key) ? folds.get(key) : byDefault);
+      set(auto);
+      note.addEventListener("click", () => {
+        if (auto && note.classList.contains("is-folded")) set(false, true);
+      });
+      note.addEventListener("focusout", (e) => {
+        if (auto && e.relatedTarget && !note.contains(e.relatedTarget)) {
+          set(true, true);
+        }
+      });
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const f = !note.classList.contains("is-folded");
-        folds.set(key, f);
-        set(f);
-        if (onToggle) onToggle(f);
+        set(!note.classList.contains("is-folded"), true);
       });
       for (const ev of ["mousedown", "pointerdown", "dblclick"]) {
         btn.addEventListener(ev, (e) => e.stopPropagation());
@@ -2894,7 +2930,7 @@ var require_review = __commonJS({
       const h = seg.search(PRIORITY);
       const close = h < 0 ? -1 : seg.indexOf("%%", h);
       if (close < 0) return md;
-      const tag = it.priority ? `|${it.priority}` : "";
+      const tag = priorityTag(md, it.start + h, it.priority);
       const head = `[!suggest${tag}] ${clean(it.author) || "Reviewer"}, ${date}: ` + clean(text, true);
       return md.slice(0, it.start + h) + head + md.slice(it.start + close);
     }
@@ -3154,6 +3190,7 @@ var require_review = __commonJS({
           text: x.text,
           passage: !!x.passage,
           replies: x.replies,
+          priority: x.priority,
           first: firsts[i] === i
         };
       });
@@ -3443,13 +3480,16 @@ var require_review = __commonJS({
         box.blur();
         form.remove();
       };
+      let sent = false;
       go.onclick = async (e) => {
         if (e && e.stopPropagation) e.stopPropagation();
         const t = box.value.trim();
-        if (!t) return;
+        if (!t || sent) return;
+        sent = true;
         done();
         await send(t);
       };
+      box.dendriteSend = () => go.onclick();
       no.onclick = (e) => {
         if (e && e.stopPropagation) e.stopPropagation();
         done();
@@ -3532,7 +3572,12 @@ var require_review = __commonJS({
           meta.className = "dendrite-review-meta";
           const who = doc.createElement("b");
           shownAs(who, it.author || "Reviewer", nameOf);
-          meta.append(who, ` \xB7 ${shortDate(it.date)}`);
+          const chip = priorityChip(doc, it.priority);
+          chip.addEventListener("click", (e) => {
+            e.stopPropagation();
+            act(i, "priority-menu", e);
+          });
+          meta.append(chip, who, ` \xB7 ${shortDate(it.date)}`);
           if (passages(i) > 1) meta.append(` \xB7 ${passages(i)} passages`);
           const text = doc.createElement("div");
           text.className = "dendrite-review-text";
@@ -3701,6 +3746,8 @@ var require_review = __commonJS({
       passesFilter,
       setPriority,
       PRIORITIES,
+      setFoldUntilClicked,
+      priorityChip,
       replaceReplies,
       fillAddressed,
       suggestInto,
@@ -3792,6 +3839,11 @@ var require_cmreview = __commonJS({
             const meta = div("dendrite-review-meta", main);
             const who = doc.createElement("b");
             review2.shownAs(who, c.author || "Reviewer", nameOf);
+            if (c.priority) {
+              const chip = review2.priorityChip(doc, c.priority);
+              chip.disabled = true;
+              meta.append(chip);
+            }
             meta.append(who, ` \xB7 ${review2.shortDate(c.date)}`);
             const { text: said } = review2.noteLink(c.text);
             const shown = div("dendrite-review-text", main);
@@ -3809,13 +3861,7 @@ var require_cmreview = __commonJS({
                 linkOf
               ));
             }
-            review2.foldable(
-              note,
-              meta,
-              c,
-              true,
-              () => view.requestMeasure()
-            );
+            review2.foldable(note, meta, c, () => view.requestMeasure());
           }
           return box;
         }
@@ -3957,7 +4003,7 @@ var require_tablecells = __commonJS({
             const cell = rows[r] && rows[r][c];
             const wrap = td.querySelector(":scope > .table-cell-wrapper");
             if (!cell || !wrap || td.querySelector(".cm-editor")) return;
-            if (!/\[!(review|suggest)[\]|]/.test(cell.text)) return;
+            if (!/\[!(review|suggest)[\]|\\\s]/.test(cell.text)) return;
             const base = review2.countComments(
               review2.reviewItems(text.slice(0, cell.start))
             );
@@ -6616,6 +6662,8 @@ var DEFAULTS = {
   autosaveMs: 600,
   openInDendrite: true,
   vimKeys: true,
+  // Comments folded until clicked, and folded again when left.
+  foldComments: true,
   manageLinter: true,
   lintCards: true,
   obsidianEditor: true,
@@ -6859,6 +6907,10 @@ function clickedText(body, e) {
 }
 function ownKeys(app, el) {
   const scope = new Scope(app.scope);
+  scope.register(["Mod"], "Enter", () => {
+    if (el.dendriteSend) el.dendriteSend();
+    return false;
+  });
   el.addEventListener("focus", () => {
     if (app.keymap) app.keymap.pushScope(scope);
   });
@@ -6933,29 +6985,30 @@ function withReply(body, n, reply) {
   return typeof out === "string" && priority !== void 0 ? review.setPriority(out, n, priority) : out;
 }
 function priorityButton(parent, p, pick) {
-  const b = parent.createEl("button", { cls: "dendrite-prio" + (p ? ` is-${p}` : " is-none"), text: p || "p\u2013" });
-  b.setAttr("aria-label", p ? `Priority ${p}` : "Set a priority");
+  const b = review.priorityChip(parent.ownerDocument, p);
+  parent.append(b);
   b.addEventListener("click", (e) => {
     e.stopPropagation();
-    const m = dendriteMenu(false);
-    for (const [value, title] of [
-      ["p1", "p1"],
-      ["p2", "p2"],
-      ["p3", "p3"],
-      [null, "None"]
-    ]) {
-      m.addItem((i) => {
-        i.setTitle(title).onClick(() => {
-          if (value !== (p || null)) pick(value);
-        });
-        if (typeof i.setChecked === "function") {
-          i.setChecked(value === (p || null));
-        }
-      });
-    }
-    if (m.showAtMouseEvent) m.showAtMouseEvent(e);
+    priorityMenu(e, p, pick);
   });
   return b;
+}
+function priorityMenu(e, p, pick) {
+  const m = dendriteMenu(false);
+  for (const [value, title] of [
+    ["p1", "p1"],
+    ["p2", "p2"],
+    ["p3", "p3"],
+    [null, "None"]
+  ]) {
+    m.addItem((i) => {
+      i.setTitle(title).onClick(() => pick(value));
+      if (typeof i.setChecked === "function") {
+        i.setChecked(value === (p || null));
+      }
+    });
+  }
+  if (m.showAtMouseEvent) m.showAtMouseEvent(e);
 }
 function localDay(d = /* @__PURE__ */ new Date()) {
   const two = (x) => String(x).padStart(2, "0");
@@ -7617,7 +7670,7 @@ var DendriteView = class extends ItemView {
     btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e), true).addClass("dendrite-bar-gap-before");
     this.reviewBtn = btn("inbox", "Review", "Bring in review comments: from the linked Google Doc, a returned Word file, or programs", (e) => this.reviewMenu(e), true);
     this.showInboxBadge();
-    btn("messages-square", "Comments", "List the open comments in the sidebar, to filter them by who wrote them and whose answer they wait for", () => this.plugin.showCommentList());
+    btn("messages-square", "Comments", "List the open comments in the sidebar, to filter them by who wrote them and whose answer they wait for", () => this.plugin.showCommentList(this));
     this.modeEl = bar.createDiv({ cls: "dendrite-mode" });
     this.showMode();
     this.totalEl = bar.createDiv({ cls: "dendrite-total" });
@@ -8076,7 +8129,7 @@ var DendriteView = class extends ItemView {
         review.decorate(
           out,
           notes,
-          (n, what, arg) => this.reviewAction(id, n, what, arg),
+          (n, what, arg) => this.reviewAct(id, n, what, arg),
           (n, e, k) => this.commentMenu(id, n, e, k),
           this.colourOf(),
           (el) => ownKeys(this.app, el),
@@ -8267,7 +8320,7 @@ var DendriteView = class extends ItemView {
     m.addItem((i) => i.setTitle("Export\u2026").setIcon("file-output").onClick(() => this.exportMenu(null, e)));
     const waiting = (this.inbox || []).length;
     m.addItem((i) => i.setTitle("Review\u2026" + (waiting ? ` (${waiting} waiting)` : "")).setIcon("inbox").onClick(() => this.reviewMenu(e)));
-    m.addItem((i) => i.setTitle("Comment list").setIcon("messages-square").onClick(() => this.plugin.showCommentList()));
+    m.addItem((i) => i.setTitle("Comment list").setIcon("messages-square").onClick(() => this.plugin.showCommentList(this)));
     m.addSeparator();
     m.addItem((i) => i.setTitle("This manuscript's settings").setIcon("settings").onClick(() => this.openManuscriptSettings()));
     m.addItem((i) => i.setTitle("Open the index note").setIcon("file-text").onClick(() => this.plugin.openAsMarkdown(this.file)));
@@ -10837,7 +10890,7 @@ var DendriteView = class extends ItemView {
       review.decorate(
         out,
         notes,
-        (n, what, arg) => this.reviewAction(id, n, what, arg),
+        (n, what, arg) => this.reviewAct(id, n, what, arg),
         (n, e, k) => this.commentMenu(id, n, e, k),
         this.colourOf(),
         (el2) => ownKeys(this.app, el2),
@@ -12554,6 +12607,17 @@ var DendriteView = class extends ItemView {
     const out = review.suggestInto(body, id, item);
     if (out.reason) return out.reason;
     await this.reviewAction(id, 0, "text", out.md);
+    return null;
+  }
+  /** A comment's button on a card: its priority's menu, or the rest. */
+  reviewAct(id, n, what, arg) {
+    if (what !== "priority-menu") {
+      return this.reviewAction(id, n, what, arg);
+    }
+    const b = this.bodies && this.bodies.get(id);
+    const body = b && b.body || "";
+    const it = review.reviewItems(body)[n];
+    priorityMenu(arg, it && it.priority, (p) => this.reviewAction(id, n, "priority", p));
     return null;
   }
   async reviewAction(id, n, what, arg = null) {
@@ -14652,13 +14716,7 @@ var DendritePreview = class extends ItemView {
         send,
         (box) => ownKeys(this.app, box)
       );
-      review.foldable(
-        el,
-        meta,
-        it,
-        false,
-        () => this.scheduleBubbles()
-      );
+      review.foldable(el, meta, it, () => this.scheduleBubbles());
     }
     const order = new Map(this.reviewList.map((x, k) => [`${x.id}\0${x.n}`, k]));
     const key = (el) => order.get(`${el.dataset.id}\0${el.dataset.n}`) ?? 1e9;
@@ -16786,6 +16844,13 @@ var DendriteSettings = class extends PluginSettingTab {
       save();
     }));
     heading("Review");
+    new Setting(containerEl).setName("Fold comments until clicked").setDesc("A comment shows its first line and its latest reply until you click it, and folds again when you click elsewhere, on the board, in a card and in the preview. Off, comments are open, and fold only by their \u25B8 toggle.").addToggle((tg) => tg.setValue(s.foldComments).onChange((v) => {
+      s.foldComments = v;
+      review.setFoldUntilClicked(v);
+      save();
+      this.plugin.rerender();
+      if (this.plugin.refreshPreviews) this.plugin.refreshPreviews();
+    }));
     new Setting(containerEl).setName("Your name, on replies").setDesc("Replies you write to review comments are signed with this, as a reviewer's comments are with theirs.").addText((t) => t.setPlaceholder("Me").setValue(s.replyName).onChange((v) => {
       s.replyName = v.trim();
       save();
@@ -17017,6 +17082,7 @@ module.exports = class DendritePlugin extends Plugin {
   }
   async onload() {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+    review.setFoldUntilClicked(this.settings.foldComments);
     timing.setOn(this.settings.recordTimings && Platform.isDesktopApp);
     this.registerInterval(window.setInterval(
       () => this.writeTimings(),
@@ -17054,7 +17120,9 @@ module.exports = class DendritePlugin extends Plugin {
     this.addCommand({
       id: "show-comments",
       name: "Show the comment list",
-      callback: () => this.showCommentList()
+      callback: () => this.showCommentList(
+        this.app.workspace.getActiveViewOfType(DendriteView) || this.app.workspace.getActiveViewOfType(DendritePreview)
+      )
     });
     this.addCommand({
       id: "open-preview",
@@ -18252,11 +18320,23 @@ module.exports = class DendritePlugin extends Plugin {
       state: { file: file.path }
     });
   }
-  /** The comment list in the right sidebar, opened if it is not. */
-  async showCommentList() {
+  /**
+   * The comment list, opened if it is not: in the right sidebar, or,
+   * for a board `from` in a popout window, which has no sidebar, beside
+   * it in that window, right of its preview there if it has one.
+   */
+  async showCommentList(from = null) {
     const ws = this.app.workspace;
-    let leaf = ws.getLeavesOfType(COMMENTS)[0];
-    if (!leaf) {
+    const where = from && from.leaf && from.leaf.getContainer ? from.leaf.getContainer() : ws.rootSplit;
+    const popout = where && where !== ws.rootSplit;
+    const inWindow = (l) => !popout || l.getContainer && l.getContainer() === where;
+    let leaf = ws.getLeavesOfType(COMMENTS).find(inWindow);
+    if (!leaf && popout) {
+      const pv = ws.getLeavesOfType(PREVIEW).find((l) => l.view && l.view.file === from.file && inWindow(l));
+      leaf = ws.createLeafBySplit(pv || from.leaf, "vertical");
+      narrowSplit(leaf, 1 / 4);
+      await leaf.setViewState({ type: COMMENTS, active: false });
+    } else if (!leaf) {
       leaf = ws.getRightLeaf(false);
       await leaf.setViewState({ type: COMMENTS, active: true });
     }
