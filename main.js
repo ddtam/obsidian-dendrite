@@ -10683,7 +10683,14 @@ var DendriteView = class extends ItemView {
     if (ed.changed && node && !this.statusOf(ed.id) && core.roleFor(node, (x) => this.printRoleOf(x)) === "prose") {
       await this.setStatus(ed.id, "draft");
     }
-    if (ed.changed) await this.plugin.lintCard(ed.file);
+    if (ed.changed) {
+      await this.plugin.lintCard(ed.file);
+      await this.checkVersion(
+        ed.id,
+        await this.app.vault.read(ed.file),
+        true
+      );
+    }
     if (ed.changed && !ed.fromSync) await this.syncAlias(ed.id);
     if (ed.changed && !ed.recorded) {
       const after = core.splitFrontmatter(

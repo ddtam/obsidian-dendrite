@@ -4194,7 +4194,13 @@ class DendriteView extends ItemView {
             core.roleFor(node, (x) => this.printRoleOf(x)) === 'prose') {
             await this.setStatus(ed.id, 'draft');
         }
-        if (ed.changed) await this.plugin.lintCard(ed.file);
+        if (ed.changed) {
+            await this.plugin.lintCard(ed.file);
+            // The text as the Linter left it is what syncs: recorded as
+            // this device's own, here and for the other devices.
+            await this.checkVersion(ed.id,
+                await this.app.vault.read(ed.file), true);
+        }
         if (ed.changed && !ed.fromSync) await this.syncAlias(ed.id);
         // The editor's own history goes with it, so the visit becomes one
         // step in the card's text history, undone from inside the card.

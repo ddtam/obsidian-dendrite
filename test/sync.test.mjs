@@ -733,3 +733,27 @@ test('a card written with no board open, as by the review endpoint, is ' +
         'W/Grant/_dendrite/devices/nix.json'));
     assert.ok(rec.cards['G-aaaaa'].wrote.h, 'in the record for the others');
 });
+
+test('a card the Linter tidies after Dendrite saves it is recorded as ' +
+     'this device\'s text as the Linter left it, which is what syncs',
+     async () => {
+    const { hash } = require('../src/history.js');
+    const clock = { t: 1 };
+    const a = await device(FILES, clock, 'dtam03');
+    const card = cardPath('G-aaaaa');
+    // The Linter as Dendrite runs it: the table's spacing rewritten.
+    a.plugin.lintCard = async (f) => {
+        const t = a.app.vault.text.get(f.path);
+        await a.app.vault.modify(f, t.replace('|a|b|', '| a | b |'));
+    };
+    clock.t += WINDOW_MS + 1;
+    await a.view.startEdit('G-aaaaa');
+    type(a.view, '# Aims\n\n|a|b|\n|-|-|\n');
+    await a.view.endEdit();
+    await tick(60);
+    const body = a.read(card).replace(/^---[\s\S]*?---\n/, '');
+    assert.match(body, /\| a \| b \|/, 'tidied');
+    const rec = JSON.parse(a.read('W/Grant/_dendrite/devices/dtam03.json'));
+    assert.equal(rec.cards['G-aaaaa'].wrote.h, hash(body),
+                 'the tidied text is the one recorded');
+});
