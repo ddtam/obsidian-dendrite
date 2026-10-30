@@ -33,49 +33,22 @@
     white-space: nowrap;
 }
 
-body {
-    --dendrite-head-height: calc(var(--input-height, 30px) + 36px);
-}
-
-/* The board's buttons and read-outs as one header of a fixed height,
-   spaced evenly: the gaps above the buttons, between the rows and above
-   the line under them alike, whatever height a theme gives buttons. */
-.dendrite-head {
-    display: flex;
-    flex-direction: column;
-    justify-content: space-evenly;
-    height: var(--dendrite-head-height);
-    box-sizing: border-box;
-    flex: 0 0 auto;
-    border-bottom: 1px solid var(--background-modifier-border);
-}
-.dendrite-head > .dendrite-bar {
-    border-bottom: none;
-    padding-top: 0;
-    padding-bottom: 0;
-    min-height: 0;
-}
-
-/* The preview's bar as tall as the board's header, so the lines under
-   them meet when side by side. */
-.dendrite-preview > .dendrite-bar {
-    min-height: var(--dendrite-head-height);
-}
-
-/* On a phone the board has no header to line up with. */
-.is-phone .dendrite-preview > .dendrite-bar {
-    min-height: calc(var(--input-height, 30px) + 12px);
-}
-
-/* The read-outs under the buttons: the mode, the totals and the tally. */
+/* The read-outs as a status line at the board's foot, as vim's: the
+   mode, the totals and the tally, on the theme's secondary ground. Last
+   in the view's column whatever is added after it. */
 .dendrite-info {
+    order: 99;
     display: flex;
     align-items: center;
     gap: 12px;
     padding: 0 12px;
+    height: 26px;
+    box-sizing: border-box;
     flex: 0 0 auto;
     flex-wrap: nowrap;
     overflow: hidden;
+    border-top: 1px solid var(--background-modifier-border);
+    background: var(--background-secondary);
 }
 
 .dendrite-info > * {
@@ -88,6 +61,11 @@ body {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* The phone's bar holds its own counts. */
+.dendrite.is-narrow > .dendrite-info {
+    display: none;
 }
 
 .dendrite-title {
@@ -2745,7 +2723,7 @@ button.dendrite-done {
 }
 
 /* The phone's bar: the way down to the active card, Undo and a menu. */
-.dendrite.is-narrow > .dendrite-head {
+.dendrite.is-narrow > .dendrite-bar {
     display: none;
 }
 

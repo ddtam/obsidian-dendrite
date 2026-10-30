@@ -7780,8 +7780,7 @@ var DendriteView = class extends ItemView {
     this.scheduleChanged();
   }
   renderBar(el) {
-    const head = el.createDiv({ cls: "dendrite-head" });
-    const bar = head.createDiv({ cls: "dendrite-bar" });
+    const bar = el.createDiv({ cls: "dendrite-bar" });
     const btn = (icon, label, title, fn, menu) => barButton(bar, icon, label, title, fn, menu);
     btn(
       "settings",
@@ -7843,7 +7842,7 @@ var DendriteView = class extends ItemView {
     );
     this.inboxBtn = btn("inbox", "Inbox", "Reviews and requests waiting for you to add or ignore", () => this.openInboxList());
     this.showInboxBadge();
-    const info = head.createDiv({ cls: "dendrite-info" });
+    const info = el.createDiv({ cls: "dendrite-info" });
     this.modeEl = info.createDiv({ cls: "dendrite-mode" });
     this.showMode();
     this.totalEl = info.createDiv({ cls: "dendrite-total" });
@@ -13609,9 +13608,7 @@ var DendriteView = class extends ItemView {
   /** The find bar, under the view's header. */
   renderFind() {
     const f = this.find;
-    const bar = this.contentEl.querySelector(
-      ":scope > .dendrite-head, :scope > .dendrite-bar"
-    );
+    const bar = this.contentEl.querySelector(":scope > .dendrite-bar");
     if (!f || !bar) return;
     if (f.el) f.el.remove();
     const row = createDiv({ cls: "dendrite-find" });

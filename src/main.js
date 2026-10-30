@@ -1455,13 +1455,11 @@ class DendriteView extends ItemView {
 
     renderBar(el) {
         // Buttons from the left: the manuscript's settings and index note
-        // as two icons, undo and redo, the views, then the menus. After
-        // them, read-outs: the mode, the totals and the tally. The name
-        // is the pane's own title. Nothing sits at the right, where other
-        // plugins' overlays, such as LiveSync's status, are drawn.
-        // The buttons and, under them, the read-outs, as one header.
-        const head = el.createDiv({ cls: 'dendrite-head' });
-        const bar = head.createDiv({ cls: 'dendrite-bar' });
+        // as two icons, undo and redo, the views, then the menus; the
+        // read-outs at the foot. The name is the pane's own title.
+        // Nothing sits at the right, where other plugins' overlays, such
+        // as LiveSync's status, are drawn.
+        const bar = el.createDiv({ cls: 'dendrite-bar' });
         const btn = (icon, label, title, fn, menu) =>
             barButton(bar, icon, label, title, fn, menu);
         btn('settings', '', 'This manuscript\'s settings',
@@ -1519,9 +1517,10 @@ class DendriteView extends ItemView {
         this.inboxBtn = btn('inbox', 'Inbox', 'Reviews and requests ' +
             'waiting for you to add or ignore', () => this.openInboxList());
         this.showInboxBadge();
-        // The read-outs in a row of their own under the buttons: the
-        // mode, the totals and the tally with its flags.
-        const info = head.createDiv({ cls: 'dendrite-info' });
+        // The read-outs in a status line at the board's foot, as vim's:
+        // the mode, the totals and the tally with its flags. Drawn last
+        // by its order in the view's column.
+        const info = el.createDiv({ cls: 'dendrite-info' });
         this.modeEl = info.createDiv({ cls: 'dendrite-mode' });
         this.showMode();
         this.totalEl = info.createDiv({ cls: 'dendrite-total' });
@@ -7621,8 +7620,7 @@ class DendriteView extends ItemView {
     /** The find bar, under the view's header. */
     renderFind() {
         const f = this.find;
-        const bar = this.contentEl.querySelector(
-            ':scope > .dendrite-head, :scope > .dendrite-bar');
+        const bar = this.contentEl.querySelector(':scope > .dendrite-bar');
         if (!f || !bar) return;
         if (f.el) f.el.remove();
         const row = createDiv({ cls: 'dendrite-find' });

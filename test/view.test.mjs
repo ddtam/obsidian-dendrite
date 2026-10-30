@@ -3050,13 +3050,10 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                       'Inbox']);
     assert.ok(view.inboxBtn.classList.contains('is-hidden'),
               'Inbox hidden while nothing waits');
-    // The mode in a row of its own under the buttons; the name is the
-    // pane's title.
+    // The mode in a status line of the view's own, drawn at its foot;
+    // the name is the pane's title.
     assert.equal(view.modeEl.parentElement.className, 'dendrite-info');
-    assert.equal(view.modeEl.parentElement.previousElementSibling,
-                 view.contentEl.querySelector('.dendrite-bar'));
-    assert.equal(view.modeEl.parentElement.parentElement.className,
-                 'dendrite-head', 'one header with the buttons');
+    assert.equal(view.modeEl.parentElement.parentElement, view.contentEl);
     assert.equal(view.contentEl.querySelector('.dendrite-bar .dendrite-title'),
                  null);
     // A edited twice, then B: A's edits are undone in A, B's kept.
