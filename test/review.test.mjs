@@ -1807,3 +1807,34 @@ test('in a table row a priority is written with its pipe escaped, so ' +
     assert.match(r.setPriority('A ==b==%%[!review] J, 2026-10-23: x%%', 0,
                                'p1'), /\[!review\|p1\]/);
 });
+
+test('a table a table editor split at a priority\'s pipe is mended: the ' +
+     'tags rejoined, escaped, and the empty column it added taken off',
+     () => {
+    const torn = 'Intro.\n\n' +
+        '| Data    | n   | Size | |\n' +
+        '| ------- | --- | ---- | --- |\n' +
+        '| %%{1%%WGS%%}1 [!review     | p3] Josh, 2026-10-23: Size?%% ' +
+        '| 175 | 21.6 |\n' +
+        '| RNA     | 156 | 2.3  |     |\n' +
+        '| %%{2%%ATAC%%}2 [!suggest|p1] Aly, 2026-10-23: scATAC%% | 9 ' +
+        '| 1.1 |\n\nAfter.';
+    const out = r.mendSplitTags(torn);
+    assert.equal(out, 'Intro.\n\n' +
+        '| Data    | n   | Size |\n' +
+        '| ------- | --- | ---- |\n' +
+        '| %%{1%%WGS%%}1 [!review\\|p3] Josh, 2026-10-23: Size?%% ' +
+        '| 175 | 21.6 |\n' +
+        '| RNA     | 156 | 2.3  |\n' +
+        '| %%{2%%ATAC%%}2 [!suggest\\|p1] Aly, 2026-10-23: scATAC%% | 9 ' +
+        '| 1.1 |\n\nAfter.');
+    assert.deepEqual(r.reviewItems(out).map((it) => [it.priority, it.text]),
+                     [['p3', 'Size?'], ['p1', 'scATAC']]);
+    assert.equal(r.mendSplitTags(out), out, 'mended once');
+    // A table whose last column is the writer's own is left alone.
+    const own = '| a | b |\n| --- | --- |\n| 1 | |\n';
+    assert.equal(r.mendSplitTags(own), own);
+    // Outside a table, a tag's pipe is plain and is left.
+    const plain = 'A ==b==%%[!review|p1] J, 2026-10-23: x%%';
+    assert.equal(r.mendSplitTags(plain), plain);
+});

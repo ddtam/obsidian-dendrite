@@ -1100,3 +1100,22 @@ test('a link to a card prints as the section it falls under, or its own ' +
         'Files are in section 1.1, kept as in the storage plan, see Other ' +
         'note and section 1.');
 });
+
+test('a card\'s alias, for finding it by name: a table\'s or figure\'s ' +
+     'caption, named as one, or a heading card\'s heading', () => {
+    const t = 'Data sizes, by assay. %%[!review] A, 2026-10-23: x%%\n\n' +
+        '| a | b |\n| --- | --- |\n| 1 | 2 |';
+    assert.equal(c.cardAlias(t, 'table'), 'Table: Data sizes, by assay.');
+    assert.equal(c.cardAlias('![[fig.png]]\n**How** the [[G-x|model]] ' +
+        'works', 'figure'), 'Figure: How the model works');
+    assert.equal(c.cardAlias('[[Model graphic.png]]\n\n# Graphical abstract',
+                             'figure'), 'Figure: Graphical abstract',
+                 'an image linked on its own line is not caption');
+    assert.equal(c.cardAlias('# 2.1 ==Aims==\n\nText.', null), '2.1 Aims');
+    assert.equal(c.cardAlias('Just prose.', null), null);
+    assert.equal(c.cardAlias('| a |\n| - |', 'table'), null,
+                 'no caption');
+    const long = 'word '.repeat(40);
+    const a = c.cardAlias(`# ${long}`, null);
+    assert.ok(a.length <= 101 && a.endsWith('…'), 'kept short');
+});

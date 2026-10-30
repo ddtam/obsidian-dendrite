@@ -529,6 +529,42 @@ function floatText(body, kind, label) {
     return parts.filter(Boolean).join('\n\n');
 }
 
+const IMAGE_LINK =
+    /^\s*!?\[\[[^\]|]+\.(png|jpe?g|gif|svg|webp|avif|bmp)(\|[^\]]*)?\]\]\s*$/i;
+
+/**
+ * The alias a card is found by in Obsidian's link search, or null: a
+ * table's or figure's caption, as floatText takes it, after "Table: " or
+ * "Figure: ", or a card's heading where its first line is one; in plain
+ * words, without comments, marks or links, and cut short at a word.
+ */
+function cardAlias(body, kind) {
+    const lines = stripComments(body || '').split('\n');
+    const plain = (s) => s
+        .replace(/\[\[[^\]|]*\|([^\]]+)\]\]/g, '$1')
+        .replace(/\[\[([^\]]+)\]\]/g, '$1')
+        .replace(/[*_`=~]/g, '').replace(/\s+/g, ' ').trim();
+    let out = '';
+    if (KINDS.includes(kind)) {
+        // An image linked on its own line, [[a.png]], is the figure's
+        // image too, not words of its caption.
+        const isBody = (l) => kind === 'table' ? TABLE_LINE.test(l) :
+            IMAGE_LINE.test(l) || IMAGE_LINK.test(l);
+        const caption = plain(lines.filter((l) => !isBody(l))
+            .map((l) => l.trim().replace(/^#{1,6}\s+/, ''))
+            .filter(Boolean).join(' '));
+        if (caption) {
+            out = (kind === 'table' ? 'Table: ' : 'Figure: ') + caption;
+        }
+    } else {
+        const first = lines.find((l) => l.trim());
+        const h = first && HEADING.exec(first.trim());
+        if (h) out = plain(h[2]);
+    }
+    if (out.length > 100) out = out.slice(0, 100).replace(/\s+\S*$/, '') + '…';
+    return out || null;
+}
+
 /**
  * How a link to each card of `nodes` prints: `section 4.3.1`, the
  * number of the section it falls under, or, where sections are not
@@ -1832,7 +1868,7 @@ module.exports = {
     inlineToReferences, inlineFootnotes, footnoteNumbers,
     footnoteLabel, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
-    lineDiff, charDiff, printedOnly, HEADING,
+    lineDiff, charDiff, printedOnly, HEADING, cardAlias,
     deriveLabel, stripComments, validPrefix, newId, withPrefix,
     formerPrefixes, makeNode, makeRoot,
     insertSibling, appendChild, moveWithin, indent, outdent, remove,

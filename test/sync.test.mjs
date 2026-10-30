@@ -471,8 +471,10 @@ test('a card open in its editor takes a synced change it has no unsaved ' +
     // Typing on writes on top of the synced text, not the old.
     type(a.view, '# Aims\nHere, and from home. More.\n');
     await a.view.endEdit();
+    // With the heading's alias, written for the typing, not the sync.
     assert.equal(a.read(cardPath('G-aaaaa')), '---\ndendrite_status: ' +
-                 'draft\n---\n# Aims\nHere, and from home. More.\n');
+                 'draft\naliases:\n  - Aims\ndendrite_alias: Aims\n---\n' +
+                 '# Aims\nHere, and from home. More.\n');
 });
 
 test('a synced change to a card with unsaved typing is not saved over; ' +

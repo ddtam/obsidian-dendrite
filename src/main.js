@@ -1005,20 +1005,83 @@ class DendriteView extends ItemView {
     }
 
     /**
-     * Add the index's and every card's type value, where missing. Run
-     * from a command, never on opening, since every device would make
-     * the same writes at once.
+     * Add the index's and every card's type value, where missing, and
+     * each card's alias (syncAlias). Run from a command, never on
+     * opening, since every device would make the same writes at once.
      */
     async sweepTypes() {
         const s = this.plugin.settings;
         if (s.indexType && this.file) {
             await addType(this.app, this.file, s.indexType);
         }
-        if (!s.cardType) return;
         for (const n of core.allNodes(this.root)) {
             const f = this.cardFile(n.id);
-            if (f) await addType(this.app, f, s.cardType);
+            if (f && s.cardType) await addType(this.app, f, s.cardType);
+            await this.syncAlias(n.id);
         }
+    }
+
+    /**
+     * A table's, figure's or heading card's alias, kept in step with its
+     * caption or heading (core.cardAlias), for finding it with [[; only
+     * on a card whose text prints, so notes, scaffolding and old versions
+     * are not found among what the document says.
+     */
+    async syncAlias(id) {
+        const f = this.cardFile(id);
+        if (!f) return;
+        const body = core.splitFrontmatter(await this.app.vault.read(f)).body;
+        const alias = this.printsOwn(id) ?
+            core.cardAlias(body, this.kindOf(id)) : null;
+        await keepAlias(this.app, f, alias);
+    }
+
+    /**
+     * Mend every card's tables a table editor split at a priority's pipe
+     * (review.mendSplitTags), as one step to undo; says how many.
+     */
+    async mendTables() {
+        if (this.editing) await this.endEdit();
+        const restores = [];
+        const mended = [];
+        for (const n of core.allNodes(this.root)) {
+            const f = this.cardFile(n.id);
+            if (!f) continue;
+            const data = await this.app.vault.read(f);
+            const { body } = core.splitFrontmatter(data);
+            const out = review.mendSplitTags(body);
+            if (out === body) continue;
+            await this.writeCard(f, (d) => core.splitFrontmatter(d).fm + out);
+            restores.push({ path: f.path, text: data, ifBody: out });
+            mended.push(n.id);
+        }
+        if (restores.length) {
+            this.pushUndo({ active: this.active, files: [], text: true,
+                            restores });
+            for (const id of mended) {
+                this.invalidate(id);
+                await this.renderCard(id);
+            }
+        }
+        new Notice(restores.length ? `Dendrite: mended the tables of ` +
+            `${restores.length} card${restores.length === 1 ? '' : 's'}: ` +
+            `${mended.map((id) => core.shortId(id)).join(', ')}.` :
+            'Dendrite: no table needed mending.');
+    }
+
+    /**
+     * Whether a card's own text prints: it is not scaffolding, and
+     * neither it nor a card above it is left out, as an old version is.
+     */
+    printsOwn(id) {
+        const node = this.byId.get(id);
+        if (!node) return false;
+        const roleOf = (x) => this.printRoleOf(x);
+        if (core.roleFor(node, roleOf) === 'scaffolding') return false;
+        for (let n = node; n && n.id; n = n.parent) {
+            if (core.roleFor(n, roleOf) === 'notes') return false;
+        }
+        return true;
     }
 
     loadText(text) {
@@ -3805,6 +3868,7 @@ class DendriteView extends ItemView {
             await this.setStatus(ed.id, 'draft');
         }
         if (ed.changed) await this.plugin.lintCard(ed.file);
+        if (ed.changed && !ed.fromSync) await this.syncAlias(ed.id);
         // The editor's own history goes with it, so the visit becomes one
         // step in the card's text history, undone from inside the card.
         if (ed.changed && !ed.recorded) {
@@ -5050,6 +5114,9 @@ class DendriteView extends ItemView {
         // This visit ends at what it saved; the sync is not part of it.
         if (ed.changed) this.recordVisit(ed.id, ed.before, ed.saved);
         ed.recorded = true;
+        // Closed below to take the synced change: nothing is written in
+        // response to it.
+        ed.fromSync = true;
         if (ed.dirty) {
             ed.dirty = false;
             this.held.set(ed.id, fm + ed.editor.value);
@@ -5788,6 +5855,8 @@ class DendriteView extends ItemView {
             await this.writeCard(f, (d) => core.splitFrontmatter(d).fm +
                                  body);
         }
+        // Undone with the rest: the undo puts back the whole file.
+        await this.syncAlias(id);
         this.pushUndo({ active: this.active, files: [], created: [],
                         restores: [{ path: f.path, text: data,
                                      ifBody: body }], text: false });
@@ -5799,6 +5868,12 @@ class DendriteView extends ItemView {
     async setRole(id, role) {
         const f = this.cardFile(id);
         if (f) await writeProps(this.app, f, { dendrite_role: role });
+        // Printing or not, it and the cards under it gain or lose their
+        // aliases.
+        const node = this.byId.get(id);
+        for (const n of node ? [node, ...core.allNodes(node)] : []) {
+            await this.syncAlias(n.id);
+        }
         await this.sweepStatuses();
     }
 
@@ -11004,6 +11079,28 @@ async function addType(app, file, value) {
     });
 }
 
+/**
+ * A card's alias, `alias` or none for null, in its aliases property,
+ * the one Dendrite gave it before, kept in dendrite_alias, replaced and
+ * any of the writer's own left; nothing is written if it is there.
+ */
+async function keepAlias(app, file, alias) {
+    const list = (v) => Array.isArray(v) ? v.map(String) :
+        (v ? [String(v)] : []);
+    const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
+    if ((fm.dendrite_alias || null) === alias &&
+        (!alias || list(fm.aliases).includes(alias))) return;
+    await app.fileManager.processFrontMatter(file, (front) => {
+        const was = front.dendrite_alias;
+        const out = list(front.aliases).filter((a) => a !== was);
+        if (alias && !out.includes(alias)) out.push(alias);
+        if (out.length) front.aliases = out;
+        else delete front.aliases;
+        if (alias) front.dendrite_alias = alias;
+        else delete front.dendrite_alias;
+    });
+}
+
 async function writeProps(app, file, draft) {
     if (!Object.keys(draft).length) return;
     await app.fileManager.processFrontMatter(file, (fm) => {
@@ -11714,7 +11811,10 @@ module.exports = class DendritePlugin extends Plugin {
             'suggested changes from the linked Google Doc', false,
             (v) => v.pullGdoc());
         viewCommand('add-types', 'Add the type property to the index ' +
-            'and every card', false, (v) => v.sweepTypes());
+            'and every card, and aliases to tables, figures and headings',
+            false, (v) => v.sweepTypes());
+        viewCommand('mend-tables', 'Mend tables split at a comment\'s ' +
+            'priority', false, (v) => v.mendTables());
         viewCommand('merge-into-above', 'Merge card into the card above',
             false, (v) => v.merge('above'));
         viewCommand('merge-into-parent', 'Merge card into its parent',

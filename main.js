@@ -364,6 +364,25 @@ var require_core = __commonJS({
       const parts = kind === "table" ? [head, content] : [content, head];
       return parts.filter(Boolean).join("\n\n");
     }
+    var IMAGE_LINK = /^\s*!?\[\[[^\]|]+\.(png|jpe?g|gif|svg|webp|avif|bmp)(\|[^\]]*)?\]\]\s*$/i;
+    function cardAlias(body, kind) {
+      const lines = stripComments(body || "").split("\n");
+      const plain = (s) => s.replace(/\[\[[^\]|]*\|([^\]]+)\]\]/g, "$1").replace(/\[\[([^\]]+)\]\]/g, "$1").replace(/[*_`=~]/g, "").replace(/\s+/g, " ").trim();
+      let out = "";
+      if (KINDS.includes(kind)) {
+        const isBody = (l) => kind === "table" ? TABLE_LINE.test(l) : IMAGE_LINE.test(l) || IMAGE_LINK.test(l);
+        const caption = plain(lines.filter((l) => !isBody(l)).map((l) => l.trim().replace(/^#{1,6}\s+/, "")).filter(Boolean).join(" "));
+        if (caption) {
+          out = (kind === "table" ? "Table: " : "Figure: ") + caption;
+        }
+      } else {
+        const first = lines.find((l) => l.trim());
+        const h = first && HEADING.exec(first.trim());
+        if (h) out = plain(h[2]);
+      }
+      if (out.length > 100) out = out.slice(0, 100).replace(/\s+\S*$/, "") + "\u2026";
+      return out || null;
+    }
     function sectionRefs(nodes, bodyOf, numbers) {
       const out = /* @__PURE__ */ new Map();
       const walk = (list, under) => {
@@ -1347,6 +1366,7 @@ var require_core = __commonJS({
       charDiff,
       printedOnly,
       HEADING,
+      cardAlias,
       deriveLabel,
       stripComments,
       validPrefix,
@@ -2539,6 +2559,33 @@ var require_review = __commonJS({
           ...x.open ? { id: x.id, open: x.open } : {}
         };
       });
+    }
+    function mendSplitTags(md) {
+      const lines = md.split("\n");
+      const isRow = (l) => /^\s*\|/.test(l);
+      const cells = (l) => (l.match(/(?<!\\)\|/g) || []).length - 1;
+      const SPLIT = /\[!(review|suggest)\s*\|\s*(p[123])\s*\]/g;
+      for (let i = 0; i < lines.length; i++) {
+        if (!isRow(lines[i])) continue;
+        let j = i;
+        while (j < lines.length && isRow(lines[j])) {
+          lines[j] = lines[j].replace(SPLIT, "[!$1\\|$2]");
+          j++;
+        }
+        const [head, rule, ...rows] = lines.slice(i, j);
+        const last = /\|([^|]*)\|\s*$/;
+        const n = cells(head);
+        const without2 = (r) => cells(r) === n - 1 || cells(r) === n && !last.exec(r)[1].trim();
+        if (rule && /^[\s|:-]+$/.test(rule) && rows.length && !last.exec(head)[1].trim() && cells(rule) === n && rows.some((r) => cells(r) === n - 1) && rows.every(without2)) {
+          for (let k = i; k < j; k++) {
+            if (cells(lines[k]) === n) {
+              lines[k] = lines[k].replace(last, "|");
+            }
+          }
+        }
+        i = j;
+      }
+      return lines.join("\n");
     }
     function setPriority(md, n, p) {
       const it = reviewItems(md)[n];
@@ -3748,6 +3795,7 @@ var require_review = __commonJS({
       PRIORITIES,
       setFoldUntilClicked,
       priorityChip,
+      mendSplitTags,
       replaceReplies,
       fillAddressed,
       suggestInto,
@@ -7336,20 +7384,80 @@ var DendriteView = class extends ItemView {
     this.versionsChecked = this.checkVersions().catch((err) => console.error("Dendrite: version check failed", err));
   }
   /**
-   * Add the index's and every card's type value, where missing. Run
-   * from a command, never on opening, since every device would make
-   * the same writes at once.
+   * Add the index's and every card's type value, where missing, and
+   * each card's alias (syncAlias). Run from a command, never on
+   * opening, since every device would make the same writes at once.
    */
   async sweepTypes() {
     const s = this.plugin.settings;
     if (s.indexType && this.file) {
       await addType(this.app, this.file, s.indexType);
     }
-    if (!s.cardType) return;
     for (const n of core.allNodes(this.root)) {
       const f = this.cardFile(n.id);
-      if (f) await addType(this.app, f, s.cardType);
+      if (f && s.cardType) await addType(this.app, f, s.cardType);
+      await this.syncAlias(n.id);
     }
+  }
+  /**
+   * A table's, figure's or heading card's alias, kept in step with its
+   * caption or heading (core.cardAlias), for finding it with [[; only
+   * on a card whose text prints, so notes, scaffolding and old versions
+   * are not found among what the document says.
+   */
+  async syncAlias(id) {
+    const f = this.cardFile(id);
+    if (!f) return;
+    const body = core.splitFrontmatter(await this.app.vault.read(f)).body;
+    const alias = this.printsOwn(id) ? core.cardAlias(body, this.kindOf(id)) : null;
+    await keepAlias(this.app, f, alias);
+  }
+  /**
+   * Mend every card's tables a table editor split at a priority's pipe
+   * (review.mendSplitTags), as one step to undo; says how many.
+   */
+  async mendTables() {
+    if (this.editing) await this.endEdit();
+    const restores = [];
+    const mended = [];
+    for (const n of core.allNodes(this.root)) {
+      const f = this.cardFile(n.id);
+      if (!f) continue;
+      const data = await this.app.vault.read(f);
+      const { body } = core.splitFrontmatter(data);
+      const out = review.mendSplitTags(body);
+      if (out === body) continue;
+      await this.writeCard(f, (d) => core.splitFrontmatter(d).fm + out);
+      restores.push({ path: f.path, text: data, ifBody: out });
+      mended.push(n.id);
+    }
+    if (restores.length) {
+      this.pushUndo({
+        active: this.active,
+        files: [],
+        text: true,
+        restores
+      });
+      for (const id of mended) {
+        this.invalidate(id);
+        await this.renderCard(id);
+      }
+    }
+    new Notice(restores.length ? `Dendrite: mended the tables of ${restores.length} card${restores.length === 1 ? "" : "s"}: ${mended.map((id) => core.shortId(id)).join(", ")}.` : "Dendrite: no table needed mending.");
+  }
+  /**
+   * Whether a card's own text prints: it is not scaffolding, and
+   * neither it nor a card above it is left out, as an old version is.
+   */
+  printsOwn(id) {
+    const node = this.byId.get(id);
+    if (!node) return false;
+    const roleOf = (x) => this.printRoleOf(x);
+    if (core.roleFor(node, roleOf) === "scaffolding") return false;
+    for (let n = node; n && n.id; n = n.parent) {
+      if (core.roleFor(n, roleOf) === "notes") return false;
+    }
+    return true;
   }
   loadText(text) {
     const { body } = core.splitFrontmatter(text);
@@ -9939,6 +10047,7 @@ var DendriteView = class extends ItemView {
       await this.setStatus(ed.id, "draft");
     }
     if (ed.changed) await this.plugin.lintCard(ed.file);
+    if (ed.changed && !ed.fromSync) await this.syncAlias(ed.id);
     if (ed.changed && !ed.recorded) {
       const after = core.splitFrontmatter(
         await this.app.vault.read(ed.file)
@@ -11118,6 +11227,7 @@ var DendriteView = class extends ItemView {
     clearTimeout(ed.timer);
     if (ed.changed) this.recordVisit(ed.id, ed.before, ed.saved);
     ed.recorded = true;
+    ed.fromSync = true;
     if (ed.dirty) {
       ed.dirty = false;
       this.held.set(ed.id, fm + ed.editor.value);
@@ -11790,6 +11900,7 @@ var DendriteView = class extends ItemView {
       body = float.compose("table", body, float.STARTER_TABLE);
       await this.writeCard(f, (d) => core.splitFrontmatter(d).fm + body);
     }
+    await this.syncAlias(id);
     this.pushUndo({
       active: this.active,
       files: [],
@@ -11808,6 +11919,10 @@ var DendriteView = class extends ItemView {
   async setRole(id, role) {
     const f = this.cardFile(id);
     if (f) await writeProps(this.app, f, { dendrite_role: role });
+    const node = this.byId.get(id);
+    for (const n of node ? [node, ...core.allNodes(node)] : []) {
+      await this.syncAlias(n.id);
+    }
     await this.sweepStatuses();
   }
   // ---- card status ----------------------------------------------------
@@ -16668,6 +16783,20 @@ async function addType(app, file, value) {
     front.type = list;
   });
 }
+async function keepAlias(app, file, alias) {
+  const list = (v) => Array.isArray(v) ? v.map(String) : v ? [String(v)] : [];
+  const fm = app.metadataCache.getFileCache(file)?.frontmatter || {};
+  if ((fm.dendrite_alias || null) === alias && (!alias || list(fm.aliases).includes(alias))) return;
+  await app.fileManager.processFrontMatter(file, (front) => {
+    const was = front.dendrite_alias;
+    const out = list(front.aliases).filter((a) => a !== was);
+    if (alias && !out.includes(alias)) out.push(alias);
+    if (out.length) front.aliases = out;
+    else delete front.aliases;
+    if (alias) front.dendrite_alias = alias;
+    else delete front.dendrite_alias;
+  });
+}
 async function writeProps(app, file, draft) {
   if (!Object.keys(draft).length) return;
   await app.fileManager.processFrontMatter(file, (fm) => {
@@ -17223,7 +17352,13 @@ module.exports = class DendritePlugin extends Plugin {
       false,
       (v) => v.pullGdoc()
     );
-    viewCommand("add-types", "Add the type property to the index and every card", false, (v) => v.sweepTypes());
+    viewCommand(
+      "add-types",
+      "Add the type property to the index and every card, and aliases to tables, figures and headings",
+      false,
+      (v) => v.sweepTypes()
+    );
+    viewCommand("mend-tables", "Mend tables split at a comment's priority", false, (v) => v.mendTables());
     viewCommand(
       "merge-into-above",
       "Merge card into the card above",

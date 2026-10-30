@@ -6884,3 +6884,63 @@ test('Ctrl+Enter in a reply box sends the reply, held by the box ahead of ' +
     assert.equal(replies.length, 1, 'sent once');
     assert.match(text(cardPath('G-aaaaa')), /Forty\./);
 });
+
+test('tables, figures and heading cards keep an alias from their caption ' +
+     'or heading, found by Obsidian\'s link search; the writer\'s own ' +
+     'aliases are kept', async () => {
+    const { view, text } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|t]]\n- [[G-bbbbb|h]]\n- [[G-ccccc|n]]\n' +
+        '    - [[G-ddddd|u]]\n',
+        { 'G-aaaaa': '---\naliases:\n  - Mine\n---\nData sizes.\n\n' +
+              '| a |\n| --- |\n| 1 |',
+          'G-bbbbb': '# Aims\n\nText.',
+          'G-ccccc': '---\ndendrite_role: notes\n---\n# Ideas\n\nx',
+          'G-ddddd': '# Under ideas\n\ny' });
+    const raw = (id) => view.app.vault.text.get(cardPath(id));
+    await view.setKind('G-aaaaa', 'table');
+    await tick(10);
+    assert.match(raw('G-aaaaa'),
+                 /aliases:\n  - Mine\n  - "?Table: Data sizes\."?\n/);
+    // A heading card's, when its heading is edited.
+    await view.startEdit('G-bbbbb');
+    type(view, '# Specific aims\n\nText.');
+    await view.endEdit();
+    assert.match(raw('G-bbbbb'), /aliases:\n  - Specific aims\n/);
+    // A caption changed, filled in by the sweep: the old one replaced,
+    // the writer's own kept.
+    const f = view.app.vault.getAbstractFileByPath(cardPath('G-aaaaa'));
+    await view.app.vault.modify(f, raw('G-aaaaa')
+        .replace('---\nData sizes.', '---\nSizes by assay.'));
+    await view.sweepTypes();
+    assert.match(raw('G-aaaaa'),
+                 /aliases:\n  - Mine\n  - "?Table: Sizes by assay\."?\n/);
+    assert.doesNotMatch(raw('G-aaaaa'), /Data sizes\./);
+    // Text that does not print has none: a card left out, and one under it.
+    assert.doesNotMatch(raw('G-ccccc'), /aliases/);
+    assert.doesNotMatch(raw('G-ddddd'), /aliases/);
+    // Printing once its role is cleared, they gain them; left out, lose.
+    await view.setRole('G-ccccc', null);
+    assert.match(raw('G-ccccc'), /aliases:\n  - Ideas\n/);
+    assert.match(raw('G-ddddd'), /aliases:\n  - Under ideas\n/);
+    await view.setRole('G-ccccc', 'notes');
+    assert.doesNotMatch(raw('G-ddddd'), /aliases/);
+});
+
+test('the command to mend tables split at a priority mends every card\'s ' +
+     'and is undone as one step', async () => {
+    const torn = '| a | b | |\n| --- | --- | --- |\n' +
+        '| %%{1%%x%%}1 [!review   | p3] J, 2026-10-23: Why?%% | 2 |\n';
+    const { view, text } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|t]]\n- [[G-bbbbb|u]]\n',
+        { 'G-aaaaa': torn, 'G-bbbbb': 'Plain.' });
+    h.notices.length = 0;
+    await view.mendTables();
+    assert.equal(text(cardPath('G-aaaaa')), '| a | b |\n| --- | --- |\n' +
+        '| %%{1%%x%%}1 [!review\\|p3] J, 2026-10-23: Why?%% | 2 |\n');
+    assert.equal(text(cardPath('G-bbbbb')), 'Plain.', 'left alone');
+    assert.ok(h.notices.some((n) => /mended the tables of 1 card: aaaaa/
+        .test(n)));
+    await view.doUndo();
+    await tick(20);
+    assert.equal(text(cardPath('G-aaaaa')), torn, 'undone');
+});

@@ -1038,6 +1038,47 @@ function reviewItems(md) {
 }
 
 /**
+ * A card's markdown with its tables mended where a table editor took a
+ * priority's pipe, written unescaped in a row, for a cell's edge: each
+ * such tag rejoined and escaped, [!review\|p3], and the empty last
+ * column the editor then gave the table taken off, where it is empty
+ * in the header and every row that has it, and some row is without it.
+ * A table's own last column, named or filled, is left; so is a tag's
+ * plain pipe outside a table.
+ */
+function mendSplitTags(md) {
+    const lines = md.split('\n');
+    const isRow = (l) => /^\s*\|/.test(l);
+    const cells = (l) => (l.match(/(?<!\\)\|/g) || []).length - 1;
+    const SPLIT = /\[!(review|suggest)\s*\|\s*(p[123])\s*\]/g;
+    for (let i = 0; i < lines.length; i++) {
+        if (!isRow(lines[i])) continue;
+        let j = i;
+        while (j < lines.length && isRow(lines[j])) {
+            lines[j] = lines[j].replace(SPLIT, '[!$1\\|$2]');
+            j++;
+        }
+        const [head, rule, ...rows] = lines.slice(i, j);
+        const last = /\|([^|]*)\|\s*$/;
+        const n = cells(head);
+        // Each row without the column, or with it empty.
+        const without = (r) => cells(r) === n - 1 ||
+            (cells(r) === n && !last.exec(r)[1].trim());
+        if (rule && /^[\s|:-]+$/.test(rule) && rows.length &&
+            !last.exec(head)[1].trim() && cells(rule) === n &&
+            rows.some((r) => cells(r) === n - 1) && rows.every(without)) {
+            for (let k = i; k < j; k++) {
+                if (cells(lines[k]) === n) {
+                    lines[k] = lines[k].replace(last, '|');
+                }
+            }
+        }
+        i = j;
+    }
+    return lines.join('\n');
+}
+
+/**
  * A card's markdown with its `n`th comment's priority set to `p`, one of
  * p1 to p3, or taken off for null; as it was where there is no such
  * comment.
@@ -2681,7 +2722,7 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    findSuggestion, reviseSuggestion,
                    threadIds, forReviewers, replyRow,
                    addressed, awaits, passesFilter, setPriority, PRIORITIES,
-                   setFoldUntilClicked, priorityChip,
+                   setFoldUntilClicked, priorityChip, mendSplitTags,
                    replaceReplies, fillAddressed,
                    suggestInto,
                    firstOfComment, countComments,
