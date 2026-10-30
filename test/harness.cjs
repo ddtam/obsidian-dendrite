@@ -194,6 +194,13 @@ function makeApp() {
             return [...files.values()].filter((f) => f.path.endsWith('.md'));
         },
         getFiles() { return [...files.values()]; },
+        /** A file or an empty folder taken out. */
+        async delete(f) {
+            files.delete(f.path);
+            text.delete(f.path);
+            folders.delete(f.path);
+            ev.trigger('delete', f);
+        },
         /** Move a note, links to it left as they are. */
         async rename(f, to) {
             if (files.has(to)) throw new Error('exists: ' + to);

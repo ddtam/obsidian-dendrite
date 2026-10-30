@@ -660,7 +660,7 @@ test('a card one device puts back to text it held before, by resolving ' +
     const a = await device(FILES, clock, 'nix');
     const b = await device(FILES, clock, 'laptop');
     const card = cardPath('G-aaaaa');
-    const rec = 'W/Grant/devices/laptop.json';
+    const rec = 'W/Grant/_dendrite/devices/laptop.json';
     // B adds a comment; A receives it.
     clock.t += WINDOW_MS + 1;
     await b.view.startEdit('G-aaaaa');
@@ -729,6 +729,7 @@ test('a card written with no board open, as by the review endpoint, is ' +
     const text = app.vault.text.get(cardPath('G-aaaaa'));
     // A board opening later reads it as from outside: not an old copy.
     assert.equal(await p.history.observe(key, text, text, true), null);
-    const rec = JSON.parse(app.vault.text.get('W/Grant/devices/nix.json'));
+    const rec = JSON.parse(app.vault.text.get(
+        'W/Grant/_dendrite/devices/nix.json'));
     assert.ok(rec.cards['G-aaaaa'].wrote.h, 'in the record for the others');
 });

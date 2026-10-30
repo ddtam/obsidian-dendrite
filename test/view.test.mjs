@@ -7481,5 +7481,45 @@ test('review log entries from several files merge in time order, a line ' +
     const b = { at: '2026-10-30T09:00:00Z', action: 'resolve', keys: ['b'] };
     assert.deepEqual(reviewlog.merge([[a], [b, a]]), [b, a]);
     assert.equal(reviewlog.devicePath('W/Grant/Grant.md', 'my laptop'),
-                 'W/Grant/review-log/my_laptop.jsonl');
+                 'W/Grant/_dendrite/review-log/my_laptop.jsonl');
+});
+
+test('Dendrite\'s own files are moved under _dendrite beside the index: ' +
+     'the single review log as the shared one, and this device\'s log ' +
+     'and record from where 0.34.0 put them, the old folders taken out ' +
+     'once empty and nothing lost', async () => {
+    const { tidyKept, readReviewLog } = require('../src/main.js');
+    const { Ledger } = require('../src/ledger.js');
+    const reviewlog = require('../src/reviewlog.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    app.vault.folders.add('W/Grant/devices');
+    app.vault.folders.add('W/Grant/review-log');
+    await app.vault.create(INDEX, '- [[G-aaaaa|a]]\n');
+    const e = (at, k) => reviewlog.line({ at, action: 'resolve',
+        card: 'G-aaaaa', text: 'x', keys: [k] });
+    await app.vault.create('W/Grant/review-log.jsonl',
+                           e('2026-10-29T10:00:00Z', 'old'));
+    await app.vault.create('W/Grant/review-log/nix.jsonl',
+                           e('2026-10-30T22:00:00Z', 'mine'));
+    await app.vault.create('W/Grant/review-log/laptop.jsonl',
+                           e('2026-10-30T22:10:00Z', 'theirs'));
+    await app.vault.create('W/Grant/devices/nix.json', JSON.stringify(
+        { device: 'nix', cards: { 'G-aaaaa': { wrote: { h: 'x', at: 1 } } } }));
+    const index = app.vault.getAbstractFileByPath(INDEX);
+    const ledger = new Ledger(app.vault, 'nix', () => 5, 0);
+    await tidyKept(app, index, ledger, 'nix');
+    const has = (p) => !!app.vault.getAbstractFileByPath(p);
+    assert.ok(!has('W/Grant/review-log.jsonl'), 'the single log moved');
+    assert.ok(has('W/Grant/_dendrite/review-log/shared.jsonl'));
+    assert.ok(!has('W/Grant/review-log/nix.jsonl'), 'this device\'s moved');
+    assert.ok(has('W/Grant/_dendrite/review-log/nix.jsonl'));
+    assert.ok(has('W/Grant/review-log/laptop.jsonl'),
+              'another device\'s is left to it');
+    assert.ok(!has('W/Grant/devices/nix.json'));
+    assert.ok(!has('W/Grant/devices'), 'its folder gone, empty');
+    assert.deepEqual(JSON.parse(app.vault.text.get(
+        'W/Grant/_dendrite/devices/nix.json')).cards['G-aaaaa'].wrote.h, 'x');
+    assert.deepEqual((await readReviewLog(app, index)).map((x) => x.keys[0]),
+                     ['old', 'mine', 'theirs'], 'all of it read');
 });

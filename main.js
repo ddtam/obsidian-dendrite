@@ -6516,6 +6516,7 @@ var require_ledger = __commonJS({
   "src/ledger.js"(exports2, module2) {
     "use strict";
     var FLUSH_MS = 3e3;
+    var HOME = "_dendrite";
     function fileName(device) {
       return String(device).replace(/[^\w.-]+/g, "_") || "device";
     }
@@ -6537,7 +6538,11 @@ var require_ledger = __commonJS({
       /** The devices folder of the manuscript whose index is `index`. */
       dirOf(index) {
         const parent = index.parent ? index.parent.path : "";
-        return (parent && parent !== "/" ? parent + "/" : "") + "devices";
+        return (parent && parent !== "/" ? parent + "/" : "") + `${HOME}/devices`;
+      }
+      /** Where 0.34.0 kept the devices folder `dir` now is. */
+      oldDirOf(dir) {
+        return dir.slice(0, -`${HOME}/devices`.length) + "devices";
       }
       pathOf(dir) {
         return `${dir}/${fileName(this.device)}.json`;
@@ -6545,11 +6550,16 @@ var require_ledger = __commonJS({
       async own(dir) {
         if (!this.mine.has(dir)) {
           let rec = null;
-          try {
-            const f = this.vault.getAbstractFileByPath(this.pathOf(dir));
-            if (f) rec = JSON.parse(await this.vault.read(f));
-          } catch (err) {
-            rec = null;
+          for (const d of [dir, this.oldDirOf(dir)]) {
+            try {
+              const f = this.vault.getAbstractFileByPath(
+                this.pathOf(d)
+              );
+              if (f) rec = JSON.parse(await this.vault.read(f));
+            } catch (err) {
+              rec = null;
+            }
+            if (rec) break;
           }
           this.mine.set(dir, rec && rec.cards ? rec : { device: this.device, cards: {} });
         }
@@ -6587,24 +6597,32 @@ var require_ledger = __commonJS({
           if (f) {
             await this.vault.modify(f, text);
           } else {
-            if (!this.vault.getAbstractFileByPath(dir)) {
-              try {
-                await this.vault.createFolder(dir);
-              } catch (err) {
-              }
-            }
+            await makeFolders2(this.vault, dir);
             await this.vault.create(path, text);
           }
+          await moveDone2(this.vault, this.pathOf(this.oldDirOf(dir)));
         }
+      }
+      /** This device's record moved from where 0.34.0 kept it, if there. */
+      async tidy(index) {
+        const dir = this.dirOf(index);
+        if (!this.vault.getAbstractFileByPath(this.pathOf(
+          this.oldDirOf(dir)
+        ))) return;
+        await this.own(dir);
+        this.dirty.add(dir);
+        await this.flush();
       }
       /** The other devices' records in `dir`, read once until one changes. */
       async others(dir) {
         if (this.theirs.has(dir)) return this.theirs.get(dir);
         const out = [];
-        const mine = this.pathOf(dir);
-        const here = this.vault.getFiles().filter((f) => f.path.startsWith(dir + "/") && !f.path.slice(dir.length + 1).includes("/"));
+        const old = this.oldDirOf(dir);
+        const mine = /* @__PURE__ */ new Set([this.pathOf(dir), this.pathOf(old)]);
+        const within = (d) => (f) => f.path.startsWith(d + "/") && !f.path.slice(d.length + 1).includes("/");
+        const here = this.vault.getFiles().filter((f) => within(dir)(f) || within(old)(f));
         for (const f of here) {
-          if (f.path === mine || !f.path.endsWith(".json")) continue;
+          if (mine.has(f.path) || !f.path.endsWith(".json")) continue;
           try {
             const rec = JSON.parse(await this.vault.read(f));
             if (rec && rec.cards) out.push(rec);
@@ -6633,15 +6651,47 @@ var require_ledger = __commonJS({
        * is read again; answers whether it was one.
        */
       changed(path) {
-        const m = /^(.*\/)?devices\/[^/]+\.json$/.exec(path);
+        const m = /^(.*?\/)?(?:_dendrite\/)?devices\/[^/]+\.json$/.exec(path);
         if (!m) return false;
-        const dir = (m[1] || "") + "devices";
-        if (path === this.pathOf(dir)) return false;
+        const dir = (m[1] || "") + `${HOME}/devices`;
+        if (path === this.pathOf(dir) || path === this.pathOf(this.oldDirOf(dir))) return false;
         this.theirs.delete(dir);
         return true;
       }
     };
-    module2.exports = { Ledger: Ledger2, fileName, FLUSH_MS };
+    async function makeFolders2(vault, dir) {
+      const parts = dir.split("/");
+      for (let k = 1; k <= parts.length; k++) {
+        const d = parts.slice(0, k).join("/");
+        if (vault.getAbstractFileByPath(d)) continue;
+        try {
+          await vault.createFolder(d);
+        } catch (err) {
+        }
+      }
+    }
+    async function moveDone2(vault, path) {
+      const f = vault.getAbstractFileByPath(path);
+      if (!f) return;
+      await vault.delete(f);
+      const dir = path.slice(0, path.lastIndexOf("/"));
+      const left = vault.getFiles().some((x) => x.path.startsWith(dir + "/"));
+      const folder = vault.getAbstractFileByPath(dir);
+      if (!left && folder) {
+        try {
+          await vault.delete(folder, true);
+        } catch (err) {
+        }
+      }
+    }
+    module2.exports = {
+      Ledger: Ledger2,
+      fileName,
+      makeFolders: makeFolders2,
+      moveDone: moveDone2,
+      HOME,
+      FLUSH_MS
+    };
   }
 });
 
@@ -6651,18 +6701,23 @@ var require_reviewlog = __commonJS({
     "use strict";
     var review2 = require_review();
     var NAME = "review-log.jsonl";
-    var DIR = "review-log";
+    var DIR = "_dendrite/review-log";
+    var OLD_DIR = "review-log";
+    var SHARED = "shared.jsonl";
     function logPath(indexPath) {
       const i = indexPath.lastIndexOf("/");
       return i < 0 ? NAME : indexPath.slice(0, i + 1) + NAME;
     }
-    function logDir(indexPath) {
+    function logDir(indexPath, dir = DIR) {
       const i = indexPath.lastIndexOf("/");
-      return i < 0 ? DIR : indexPath.slice(0, i + 1) + DIR;
+      return i < 0 ? dir : indexPath.slice(0, i + 1) + dir;
     }
-    function devicePath(indexPath, device) {
+    function logDirs(indexPath) {
+      return [logDir(indexPath), logDir(indexPath, OLD_DIR)];
+    }
+    function devicePath(indexPath, device, dir = DIR) {
       const name = String(device).replace(/[^\w.-]+/g, "_") || "device";
-      return `${logDir(indexPath)}/${name}.jsonl`;
+      return `${logDir(indexPath, dir)}/${name}.jsonl`;
     }
     function merge(lists) {
       const seen = /* @__PURE__ */ new Set();
@@ -6729,8 +6784,11 @@ var require_reviewlog = __commonJS({
     module2.exports = {
       NAME,
       DIR,
+      OLD_DIR,
+      SHARED,
       logPath,
       logDir,
+      logDirs,
       devicePath,
       merge,
       entry,
@@ -6950,7 +7008,7 @@ var google = require_google();
 var float = require_float();
 var timing = require_timing();
 var { History, idbStore, hash: versionHash } = require_history();
-var { Ledger } = require_ledger();
+var { Ledger, makeFolders, moveDone } = require_ledger();
 var zotero = require_zotero();
 var reviewlog = require_reviewlog();
 var { PdfLinks } = zotero;
@@ -7710,6 +7768,9 @@ var DendriteView = class extends ItemView {
     this.scheduleOldCopies();
     this.render(true);
     this.refreshInbox();
+    if (this.plugin.ledger) {
+      tidyKept(this.app, this.file, this.plugin.ledger).catch((err) => console.error("Dendrite: moving its files failed", err));
+    }
     this.versionsChecked = this.checkVersions().catch((err) => console.error("Dendrite: version check failed", err));
   }
   /**
@@ -17850,32 +17911,51 @@ timing.wrap(DendritePreview.prototype, "preview", [
 ]);
 var TIMINGS = "timings.jsonl";
 async function readReviewLog(app, index) {
-  const dir = reviewlog.logDir(index.path) + "/";
-  const files = app.vault.getFiles().filter((f) => f.path === reviewlog.logPath(index.path) || f.path.startsWith(dir) && f.path.endsWith(".jsonl") && !f.path.slice(dir.length).includes("/"));
+  const dirs = reviewlog.logDirs(index.path).map((d) => d + "/");
+  const files = app.vault.getFiles().filter((f) => f.path === reviewlog.logPath(index.path) || dirs.some((d) => f.path.startsWith(d) && f.path.endsWith(".jsonl") && !f.path.slice(d.length).includes("/")));
   const lists = [];
   for (const f of files) lists.push(reviewlog.parse(await app.vault.read(f)));
   return reviewlog.merge(lists);
 }
 var logDevice = null;
+async function appendFile(app, path, text) {
+  const f = app.vault.getAbstractFileByPath(path);
+  if (f instanceof TFile) {
+    await app.vault.append(f, text);
+    return;
+  }
+  await makeFolders(app.vault, path.slice(0, path.lastIndexOf("/")));
+  await app.vault.create(path, text);
+}
+async function tidyKept(app, index, ledger, device = logDevice) {
+  const moves = [[
+    reviewlog.logPath(index.path),
+    `${reviewlog.logDir(index.path)}/${reviewlog.SHARED}`
+  ]];
+  if (device) {
+    moves.push([
+      reviewlog.devicePath(
+        index.path,
+        device,
+        reviewlog.OLD_DIR
+      ),
+      reviewlog.devicePath(index.path, device)
+    ]);
+  }
+  for (const [from, to] of moves) {
+    const f = app.vault.getAbstractFileByPath(from);
+    if (!(f instanceof TFile)) continue;
+    const text = await app.vault.read(f);
+    if (text) await appendFile(app, to, text.endsWith("\n") ? text : text + "\n");
+    await moveDone(app.vault, from);
+  }
+  if (ledger) await ledger.tidy(index);
+}
 var logWrites = /* @__PURE__ */ new Map();
 function appendReviewLog(app, index, entries) {
   const path = logDevice ? reviewlog.devicePath(index.path, logDevice) : reviewlog.logPath(index.path);
   const text = entries.map(reviewlog.line).join("");
-  const run = async () => {
-    const f = app.vault.getAbstractFileByPath(path);
-    if (f instanceof TFile) {
-      await app.vault.append(f, text);
-    } else {
-      const dir = path.slice(0, path.lastIndexOf("/"));
-      if (logDevice && !app.vault.getAbstractFileByPath(dir)) {
-        try {
-          await app.vault.createFolder(dir);
-        } catch (err) {
-        }
-      }
-      await app.vault.create(path, text);
-    }
-  };
+  const run = () => appendFile(app, path, text);
   const next = (logWrites.get(path) || Promise.resolve()).then(run, run);
   logWrites.set(path, next);
   return next;
@@ -19926,6 +20006,8 @@ module.exports.DendriteView = DendriteView;
 module.exports.DendritePreview = DendritePreview;
 module.exports.DendriteComments = DendriteComments;
 module.exports.DendriteFloats = DendriteFloats;
+module.exports.tidyKept = tidyKept;
+module.exports.readReviewLog = readReviewLog;
 module.exports.floatInventory = floatInventory;
 module.exports.DendriteSettings = DendriteSettings;
 module.exports.exportStyle = exportStyle;

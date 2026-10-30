@@ -37,7 +37,7 @@ const google = require('./google.js');
 const float = require('./float.js');
 const timing = require('./timing.js');
 const { History, idbStore, hash: versionHash } = require('./history.js');
-const { Ledger } = require('./ledger.js');
+const { Ledger, makeFolders, moveDone } = require('./ledger.js');
 const zotero = require('./zotero.js');
 const reviewlog = require('./reviewlog.js');
 const { PdfLinks } = zotero;
@@ -1057,9 +1057,15 @@ class DendriteView extends ItemView {
         this.scheduleOldCopies();
         this.render(true);
         this.refreshInbox();
-        // Opening writes nothing: a printing card with no status shows as
-        // draft and is given it at the next change made here. Versions
-        // are checked behind the board, one card at a time.
+        // Opening writes nothing to the manuscript: a printing card with
+        // no status shows as draft and is given it at the next change
+        // made here. Versions are checked behind the board, one card at a
+        // time. Only Dendrite's own files left where an older version put
+        // them are moved under _dendrite.
+        if (this.plugin.ledger) {
+            tidyKept(this.app, this.file, this.plugin.ledger).catch((err) =>
+                console.error('Dendrite: moving its files failed', err));
+        }
         this.versionsChecked = this.checkVersions().catch((err) =>
             console.error('Dendrite: version check failed', err));
     }
@@ -12079,10 +12085,11 @@ const TIMINGS = 'timings.jsonl';
 
 /** The review log of the manuscript whose index is `index`. */
 async function readReviewLog(app, index) {
-    const dir = reviewlog.logDir(index.path) + '/';
+    const dirs = reviewlog.logDirs(index.path).map((d) => d + '/');
     const files = app.vault.getFiles().filter((f) => f.path ===
-        reviewlog.logPath(index.path) || (f.path.startsWith(dir) &&
-        f.path.endsWith('.jsonl') && !f.path.slice(dir.length).includes('/')));
+        reviewlog.logPath(index.path) || dirs.some((d) =>
+            f.path.startsWith(d) && f.path.endsWith('.jsonl') &&
+            !f.path.slice(d.length).includes('/')));
     const lists = [];
     for (const f of files) lists.push(reviewlog.parse(await app.vault.read(f)));
     return reviewlog.merge(lists);
@@ -12091,6 +12098,46 @@ async function readReviewLog(app, index) {
 // This device's name for its own review log, set when the plugin loads;
 // unset, the single file older versions wrote.
 let logDevice = null;
+
+/**
+ * Text `text` added to the file at `path`, made with its folders if
+ * there is none.
+ */
+async function appendFile(app, path, text) {
+    const f = app.vault.getAbstractFileByPath(path);
+    if (f instanceof TFile) {
+        await app.vault.append(f, text);
+        return;
+    }
+    await makeFolders(app.vault, path.slice(0, path.lastIndexOf('/')));
+    await app.vault.create(path, text);
+}
+
+/**
+ * What Dendrite keeps for itself moved under _dendrite beside the index:
+ * the single review log of older versions, as the shared log, and this
+ * device's own log and record from where 0.34.0 put them. Each is
+ * copied before its old file is taken out, so a sync meanwhile loses
+ * nothing; a line in both is read once.
+ */
+async function tidyKept(app, index, ledger, device = logDevice) {
+    const moves = [[reviewlog.logPath(index.path),
+                    `${reviewlog.logDir(index.path)}/${reviewlog.SHARED}`]];
+    if (device) {
+        moves.push([reviewlog.devicePath(index.path, device,
+                                         reviewlog.OLD_DIR),
+                    reviewlog.devicePath(index.path, device)]);
+    }
+    for (const [from, to] of moves) {
+        const f = app.vault.getAbstractFileByPath(from);
+        if (!(f instanceof TFile)) continue;
+        const text = await app.vault.read(f);
+        if (text) await appendFile(app, to, text.endsWith('\n') ? text :
+            text + '\n');
+        await moveDone(app.vault, from);
+    }
+    if (ledger) await ledger.tidy(index);
+}
 
 // Each review log's writes, in turn: two comments resolved together
 // cannot both make the log, or append to it at once.
@@ -12104,22 +12151,7 @@ function appendReviewLog(app, index, entries) {
     const path = logDevice ? reviewlog.devicePath(index.path, logDevice) :
         reviewlog.logPath(index.path);
     const text = entries.map(reviewlog.line).join('');
-    const run = async () => {
-        const f = app.vault.getAbstractFileByPath(path);
-        if (f instanceof TFile) {
-            await app.vault.append(f, text);
-        } else {
-            const dir = path.slice(0, path.lastIndexOf('/'));
-            if (logDevice && !app.vault.getAbstractFileByPath(dir)) {
-                try {
-                    await app.vault.createFolder(dir);
-                } catch (err) {
-                    // Made meanwhile.
-                }
-            }
-            await app.vault.create(path, text);
-        }
-    };
+    const run = () => appendFile(app, path, text);
     const next = (logWrites.get(path) || Promise.resolve()).then(run, run);
     logWrites.set(path, next);
     return next;
@@ -14171,6 +14203,8 @@ module.exports.DendriteView = DendriteView;
 module.exports.DendritePreview = DendritePreview;
 module.exports.DendriteComments = DendriteComments;
 module.exports.DendriteFloats = DendriteFloats;
+module.exports.tidyKept = tidyKept;
+module.exports.readReviewLog = readReviewLog;
 module.exports.floatInventory = floatInventory;
 module.exports.DendriteSettings = DendriteSettings;
 module.exports.exportStyle = exportStyle;

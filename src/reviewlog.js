@@ -13,9 +13,12 @@ const NAME = 'review-log.jsonl';
 
 // Each device appends to its own file in this folder beside the index,
 // so two devices never write one file and a sync has nothing to merge;
-// the log is all of them read together, with the single file older
-// versions wrote.
-const DIR = 'review-log';
+// the log is all of them read together. The single file older versions
+// wrote beside the index is moved in as shared.jsonl, and 0.34.0's
+// review-log folder beside the index is read too, until it is moved.
+const DIR = '_dendrite/review-log';
+const OLD_DIR = 'review-log';
+const SHARED = 'shared.jsonl';
 
 /** The log's path for the index at `indexPath`, as one file. */
 function logPath(indexPath) {
@@ -24,15 +27,20 @@ function logPath(indexPath) {
 }
 
 /** The folder of the devices' logs for the index at `indexPath`. */
-function logDir(indexPath) {
+function logDir(indexPath, dir = DIR) {
     const i = indexPath.lastIndexOf('/');
-    return i < 0 ? DIR : indexPath.slice(0, i + 1) + DIR;
+    return i < 0 ? dir : indexPath.slice(0, i + 1) + dir;
+}
+
+/** Each folder a log file of the index at `indexPath` may be in. */
+function logDirs(indexPath) {
+    return [logDir(indexPath), logDir(indexPath, OLD_DIR)];
 }
 
 /** Device `device`'s log for the index at `indexPath`. */
-function devicePath(indexPath, device) {
+function devicePath(indexPath, device, dir = DIR) {
     const name = String(device).replace(/[^\w.-]+/g, '_') || 'device';
-    return `${logDir(indexPath)}/${name}.jsonl`;
+    return `${logDir(indexPath, dir)}/${name}.jsonl`;
 }
 
 /**
@@ -112,5 +120,6 @@ function settled(entries, openKeys = new Set()) {
     return [...out.values()];
 }
 
-module.exports = { NAME, DIR, logPath, logDir, devicePath, merge, entry,
-                   line, parse, keysOf, settled };
+module.exports = { NAME, DIR, OLD_DIR, SHARED, logPath, logDir, logDirs,
+                   devicePath, merge, entry, line, parse, keysOf,
+                   settled };
