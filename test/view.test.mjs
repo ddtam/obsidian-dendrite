@@ -3046,7 +3046,8 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
                       'Undo', 'Redo', 'All', 'Printed', 'Preview',
-                      'Comments', 'Export', 'Review', 'Inbox']);
+                      'Comments', 'Tables & Figures', 'Export', 'Review',
+                      'Inbox']);
     assert.ok(view.inboxBtn.classList.contains('is-hidden'),
               'Inbox hidden while nothing waits');
     // The mode in a row of its own under the buttons; the name is the
@@ -7174,4 +7175,68 @@ test('the preview opened beside a board and its comment list takes a ' +
     assert.equal(Math.round(dims.get(made)), 33, 'a third');
     assert.equal(dims.get(list), 25, 'the list a sidebar\'s 300 px');
     assert.equal(Math.round(dims.get(board)), 42, 'the board the rest');
+});
+
+test('the inventory of tables and figures lists each in reading order ' +
+     'with its number and caption, and says why one does not print',
+     () => {
+    const { floatInventory } = require('../src/main.js');
+    const node = (id, children = []) => ({ id, children });
+    const root = node(null, [
+        node('G-aaaaa', [node('G-bbbbb'), node('G-ccccc')]),
+        node('G-ddddd', [node('G-eeeee')]),
+        node('G-fffff')]);
+    const kinds = { 'G-bbbbb': 'table', 'G-ccccc': 'figure',
+                    'G-eeeee': 'table', 'G-fffff': 'table' };
+    // As cardRole gives them: a superseded card does not print.
+    const roles = { 'G-ddddd': 'notes', 'G-fffff': 'notes' };
+    const bodies = {
+        'G-bbbbb': 'Data held %%[!review] Aly, 2026-10-23: Why?%%on Fir.' +
+            '\n\n| A |\n| - |\n| 1 |',
+        'G-ccccc': '![[model.png]]\n\nHow the model works.\nMore.',
+        'G-eeeee': 'Draft table.\n\n| B |\n| - |',
+        'G-fffff': 'Old sizes.\n\n| C |\n| - |' };
+    const items = floatInventory(root.children, {
+        kindOf: (id) => kinds[id] || null,
+        roleOf: (id) => roles[id] || null,
+        bodyOf: (id) => bodies[id],
+        supersededOf: (id) => id === 'G-fffff' });
+    assert.deepEqual(items.map((x) => [x.id, x.kind, x.label, x.caption,
+                                        x.gone]),
+        [['G-bbbbb', 'table', 'Table 1', 'Data held on Fir.', null],
+         ['G-ccccc', 'figure', 'Figure 1', 'How the model works.', null],
+         ['G-eeeee', 'table', null, 'Draft table.', 'Left out'],
+         ['G-fffff', 'table', null, 'Old sizes.', 'Old version']]);
+});
+
+test('the figures and tables list goes to a card on a click and copies ' +
+     'a link to it, which prints as its number', async () => {
+    const { DendriteFloats } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n- [[G-bbbbb|Tab]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), '# Aims\n\nText.');
+    await app.vault.create(cardPath('G-bbbbb'),
+        '---\ndendrite_kind: table\n---\nSizes on Fir.\n\n| A |\n| - |');
+    const focused = [];
+    const copied = [];
+    const plugin = { settings: {},
+        focusCard: async (f, id) => focused.push(id),
+        copyText: async (t) => copied.push(t) };
+    const list = new DendriteFloats({ app }, plugin);
+    await list.onOpen();
+    await list.show(app.vault.getAbstractFileByPath(INDEX));
+    const rows = [...list.contentEl.querySelectorAll('.dendrite-float-row')];
+    assert.deepEqual(rows.map((r) => r.querySelector(
+        '.dendrite-float-row-label').textContent), ['Table 1']);
+    assert.equal(rows[0].querySelector('.dendrite-float-row-caption')
+        .textContent, 'Sizes on Fir.');
+    rows[0].click();
+    await tick(10);
+    assert.deepEqual(focused, ['G-bbbbb'], 'gone to');
+    rows[0].querySelector('.dendrite-float-copy').click();
+    await tick(10);
+    assert.deepEqual(copied, ['[[G-bbbbb]]'], 'its link copied');
+    assert.deepEqual(focused, ['G-bbbbb'], 'the copy does not go to it');
 });

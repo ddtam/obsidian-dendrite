@@ -6707,6 +6707,7 @@ var STATUS_ITEMS = [
 var PREVIEW = "dendrite-preview";
 var DRAW_MARGIN = 800;
 var COMMENTS = "dendrite-comments";
+var FLOATS = "dendrite-floats";
 var COMMENT_FILTER = Object.freeze({
   author: "",
   waiting: "",
@@ -7824,8 +7825,14 @@ var DendriteView = class extends ItemView {
       !this.plugin.reviewOn()
     ));
     this.commentsBtn.addClass("is-toggle");
-    this.commentsBtn.addClass("dendrite-bar-gap");
     this.showReviewOn();
+    this.floatsBtn = btn("table-2", "Tables & Figures", "A list of the tables and figures by number, to go to one or copy a link to it, or close it", () => this.plugin.setFloats(
+      this,
+      !this.plugin.floatsOn()
+    ));
+    this.floatsBtn.addClass("is-toggle");
+    this.floatsBtn.addClass("dendrite-bar-gap");
+    this.showFloatsOn();
     btn("file-output", "Export", "Export the manuscript to markdown, PDF or Word", (e) => this.exportMenu(null, e), true);
     this.reviewBtn = btn(
       "message-square-plus",
@@ -7856,6 +7863,10 @@ var DendriteView = class extends ItemView {
       this.reviewVersion(id);
       return;
     }
+    await this.goTo(id);
+  }
+  /** Card `id` selected, and the board moved to it even if it was. */
+  async goTo(id) {
     if (id === this.active) this.applyActive();
     else await this.select(id);
   }
@@ -8512,6 +8523,8 @@ var DendriteView = class extends ItemView {
     m.addItem((i) => i.setTitle("Review\u2026").setIcon("message-square-plus").onClick(() => this.reviewMenu(e)));
     const reviewing = this.plugin.reviewOn && this.plugin.reviewOn();
     m.addItem((i) => i.setTitle(reviewing ? "Close the comments" : "Comments").setIcon("messages-square").onClick(() => this.plugin.setReview(this, !reviewing)));
+    const floats = this.plugin.floatsOn && this.plugin.floatsOn();
+    m.addItem((i) => i.setTitle(floats ? "Close Tables & Figures" : "Tables & Figures").setIcon("table-2").onClick(() => this.plugin.setFloats(this, !floats)));
     m.addSeparator();
     m.addItem((i) => i.setTitle("This manuscript's settings").setIcon("settings").onClick(() => this.openManuscriptSettings()));
     m.addItem((i) => i.setTitle("Open the index note").setIcon("file-text").onClick(() => this.plugin.openAsMarkdown(this.file)));
@@ -12187,6 +12200,13 @@ var DendriteView = class extends ItemView {
       !!(this.plugin.reviewOn && this.plugin.reviewOn())
     );
   }
+  showFloatsOn() {
+    if (!this.floatsBtn) return;
+    this.floatsBtn.toggleClass(
+      "is-on",
+      !!(this.plugin.floatsOn && this.plugin.floatsOn())
+    );
+  }
   showPreviewOn() {
     if (this.previewBtn && this.plugin.previewOpen) {
       this.previewBtn.toggleClass(
@@ -15341,6 +15361,182 @@ function quotaSetting(container, name, desc, current, required, draft) {
     emit();
   }));
 }
+function floatInventory(nodes, opts) {
+  const { kindOf, roleOf, bodyOf } = opts;
+  const old = opts.supersededOf || (() => false);
+  const labels = core.floatLabels(nodes, roleOf, kindOf);
+  const out = [];
+  const walk = (node, under) => {
+    const role = core.roleFor(node, roleOf);
+    const gone = under || (old(node.id) ? "Old version" : role === "notes" ? "Left out" : null);
+    const kind = kindOf(node.id);
+    if (core.KINDS.includes(kind)) {
+      const body = bodyOf(node.id) || "";
+      const cap = core.stripComments(float.split(body, kind).caption).split("\n").map((l) => l.replace(/^#+\s+/, "").trim()).find(Boolean) || "";
+      const label = labels.get(node.id) || null;
+      out.push({
+        id: node.id,
+        kind,
+        label,
+        caption: cap.replace(/\s+/g, " "),
+        gone: label ? null : gone || (role === "scaffolding" ? "Scaffolding" : "Not printed")
+      });
+    }
+    for (const c of node.children) walk(c, gone);
+  };
+  for (const n of nodes) walk(n, null);
+  return out;
+}
+var DendriteFloats = class extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.file = null;
+    this.items = [];
+    this.ids = /* @__PURE__ */ new Set();
+  }
+  getViewType() {
+    return FLOATS;
+  }
+  getIcon() {
+    return "table-2";
+  }
+  getDisplayText() {
+    return "Tables & Figures";
+  }
+  async onOpen() {
+    const el = this.contentEl;
+    el.empty();
+    el.addClass("dendrite-floats");
+    this.countEl = el.createDiv({ cls: "dendrite-comments-count" });
+    this.listEl = el.createDiv({ cls: "dendrite-comments-list" });
+    const ws = this.app.workspace;
+    if (ws.on) {
+      this.registerEvent(ws.on(
+        "active-leaf-change",
+        (leaf) => this.follow(leaf)
+      ));
+    }
+    const changed = (f) => {
+      if (!(f instanceof TFile) || !this.file) return;
+      if (f === this.file || this.ids.has(f.basename)) {
+        this.scheduleRefresh();
+      }
+    };
+    this.registerEvent(this.app.vault.on("modify", changed));
+    this.registerEvent(this.app.metadataCache.on("changed", changed));
+    const asked = this.plugin.floatsFor;
+    this.plugin.floatsFor = null;
+    const last = ws.getActiveViewOfType && (ws.getActiveViewOfType(DendriteView) || ws.getActiveViewOfType(DendritePreview));
+    const board = ws.getLeavesOfType ? ws.getLeavesOfType(VIEW)[0] : null;
+    await this.show(asked || (last ? last.file : board && board.view.file) || null);
+    if (this.plugin.floatsChanged) this.plugin.floatsChanged();
+  }
+  async onClose() {
+    clearTimeout(this.timer);
+    if (this.plugin.floatsChanged) this.plugin.floatsChanged();
+  }
+  /** The manuscript of a board or preview made active. */
+  follow(leaf) {
+    const v = leaf && leaf.view;
+    if (!(v instanceof DendriteView || v instanceof DendritePreview)) {
+      return;
+    }
+    if (v.file && v.file !== this.file) this.show(v.file);
+  }
+  async show(file) {
+    this.file = file;
+    await this.refresh();
+  }
+  scheduleRefresh() {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.refresh(), 300);
+  }
+  async refresh() {
+    const file = this.file;
+    const app = this.app;
+    this.items = [];
+    this.ids = /* @__PURE__ */ new Set();
+    if (file) {
+      const text = await app.vault.cachedRead(file);
+      const root = core.parseIndex(core.splitFrontmatter(text).body).root;
+      const fileOf = (id) => {
+        const f = app.metadataCache.getFirstLinkpathDest(
+          id,
+          file.path
+        );
+        return f instanceof TFile ? f : null;
+      };
+      const props = (id) => {
+        const f = fileOf(id);
+        return f && app.metadataCache.getFileCache(f)?.frontmatter || {};
+      };
+      const kindOf = (id) => {
+        const k = props(id).dendrite_kind;
+        return core.KINDS.includes(k) ? k : null;
+      };
+      const bodies = /* @__PURE__ */ new Map();
+      for (const n of core.allNodes(root)) {
+        this.ids.add(n.id);
+        if (!kindOf(n.id)) continue;
+        const f = fileOf(n.id);
+        if (f) {
+          bodies.set(n.id, core.splitFrontmatter(
+            await app.vault.cachedRead(f)
+          ).body);
+        }
+      }
+      this.items = floatInventory(root.children, {
+        kindOf,
+        roleOf: core.withKinds(
+          (id) => core.cardRole(props(id)),
+          kindOf
+        ),
+        bodyOf: (id) => bodies.get(id),
+        supersededOf: (id) => !!props(id).dendrite_superseded
+      });
+    }
+    this.draw();
+  }
+  draw() {
+    if (!this.listEl) return;
+    this.listEl.empty();
+    const n = (k) => this.items.filter((x) => x.kind === k).length;
+    this.countEl.setText(!this.file ? "No manuscript open" : this.items.length ? `${n("table")} tables, ${n("figure")} figures` : "No tables or figures");
+    for (const [kind, title] of [
+      ["table", "Tables"],
+      ["figure", "Figures"]
+    ]) {
+      const these = this.items.filter((x) => x.kind === kind);
+      if (!these.length) continue;
+      this.listEl.createDiv({ cls: "dendrite-cgroup", text: title });
+      for (const it of these) this.row(it);
+    }
+  }
+  row(it) {
+    const el = this.listEl.createDiv({ cls: "dendrite-cthread dendrite-float-row" + (it.label ? "" : " is-unprinted") });
+    const head = el.createDiv({ cls: "dendrite-float-row-head" });
+    head.createSpan({
+      cls: "dendrite-float-row-label",
+      text: it.label || it.gone
+    });
+    head.createSpan({
+      cls: "dendrite-float-row-id",
+      text: core.shortId(it.id)
+    });
+    const copy = head.createEl("button", { cls: "clickable-icon dendrite-float-copy" });
+    setIcon(copy, "copy");
+    copy.setAttr("aria-label", `Copy a link to it, [[${it.id}]], ` + (it.label ? `which prints as ${it.label}` : "which prints as its number once it prints"));
+    copy.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.plugin.copyText(`[[${it.id}]]`, this.containerEl);
+    });
+    el.createDiv({ cls: "dendrite-cthread-text dendrite-float-row-caption", text: it.caption || "No caption" });
+    el.addEventListener("click", () => {
+      if (this.file) this.plugin.focusCard(this.file, it.id, false);
+    });
+  }
+};
 var DendriteComments = class extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -17427,6 +17623,17 @@ module.exports = class DendritePlugin extends Plugin {
       COMMENTS,
       (leaf) => new DendriteComments(leaf, this)
     );
+    this.registerView(
+      FLOATS,
+      (leaf) => new DendriteFloats(leaf, this)
+    );
+    this.addCommand({
+      id: "show-floats",
+      name: "Show the tables and figures",
+      callback: () => this.showFloatList(
+        this.app.workspace.getActiveViewOfType(DendriteView) || this.app.workspace.getActiveViewOfType(DendritePreview)
+      )
+    });
     this.addCommand({
       id: "show-comments",
       name: "Show the comment list",
@@ -18682,21 +18889,25 @@ module.exports = class DendritePlugin extends Plugin {
   }
   /**
    * The split `leaf` was opened in, `own` its kind, 'preview' or
-   * 'comments', sized: a comment list a sidebar's width, a preview a
+   * 'side', sized: a side list, of comments or of tables and figures,
+   * a sidebar's width, a preview a
    * third, a half on a tablet, of the window, each whatever else is
    * open, the boards the rest.
    */
   fitPanes(leaf, own) {
     const ws = this.app.workspace;
-    const lists = new Set(ws.getLeavesOfType(COMMENTS));
+    const lists = /* @__PURE__ */ new Set([
+      ...ws.getLeavesOfType(COMMENTS),
+      ...ws.getLeavesOfType(FLOATS)
+    ]);
     const previews = new Set(ws.getLeavesOfType(PREVIEW));
     let mine = leaf;
     while (mine && mine.parent && !(mine.parent.direction === "vertical" && (mine.parent.children || []).length > 1)) {
       mine = mine.parent;
     }
     return fitSplit(leaf, (c, total) => {
-      const kind = c === mine ? own : lists.has(c) ? "comments" : previews.has(c) ? "preview" : null;
-      if (kind === "comments") {
+      const kind = c === mine ? own : lists.has(c) ? "side" : previews.has(c) ? "preview" : null;
+      if (kind === "side") {
         return total ? Math.min(0.4, SIDEBAR_WIDTH / total) : 0.25;
       }
       return kind === "preview" ? previewShare() : null;
@@ -18708,23 +18919,56 @@ module.exports = class DendritePlugin extends Plugin {
    * it in that window, right of its preview there if it has one.
    */
   async showCommentList(from = null) {
+    await this.showSide(COMMENTS, from, "commentsFor");
+  }
+  /** The list of tables and figures, opened as the comment list is. */
+  async showFloatList(from = null) {
+    await this.showSide(FLOATS, from, "floatsFor");
+  }
+  /** Whether the list of tables and figures is open. */
+  floatsOn() {
+    return this.app.workspace.getLeavesOfType(FLOATS).length > 0;
+  }
+  /** The list of tables and figures opened from board `from`, or closed. */
+  async setFloats(from, on) {
+    if (on) await this.showFloatList(from);
+    else {
+      for (const l of this.app.workspace.getLeavesOfType(FLOATS)) {
+        l.detach();
+      }
+    }
+    this.floatsChanged();
+  }
+  /** The boards' buttons, as the list of tables and figures opens. */
+  floatsChanged() {
+    for (const v of this.openViews ? this.openViews() : []) {
+      if (v.showFloatsOn) v.showFloatsOn();
+    }
+  }
+  /**
+   * A side list, `type`, opened if it is not: in the right sidebar, or,
+   * for a board `from` in a popout window, which has no sidebar, beside
+   * it in that window, right of its preview and other lists there; on
+   * the manuscript of `from`, handed to it as `this[forKey]`.
+   */
+  async showSide(type, from, forKey) {
     const ws = this.app.workspace;
     const where = from && from.leaf && from.leaf.getContainer ? from.leaf.getContainer() : ws.rootSplit;
     const popout = where && where !== ws.rootSplit;
     const inWindow = (l) => !popout || l.getContainer && l.getContainer() === where;
-    let leaf = ws.getLeavesOfType(COMMENTS).find(inWindow);
+    let leaf = ws.getLeavesOfType(type).find(inWindow);
     const file = from && from.file || null;
-    this.commentsFor = file;
+    this[forKey] = file;
     if (!leaf && popout) {
-      const pv = ws.getLeavesOfType(PREVIEW).find((l) => l.view && l.view.file === from.file && inWindow(l));
-      leaf = ws.createLeafBySplit(pv || from.leaf, "vertical");
-      this.fitPanes(leaf, "comments");
-      await leaf.setViewState({ type: COMMENTS, active: false });
+      const beside = [COMMENTS, FLOATS, PREVIEW].map((t) => ws.getLeavesOfType(t).find((l) => l.view && inWindow(l) && (t !== PREVIEW || l.view.file === from.file))).find(Boolean);
+      leaf = ws.createLeafBySplit(beside || from.leaf, "vertical");
+      this.fitPanes(leaf, "side");
+      await leaf.setViewState({ type, active: false });
     } else if (!leaf) {
       leaf = ws.getRightLeaf(false);
-      await leaf.setViewState({ type: COMMENTS, active: true });
+      await leaf.setViewState({ type, active: true });
     }
-    this.commentsFor = null;
+    this[forKey] = null;
     await ws.revealLeaf(leaf);
     const v = leaf.view;
     if (file && v && v.show && v.file !== file) await v.show(file);
@@ -18806,7 +19050,17 @@ module.exports = class DendritePlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
     const view = leaf.view;
     if (edit) await view.startEdit(id, false, at);
-    else await view.select(id);
+    else await view.goTo(id);
+  }
+  /** Text put on the clipboard of `el`'s window, said in a notice. */
+  async copyText(text, el = null) {
+    const win = el && el.win || window;
+    try {
+      await win.navigator.clipboard.writeText(text);
+      new Notice(`Copied ${text}`);
+    } catch (err) {
+      new Notice(`Could not copy ${text}`);
+    }
   }
   /**
    * A status's colour, from Pretty Properties' colour for that value of
@@ -18945,6 +19199,8 @@ module.exports.core = core;
 module.exports.DendriteView = DendriteView;
 module.exports.DendritePreview = DendritePreview;
 module.exports.DendriteComments = DendriteComments;
+module.exports.DendriteFloats = DendriteFloats;
+module.exports.floatInventory = floatInventory;
 module.exports.DendriteSettings = DendriteSettings;
 module.exports.exportStyle = exportStyle;
 module.exports.callers = callers;

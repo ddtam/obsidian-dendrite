@@ -2892,6 +2892,34 @@ button.dendrite-cfilter-clear {
     -webkit-line-clamp: 2;
     overflow: hidden;
 }
+/* The list of tables and figures: each its number, its short id and a
+   button copying a link to it on one line, its caption under them. */
+.dendrite-float-row {
+    border-left-color: var(--background-modifier-border-hover);
+}
+.dendrite-float-row-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.dendrite-float-row-label {
+    font-weight: var(--font-semibold);
+}
+.dendrite-float-row-id {
+    color: var(--text-faint);
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+}
+.dendrite-float-copy {
+    margin-left: auto;
+    padding: 2px;
+}
+.dendrite-float-row.is-unprinted .dendrite-float-row-label {
+    font-weight: normal;
+    font-style: italic;
+    color: var(--text-faint);
+}
+
 /* A comment in text that does not print: not in the preview to go to. */
 .dendrite-cthread.is-unprinted {
     opacity: 0.6;
