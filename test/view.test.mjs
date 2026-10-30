@@ -3052,6 +3052,8 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
     assert.equal(view.modeEl.parentElement.className, 'dendrite-info');
     assert.equal(view.modeEl.parentElement.previousElementSibling,
                  view.contentEl.querySelector('.dendrite-bar'));
+    assert.equal(view.modeEl.parentElement.parentElement.className,
+                 'dendrite-head', 'one header with the buttons');
     assert.equal(view.contentEl.querySelector('.dendrite-bar .dendrite-title'),
                  null);
     // A edited twice, then B: A's edits are undone in A, B's kept.

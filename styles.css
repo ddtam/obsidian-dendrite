@@ -34,39 +34,45 @@
 }
 
 body {
-    --dendrite-info-height: 24px;
+    --dendrite-head-height: calc(var(--input-height, 30px) + 36px);
 }
 
-/* The board's buttons and read-outs one header: no line between them,
-   the read-out row's line under both. */
-.dendrite > .dendrite-bar {
+/* The board's buttons and read-outs as one header of a fixed height,
+   spaced evenly: the gaps above the buttons, between the rows and above
+   the line under them alike, whatever height a theme gives buttons. */
+.dendrite-head {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-evenly;
+    height: var(--dendrite-head-height);
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+.dendrite-head > .dendrite-bar {
     border-bottom: none;
+    padding-top: 0;
+    padding-bottom: 0;
+    min-height: 0;
 }
 
-/* The preview's bar as tall as the board's bar and read-out row
-   together, so the lines under them meet when side by side. */
+/* The preview's bar as tall as the board's header, so the lines under
+   them meet when side by side. */
 .dendrite-preview > .dendrite-bar {
-    min-height: calc(var(--input-height, 30px) + 12px +
-                     var(--dendrite-info-height));
+    min-height: var(--dendrite-head-height);
 }
 
-/* On a phone the board has no read-out row to line up with. */
+/* On a phone the board has no header to line up with. */
 .is-phone .dendrite-preview > .dendrite-bar {
     min-height: calc(var(--input-height, 30px) + 12px);
 }
 
-/* The read-outs under the buttons: the mode, the totals and the tally,
-   in a slim row of their own. */
+/* The read-outs under the buttons: the mode, the totals and the tally. */
 .dendrite-info {
     display: flex;
     align-items: center;
     gap: 12px;
     padding: 0 12px;
-    /* A fixed height, which the preview's bar adds to its own to line
-       up with the board's two rows when they sit side by side. */
-    height: var(--dendrite-info-height);
-    box-sizing: border-box;
-    border-bottom: 1px solid var(--background-modifier-border);
     flex: 0 0 auto;
     flex-wrap: nowrap;
     overflow: hidden;
@@ -82,10 +88,6 @@ body {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-}
-
-.dendrite.is-narrow > .dendrite-info {
-    display: none;
 }
 
 .dendrite-title {
@@ -2743,7 +2745,7 @@ button.dendrite-done {
 }
 
 /* The phone's bar: the way down to the active card, Undo and a menu. */
-.dendrite.is-narrow > .dendrite-bar {
+.dendrite.is-narrow > .dendrite-head {
     display: none;
 }
 
