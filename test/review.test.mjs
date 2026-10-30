@@ -1490,8 +1490,11 @@ test('a comment\'s thread folds to its first line and a count of its ' +
     assert.deepEqual(rows.map((x) => x.classList.contains('is-latest')),
                      [false, true], 'the latest reply stays in full');
     // A click on it opens it; one anywhere else folds it again.
-    const press = (el) => el.dispatchEvent(new win.MouseEvent(
-        'pointerdown', { bubbles: true }));
+    const press = (el) => {
+        for (const type of ['pointerdown', 'pointerup']) {
+            el.dispatchEvent(new win.MouseEvent(type, { bubbles: true }));
+        }
+    };
     note.querySelector('.dendrite-review-text').click();
     assert.ok(!note.classList.contains('is-folded'), 'opened by a click');
     press(note.querySelector('.dendrite-review-text'));
@@ -1517,6 +1520,27 @@ test('a comment\'s thread folds to its first line and a count of its ' +
     assert.ok(note.classList.contains('is-folded'));
     note = draw();
     assert.ok(note.classList.contains('is-folded'), 'redrawn folded');
+    // A press on another comment folds this one only once the press
+    // ends, so the other does not move from under the pointer before
+    // its click, which opens it.
+    const two = doc.createElement('div');
+    doc.body.append(two);
+    two.innerHTML = `<p>${r.renderMarkdown(md)}</p>`;
+    r.decorate(two, r.reviewItems(md), () => {}, null, null, null, null,
+               'G-fold2');
+    const other = two.querySelector('.dendrite-review-note');
+    note.querySelector('.dendrite-review-text').click();
+    const target = other.querySelector('.dendrite-review-text');
+    target.dispatchEvent(new win.MouseEvent('pointerdown',
+                                            { bubbles: true }));
+    assert.ok(!note.classList.contains('is-folded'),
+              'still open while pressed');
+    target.dispatchEvent(new win.MouseEvent('pointerup', { bubbles: true }));
+    assert.ok(note.classList.contains('is-folded'), 'folded on release');
+    target.click();
+    assert.ok(!other.classList.contains('is-folded'), 'the other opened');
+    assert.ok(note.classList.contains('is-folded'), 'the first stays folded');
+    two.remove();
     // With the setting off: open, folded only by hand.
     r.setFoldUntilClicked(false);
     try {

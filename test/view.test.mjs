@@ -3043,13 +3043,15 @@ test('each card undoes its own text, visit by visit; the board undoes ' +
                              b.getAttribute('aria-label')),
                      ['This manuscript\'s settings',
                       'Open the index note as markdown',
-                      'Undo', 'Redo', 'Preview', 'All', 'Printed',
-                      'Export', 'Review', 'Inbox', 'Comments']);
+                      'Undo', 'Redo', 'All', 'Printed', 'Preview',
+                      'Comments', 'Export', 'Review', 'Inbox']);
     assert.ok(view.inboxBtn.classList.contains('is-hidden'),
               'Inbox hidden while nothing waits');
-    // The mode comes after the buttons; the name is the pane's title.
-    const kids = [...view.contentEl.querySelector('.dendrite-bar').children];
-    assert.ok(kids.indexOf(view.modeEl) > kids.indexOf(bar[5]));
+    // The mode in a row of its own under the buttons; the name is the
+    // pane's title.
+    assert.equal(view.modeEl.parentElement.className, 'dendrite-info');
+    assert.equal(view.modeEl.parentElement.previousElementSibling,
+                 view.contentEl.querySelector('.dendrite-bar'));
     assert.equal(view.contentEl.querySelector('.dendrite-bar .dendrite-title'),
                  null);
     // A edited twice, then B: A's edits are undone in A, B's kept.
@@ -4847,12 +4849,25 @@ test('a table card is edited with its caption, its table as it prints, ' +
                  'Table 1.', 'its number above the table');
     assert.ok(!form.querySelector('.dendrite-float-shown'),
               'shown once, in the editor, not again above it');
+    // In the editor's font at the card's width by default; a switch
+    // shows it as it prints, at the page's width, kept for next time.
+    assert.ok(form.hasClass('is-plain'));
+    assert.doesNotMatch(form.style.width, /pt$/, 'the pane\'s width');
+    const look = form.querySelector('.dendrite-float-look');
+    assert.equal(look.textContent, 'Show as printed');
+    look.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
+    assert.ok(!form.hasClass('is-plain'));
+    assert.match(form.style.width, /pt$/, 'as wide as the page\'s text');
+    assert.equal(look.textContent, 'Show in editor font');
+    assert.equal(view.plugin.settings.floatPlain, false);
     table.value = '| A | B |\n| --- | --- |\n| 3 | 4 |';
     table.dispatchEvent(new h.window.Event('input'));
     await view.endEdit();
     assert.equal(text(cardPath('G-bbbbb')),
                  'Per year.\n\n| A | B |\n| --- | --- |\n| 3 | 4 |');
     await view.startEdit('G-bbbbb');
+    assert.ok(!view.contentEl.querySelector('.dendrite-float-edit')
+        .hasClass('is-plain'), 'as printed, as left');
     [...view.contentEl.querySelectorAll('.dendrite-float-astext')][0]
         .dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
     await tick(20);
@@ -7059,4 +7074,62 @@ test('a newer revision of the same suggestions replaces the earlier one ' +
         { card: 'aaaaa', quote: '40', replace: '57' }] });
     assert.equal(again.json.id, third.json.id);
     assert.deepEqual(again.json.superseded, []);
+});
+
+test('the comment list opens on the manuscript of the board it was ' +
+     'opened from, and moves to it when already open on another',
+     async () => {
+    const DendritePlugin = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    app.vault.folders.add('W/Other');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Aims]]\n');
+    await app.vault.create(cardPath('G-aaaaa'),
+        'The ==cohort==%%[!review] Aly, 2026-10-23: How many?%% is large.');
+    const OTHER = 'W/Other/Other.md';
+    await app.vault.create(OTHER, '- Plain\n');
+    const grant = app.vault.getAbstractFileByPath(INDEX);
+    const other = app.vault.getAbstractFileByPath(OTHER);
+    const main = {};
+    const lists = [];
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = {};
+    p.commentFilterState = {};
+    p.reviewChanged = () => {};
+    const leafOn = (file) => {
+        const leaf = { getContainer: () => main };
+        leaf.view = { leaf, file };
+        return leaf;
+    };
+    const otherBoard = leafOn(other);
+    const board = leafOn(grant);
+    const ws = app.workspace;
+    ws.rootSplit = main;
+    // Obsidian has another leaf active: the click that opened the list
+    // need not make its board the active view.
+    ws.getActiveViewOfType = () => null;
+    ws.getLeavesOfType = (t) => t === 'dendrite-comments' ? lists :
+        t === 'dendrite-view' ? [otherBoard, board] : [];
+    ws.getRightLeaf = () => {
+        const leaf = { getContainer: () => main,
+            async setViewState() {
+                const { DendriteComments } = require('../src/main.js');
+                leaf.view = new DendriteComments({ app }, p);
+                lists.push(leaf);
+                await leaf.view.onOpen();
+            } };
+        return leaf;
+    };
+    ws.revealLeaf = async () => {};
+    await p.showCommentList(board.view);
+    await tick(20);
+    assert.equal(lists.length, 1);
+    assert.equal(lists[0].view.file, grant, 'the board it came from');
+    assert.equal(lists[0].view.threads.length, 1);
+    await p.showCommentList(otherBoard.view);
+    await tick(20);
+    assert.equal(lists.length, 1, 'the same list');
+    assert.equal(lists[0].view.file, other, 'moved to the other board');
 });

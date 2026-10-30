@@ -115,6 +115,24 @@ function floatEditor(opts) {
         e.preventDefault();
         if (opts.onAsText) opts.onAsText();
     });
+    // A table in the editor's font at the card's width, as other notes
+    // are edited, or as it prints, in the manuscript's font at the
+    // page's width; one switch for every table, kept between visits.
+    root.toggleClass('is-plain', !!opts.plain);
+    if (kind === 'table' && opts.onPlain) {
+        const look = head.createEl('a', { cls: 'dendrite-float-look' });
+        const name = () => look.setText(root.hasClass('is-plain') ?
+            'Show as printed' : 'Show in editor font');
+        name();
+        look.addEventListener('mousedown', (e) => e.preventDefault());
+        look.addEventListener('click', (e) => {
+            e.preventDefault();
+            const on = !root.hasClass('is-plain');
+            root.toggleClass('is-plain', on);
+            name();
+            opts.onPlain(on);
+        });
+    }
     const changed = () => opts.onChange();
     // A field: the card editor, Obsidian's where it has one, whose live
     // preview edits a table as a grid, given by `opts.makeEditor`; else a

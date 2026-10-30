@@ -94,6 +94,8 @@ const DEFAULTS = {
     vimKeys: true,
     // Comments folded until clicked, and folded again when left.
     foldComments: true,
+    // A table edited in the editor's font, not as it prints.
+    floatPlain: true,
     manageLinter: true,
     lintCards: true,
     obsidianEditor: true,
@@ -1448,7 +1450,7 @@ class DendriteView extends ItemView {
 
     renderBar(el) {
         // Buttons from the left: the manuscript's settings and index note
-        // as two icons, undo and redo, then preview and export. After
+        // as two icons, undo and redo, the views, then the menus. After
         // them, read-outs: the mode, the totals and the tally. The name
         // is the pane's own title. Nothing sits at the right, where other
         // plugins' overlays, such as LiveSync's status, are drawn.
@@ -1465,15 +1467,6 @@ class DendriteView extends ItemView {
             'text is undone inside the card.', () => this.doUndo());
         btn('redo-2', 'Redo', 'Redo what was undone (Ctrl+Shift+Z or ' +
             'Ctrl+Y)', () => this.doRedo()).addClass('dendrite-bar-gap');
-        this.previewBtn = btn('scroll-text', 'Preview', 'Show what export ' +
-            'would print beside the board, or close it',
-            async () => {
-                await this.plugin.togglePreview(this.file);
-                this.showPreviewOn();
-            });
-        // On or off, faded while off.
-        this.previewBtn.addClass('is-toggle');
-        this.showPreviewOn();
         // Which cards are shown, as a switch between its two views, the
         // one shown lit: a single lit button would not say whether its
         // label is what is shown or what a click shows.
@@ -1483,29 +1476,56 @@ class DendriteView extends ItemView {
                 'it prints, headings by their heading line alone']],
             this.printOnly, (on) => {
                 if (this.printOnly !== on) this.togglePrintOnly();
+            }).addClass('dendrite-bar-gap');
+        // The panes beside the board, side by side: each on or off,
+        // faded while off.
+        this.previewBtn = btn('scroll-text', 'Preview', 'Show what export ' +
+            'would print beside the board, or close it',
+            async () => {
+                await this.plugin.togglePreview(this.file);
+                this.showPreviewOn();
             });
-        btn('file-output', 'Export', 'Export the manuscript to markdown, ' +
-            'PDF or Word', (e) => this.exportMenu(null, e), true)
-            .addClass('dendrite-bar-gap-before');
-        this.reviewBtn = btn('message-square-plus', 'Review', 'Bring in ' +
-            'review comments: from the linked Google Doc or a returned ' +
-            'Word file; reviewers, and marking it sent',
-            (e) => this.reviewMenu(e), true);
-        // Shown only while reviews or requests from programs wait.
-        this.inboxBtn = btn('inbox', 'Inbox', 'Reviews and requests ' +
-            'waiting for you to add or ignore', () => this.openInboxList());
-        this.showInboxBadge();
+        this.previewBtn.addClass('is-toggle');
+        this.showPreviewOn();
         this.commentsBtn = btn('messages-square', 'Comments', 'Review on ' +
             'or off: the list of open comments, to filter them by who ' +
             'wrote them and whose answer they wait for, and the comments ' +
             'beside the preview\'s text', () => this.plugin.setReview(this,
                 !this.plugin.reviewOn()));
         this.commentsBtn.addClass('is-toggle');
+        this.commentsBtn.addClass('dendrite-bar-gap');
         this.showReviewOn();
-        this.modeEl = bar.createDiv({ cls: 'dendrite-mode' });
+        // Then the menus, what goes out and what comes in, and the inbox,
+        // shown only while reviews or requests from programs wait.
+        btn('file-output', 'Export', 'Export the manuscript to markdown, ' +
+            'PDF or Word', (e) => this.exportMenu(null, e), true);
+        this.reviewBtn = btn('message-square-plus', 'Review', 'Bring in ' +
+            'review comments: from the linked Google Doc or a returned ' +
+            'Word file; reviewers, and marking it sent',
+            (e) => this.reviewMenu(e), true);
+        this.inboxBtn = btn('inbox', 'Inbox', 'Reviews and requests ' +
+            'waiting for you to add or ignore', () => this.openInboxList());
+        this.showInboxBadge();
+        // The read-outs in a row of their own under the buttons: the
+        // mode, the totals and the tally with its flags.
+        const info = el.createDiv({ cls: 'dendrite-info' });
+        this.modeEl = info.createDiv({ cls: 'dendrite-mode' });
         this.showMode();
-        this.totalEl = bar.createDiv({ cls: 'dendrite-total' });
-        this.statusEl = bar.createDiv({ cls: 'dendrite-tally' });
+        this.totalEl = info.createDiv({ cls: 'dendrite-total' });
+        this.statusEl = info.createDiv({ cls: 'dendrite-tally' });
+    }
+
+    /**
+     * The next card changed outside Dendrite to an older copy, or kept
+     * from a change while typed in, after the active one in reading
+     * order, selected; from the tally's count of them.
+     */
+    async nextReverted() {
+        const ids = core.allNodes(this.root).map((n) => n.id)
+            .filter((id) => this.reverted.has(id));
+        if (!ids.length) return;
+        const at = ids.indexOf(this.active);
+        await this.select(ids[(at + 1) % ids.length]);
     }
 
     /**
@@ -3790,6 +3810,13 @@ class DendriteView extends ItemView {
             label: this.floatOpts().floats.get(id) ||
                 (kind === 'table' ? 'Table' : 'Figure'),
             onAsText: () => this.editAsText(id),
+            plain: kind === 'table' &&
+                this.plugin.settings.floatPlain !== false,
+            onPlain: (on) => {
+                this.plugin.settings.floatPlain = on;
+                if (this.plugin.saveSettings) this.plugin.saveSettings();
+                this.sizeFloat();
+            },
             render: (md, el) => this.renderInto(md, el, f.path),
             image: (file) => this.saveFigureImage(id, file),
             // Images found by name, linked as Obsidian links them.
@@ -3956,7 +3983,6 @@ class DendriteView extends ItemView {
         if (!stage) return;
         const st = this.manuscript().style || {};
         const el = editor.el;
-        el.style.width = `${Math.round(float.textWidthPt(st))}pt`;
         el.style.setProperty('--dendrite-float-size',
                              `${st.fontSize || 10}pt`);
         if (st.font) el.style.setProperty('--dendrite-float-font', st.font);
@@ -3968,6 +3994,7 @@ class DendriteView extends ItemView {
         if (body) body.empty();
         this.floatEl = el;
         this.floatCard = card;
+        this.sizeFloat(false);
         if (typeof ResizeObserver !== 'undefined') {
             this.floatSizer = new ResizeObserver(() => this.placeFloat());
             this.floatSizer.observe(el);
@@ -3985,6 +4012,20 @@ class DendriteView extends ItemView {
     }
 
     /** Keep the wide editor over its card as the columns move. */
+    /**
+     * The table or figure editor's width: the page's text width as it
+     * prints, or, a table shown as text, the pane's, set when placed.
+     */
+    sizeFloat(place = true) {
+        const el = this.floatEl;
+        if (!el) return;
+        const plain = el.hasClass('is-plain');
+        const st = this.manuscript().style || {};
+        el.style.width = plain ? '' :
+            `${Math.round(float.textWidthPt(st))}pt`;
+        if (place) this.placeFloat();
+    }
+
     placeFloat() {
         const el = this.floatEl;
         const card = this.floatCard;
@@ -3992,9 +4033,14 @@ class DendriteView extends ItemView {
         const stage = el.parentElement.getBoundingClientRect();
         const r = card.getBoundingClientRect();
         const left = Math.max(0, r.left - stage.left);
+        const room = `${Math.max(r.width, stage.width - left - 12)}px`;
         setStyles(el, { left: `${left}px`, top: `${r.top - stage.top}px`,
-                        maxWidth: `${Math.max(r.width,
-                                              stage.width - left - 12)}px` });
+                        maxWidth: room });
+        // Shown as text, as wide as the pane allows, as a note is: the
+        // editor's font is larger than the page's.
+        if (el.hasClass('is-plain')) {
+            el.style.width = `calc(${room} - 34px)`;
+        }
         const body = card.querySelector('.dendrite-card-body');
         const extra = r.height - (body ? body.offsetHeight : 0);
         // Its height at the width just set.
@@ -7075,6 +7121,19 @@ class DendriteView extends ItemView {
             }
             this.statusEl.setText(parts.join(' · '));
             this.statusEl.toggleClass('has-flags', t.revise + t.unsplit > 0);
+            const cards = [...this.reverted].filter((k) => k !== 'index' &&
+                this.byId.has(k)).length;
+            if (cards) {
+                const s = this.statusEl.createSpan({ cls:
+                    'dendrite-status-chip is-reverted',
+                    text: `${cards} card${cards === 1 ? '' : 's'} ` +
+                        'changed by sync ⟲' });
+                s.setAttr('aria-label', 'Cards changed outside Dendrite ' +
+                          'to an older copy, or kept from a change while ' +
+                          'you typed. Click to go to each in turn; its ' +
+                          'red chip compares and chooses');
+                s.onclick = () => this.nextReverted();
+            }
             if (this.reverted.has('index')) {
                 const s = this.statusEl.createSpan({ cls:
                     'dendrite-status-chip is-reverted',
@@ -9443,11 +9502,14 @@ class DendriteComments extends ItemView {
         };
         this.registerEvent(this.app.vault.on('modify', changed));
         this.registerEvent(this.app.metadataCache.on('changed', changed));
+        // The board it was opened from, else the active one, else any.
+        const asked = this.plugin.commentsFor;
+        this.plugin.commentsFor = null;
         const last = ws.getActiveViewOfType &&
             (ws.getActiveViewOfType(DendriteView) ||
              ws.getActiveViewOfType(DendritePreview));
         const board = ws.getLeavesOfType(VIEW)[0];
-        const f = last ? last.file : board && board.view.file;
+        const f = asked || (last ? last.file : board && board.view.file);
         await this.show(f || null);
         // Open, review is on, restored with the layout too.
         if (this.plugin.reviewChanged) this.plugin.reviewChanged();
@@ -13070,6 +13132,8 @@ module.exports = class DendritePlugin extends Plugin {
         const inWindow = (l) => !popout ||
             (l.getContainer && l.getContainer() === where);
         let leaf = ws.getLeavesOfType(COMMENTS).find(inWindow);
+        const file = from && from.file || null;
+        this.commentsFor = file;
         if (!leaf && popout) {
             const pv = ws.getLeavesOfType(PREVIEW).find((l) =>
                 l.view && l.view.file === from.file && inWindow(l));
@@ -13080,7 +13144,11 @@ module.exports = class DendritePlugin extends Plugin {
             leaf = ws.getRightLeaf(false);
             await leaf.setViewState({ type: COMMENTS, active: true });
         }
-        ws.revealLeaf(leaf);
+        this.commentsFor = null;
+        await ws.revealLeaf(leaf);
+        // Already open, or drawn only once shown: on this board's text.
+        const v = leaf.view;
+        if (file && v && v.show && v.file !== file) await v.show(file);
     }
 
     /**

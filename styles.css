@@ -33,11 +33,35 @@
     white-space: nowrap;
 }
 
-.dendrite-bar > .dendrite-tally {
+/* The read-outs under the buttons: the mode, the totals and the tally,
+   in a slim row of their own. */
+.dendrite-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 2px 12px;
+    min-height: 22px;
+    box-sizing: border-box;
+    border-bottom: 1px solid var(--background-modifier-border);
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    overflow: hidden;
+}
+
+.dendrite-info > * {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.dendrite-info > .dendrite-tally {
     flex-shrink: 1;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.dendrite.is-narrow > .dendrite-info {
+    display: none;
 }
 
 .dendrite-title {
@@ -492,10 +516,6 @@
 }
 
 .dendrite-total {
-    margin-left: 12px;
-}
-
-.dendrite-total {
     display: flex;
     gap: 10px;
 }
@@ -526,11 +546,6 @@
     border-radius: var(--radius-s);
     color: var(--text-muted);
     background: var(--background-modifier-hover);
-}
-
-/* The first read-out after the buttons. */
-.dendrite-bar .dendrite-mode {
-    margin-left: 12px;
 }
 
 .dendrite-mode.is-insert {
@@ -1136,7 +1151,6 @@ body {
 }
 
 .dendrite-tally {
-    margin-left: 12px;
     font-size: var(--font-ui-smaller);
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
@@ -2109,6 +2123,11 @@ button.dendrite-review-btn.is-suggested:hover,
     cursor: var(--cursor);
     color: var(--text-muted);
 }
+.dendrite-float-look {
+    margin-left: 14px;
+    cursor: var(--cursor);
+    color: var(--text-muted);
+}
 .dendrite-float-label {
     font-size: var(--font-ui-smaller);
     color: var(--text-muted);
@@ -2166,17 +2185,32 @@ button.dendrite-review-btn.is-suggested:hover,
 
 /* A table edited in place: its number above it, and the editor's text,
    the table's grid included, in the manuscript's font and size. */
-.dendrite-float-number {
+.dendrite-float-edit:not(.is-plain) .dendrite-float-number {
     font-family: var(--dendrite-float-font, inherit);
     font-size: var(--dendrite-float-size, inherit);
     font-weight: var(--font-bold);
     margin: 10px 0 4px;
 }
-.dendrite-float-table {
+.dendrite-float-edit:not(.is-plain) .dendrite-float-table {
     --font-text: var(--dendrite-float-font, var(--font-text-theme));
     --font-text-size: var(--dendrite-float-size, var(--font-text-size));
     font-family: var(--dendrite-float-font, inherit);
     font-size: var(--dendrite-float-size, inherit);
+}
+/* Shown as text: the editor's font and size, and no number above it,
+   as the table is in any note. */
+.dendrite-float-edit.is-plain .dendrite-float-table {
+    font-family: var(--font-text);
+    font-size: var(--font-text-size);
+}
+.dendrite-float-edit.is-plain .dendrite-float-number {
+    display: none;
+}
+/* In a popout's quirks mode the grid's table does not inherit its font,
+   so it takes it from the field, in either look. */
+.dendrite-float-table table {
+    font-family: inherit;
+    font-size: inherit;
 }
 .dendrite-float-table .dendrite-float-label:empty {
     display: none;

@@ -164,6 +164,13 @@ test('a card a stale device puts back is caught and can be restored; the ' +
     const chip = a.view.cardEls.get('G-aaaaa')
         .querySelector('.dendrite-status-chip.is-reverted');
     assert.ok(chip, 'the card is marked');
+    // Counted in the tally, whose click goes to the card.
+    const count = [...a.view.statusEl.querySelectorAll('.is-reverted')]
+        .find((c) => /changed by sync/.test(c.textContent));
+    assert.equal(count && count.textContent, '1 card changed by sync ⟲');
+    await a.view.select(null);
+    await count.onclick();
+    assert.equal(a.view.active, 'G-aaaaa', 'gone to');
     // Export refuses while a card has gone back.
     assert.equal(await a.view.exportTo(null), null);
     assert.equal(a.read('W/Grant/exports/Grant.md'), undefined);

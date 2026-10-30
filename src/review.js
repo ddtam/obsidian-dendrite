@@ -1297,14 +1297,16 @@ function foldable(note, meta, it, onToggle = null) {
             btn.textContent) return;
         note.classList.toggle('is-folded', f);
         btn.textContent = f ? '▸' : '▾';
-        // A press, or a click without one, as a keyboard's or a program's,
-        // in the document it is in when opened: it may be drawn in
-        // another before it is placed.
-        for (const ev of heard ? ['pointerdown', 'click'] : []) {
+        // The end of a press, or a click without one, as a keyboard's or
+        // a program's, in the document it is in when opened: it may be
+        // drawn in another before it is placed. Not the press's start:
+        // folding then moves a comment below it from under the pointer
+        // before the press ends, and its click is lost.
+        for (const ev of heard ? ['pointerup', 'click'] : []) {
             heard.removeEventListener(ev, away, true);
         }
         heard = !f && auto ? note.ownerDocument : null;
-        for (const ev of heard ? ['pointerdown', 'click'] : []) {
+        for (const ev of heard ? ['pointerup', 'click'] : []) {
             heard.addEventListener(ev, away, true);
         }
         if (told && onToggle) onToggle(f);
