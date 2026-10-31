@@ -198,6 +198,15 @@ function templateItems(blocks, { startAt = null } = {}) {
     const items = [];
     for (const b of blocks.slice(from)) {
         if (isPara(b)) {
+            // A blank line the template sets between its parts, kept
+            // once; one left blank by its instructions going is not.
+            if (emptyPara(b) && !/<w:sectPr/.test(b)) {
+                const last = items[items.length - 1];
+                if (last && last.kind !== 'gap') {
+                    items.push({ kind: 'gap', xml: b });
+                }
+                continue;
+            }
             const p = stripItalic(b);
             if (emptyPara(p)) continue;
             const n = numbered(textOf(p));
@@ -216,7 +225,7 @@ function templateItems(blocks, { startAt = null } = {}) {
     }
     // A plain paragraph just before a heading heads a part of them.
     items.forEach((it, k) => {
-        const next = items[k + 1];
+        const next = items.slice(k + 1).find((x) => x.kind !== 'gap');
         // Words, as a title is, not a line left of an example's code.
         const words = /^\p{L}/u.test(textOf(it.xml).trim()) &&
             !/[#{}=;$<>]/.test(textOf(it.xml));
@@ -406,6 +415,44 @@ const AFTER_SPACING = new RegExp('<w:(?:' + ['ind', 'contextualSpacing',
     'textAlignment', 'textboxTightWrap', 'outlineLvl', 'divId', 'cnfStyle',
     'rPr', 'sectPr', 'pPrChange'].join('|') + ')\\b|</w:pPr>');
 
+// What comes after an indent in a paragraph's properties.
+const AFTER_IND = new RegExp('<w:(?:' + ['contextualSpacing',
+    'mirrorIndents', 'suppressOverlap', 'jc', 'textDirection',
+    'textAlignment', 'textboxTightWrap', 'outlineLvl', 'divId', 'cnfStyle',
+    'rPr', 'sectPr', 'pPrChange'].join('|') + ')\\b|</w:pPr>');
+
+/** A heading's left indent in twips, 0 for none or a sliver. */
+function indentOf(p) {
+    const m = /<w:ind\b[^>]*\bw:(?:left|start)="(-?[\d.]+)"/.exec(p);
+    const v = m ? Math.round(Number(m[1])) : 0;
+    return v >= 200 ? v : 0;
+}
+
+/**
+ * Paragraph `p` set `left` twips further in, as the text under an
+ * indented heading is; a list's own indent kept on top of it.
+ */
+function indentPara(p, left) {
+    if (!left) return p;
+    const add = (tag) => tag.replace(/\bw:(left|start)="(-?[\d.]+)"/,
+        (m, k, v) => `w:${k}="${Math.round(Number(v)) + left}"`);
+    if (/<w:pPr>/.test(p)) {
+        return p.replace(/<w:pPr>[^]*?<\/w:pPr>/, (pPr) => {
+            const ind = /<w:ind\b[^>]*\/>/.exec(pPr);
+            if (ind) {
+                return pPr.replace(ind[0], /\bw:(?:left|start)="/.test(ind[0]) ?
+                    add(ind[0]) : ind[0].replace('<w:ind',
+                                                 `<w:ind w:left="${left}"`));
+            }
+            const at = pPr.search(AFTER_IND);
+            return pPr.slice(0, at) + `<w:ind w:left="${left}"/>` +
+                pPr.slice(at);
+        });
+    }
+    return p.replace(/^<w:p\b([^>]*)>/,
+                     `<w:p$1><w:pPr><w:ind w:left="${left}"/></w:pPr>`);
+}
+
 /**
  * A table laid out evenly: rows as tall as their text, not the
  * template's fixed heights, each cell's paragraphs single spaced with a
@@ -474,6 +521,20 @@ function likeHeading(model, text) {
         `<w:t xml:space="preserve">${escape(text)}</w:t></w:r></w:p>`;
 }
 
+/**
+ * Paragraph `p` kept on the page with the one after it, as a heading
+ * is, so none is left alone at a page's foot.
+ */
+function keepNext(p) {
+    if (/<w:keepNext\b/.test(p)) return p;
+    if (/<w:pPr>/.test(p)) {
+        return /<w:pStyle\b[^>]*\/>/.test(p) ?
+            p.replace(/(<w:pPr>\s*<w:pStyle\b[^>]*\/>)/, '$1<w:keepNext/>') :
+            p.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+    }
+    return p.replace(/^<w:p\b([^>]*)>/, '<w:p$1><w:pPr><w:keepNext/></w:pPr>');
+}
+
 /** A section number's depth: 1 for "4", 2 for "4.1". */
 const depthOf = (num) => (num ? num.split('.').length : 1);
 
@@ -518,6 +579,43 @@ function fillBody(tItems, ms, opts = {}) {
     // Every part heading made like the first.
     const firstPart = tItems.find((x) => x.kind === 'part');
     const out = [...ms.pre];
+    // The template's blank line before a heading, where it has one:
+    // after the text above it, or between two headings.
+    const gapAt = (k) => tItems[k] && tItems[k].kind === 'gap' ?
+        tItems[k].xml : null;
+    const firstGap = (tItems.find((x) => x.kind === 'gap') || {}).xml;
+    const gap = (xml, beforeHeading = false) => {
+        // The last paragraph or table, past bookmarks, which are neither.
+        const k = out.map((b) => isPara(b) || isTable(b)).lastIndexOf(true);
+        const last = out[k];
+        if (last && isPara(last) && emptyPara(last)) {
+            // One there already: kept with the heading after it.
+            if (beforeHeading) out[k] = keepNext(last);
+            return;
+        }
+        if (xml && last) out.push(beforeHeading ? keepNext(xml) : xml);
+    };
+    // A table set off by a blank line above, over its caption when it
+    // has one, and below, as the template sets its own.
+    const isCaption = (b) => isPara(b) &&
+        /<w:pStyle w:val="(?:Table|Image)?Caption"/.test(b);
+    const pushTable = (into, t) => {
+        if (firstGap) {
+            const k = into.length - 1;
+            if (k >= 0 && isCaption(into[k])) {
+                const before = into[k - 1];
+                if (before && !(isPara(before) && emptyPara(before))) {
+                    into.splice(k, 0, firstGap);
+                }
+            } else if (into === out) {
+                gap(firstGap);
+            } else if (into.length) {
+                into.push(firstGap);
+            }
+        }
+        into.push(t);
+        if (firstGap) into.push(firstGap);
+    };
     const unplacedAfter = (s) => {
         // Manuscript sections with no template heading go after the
         // nearest one before them that has one.
@@ -528,8 +626,17 @@ function fillBody(tItems, ms, opts = {}) {
             const x = ms.sections[k];
             x.placed = true;
             report.unplaced.push(x.num ? `${x.num} ${x.title}` : x.title);
-            extra.push(ownHeading(x), ...x.blocks.map((b) => (isTable(b) &&
-                model ? restyleTable(b, model.xml) : b)));
+            if (firstGap) extra.push(keepNext(firstGap));
+            const h = keepNext(ownHeading(x));
+            const left = indentOf(h);
+            extra.push(h);
+            for (const b of x.blocks) {
+                if (isTable(b)) {
+                    pushTable(extra, model ? restyleTable(b, model.xml) : b);
+                } else {
+                    extra.push(isPara(b) ? indentPara(b, left) : b);
+                }
+            }
         }
         return extra;
     };
@@ -540,8 +647,9 @@ function fillBody(tItems, ms, opts = {}) {
                 x.kind === 'part');
             const span = tItems.slice(k + 1, until < 0 ? undefined : until);
             if (span.some((x) => kept.has(x))) {
-                out.push(it === firstPart ? it.xml :
-                    likeHeading(firstPart.xml, it.title));
+                gap(gapAt(k - 1), true);
+                out.push(keepNext(it === firstPart ? it.xml :
+                    likeHeading(firstPart.xml, it.title)));
             }
             continue;
         }
@@ -550,7 +658,8 @@ function fillBody(tItems, ms, opts = {}) {
             report.dropped.push(`${it.num} ${norm(it.title)}`);
             continue;
         }
-        out.push(it.xml);
+        gap(gapAt(k - 1), true);
+        out.push(keepNext(it.xml));
         const s = matchOf.get(it);
         if (!s) continue;
         report.filled.push(`${it.num} ${s.title}`);
@@ -560,9 +669,11 @@ function fillBody(tItems, ms, opts = {}) {
              tItems[j].kind !== 'heading' && tItems[j].kind !== 'part'; j++) {
             if (tItems[j].kind === 'table') own.push(tItems[j]);
         }
+        // Text under an indented heading starts where the heading does.
+        const left = indentOf(it.xml);
         for (const b of s.blocks) {
             if (!isTable(b)) {
-                out.push(b);
+                out.push(isPara(b) ? indentPara(b, left) : b);
                 continue;
             }
             let done = null;
@@ -575,7 +686,7 @@ function fillBody(tItems, ms, opts = {}) {
                     break;
                 }
             }
-            out.push(done || (model ? restyleTable(b, model.xml) : b));
+            pushTable(out, done || (model ? restyleTable(b, model.xml) : b));
         }
         out.push(...unplacedAfter(s));
     }
@@ -884,4 +995,5 @@ module.exports = { bodyBlocks, splitDocument, stripItalic, textOf, norm,
                    fillTable, restyleTable, fillBody, fillFields,
                    firstPageGone, fillDocx, referencesDocx, partPages,
                    italicRun, emptyPara, settled, oneFont,
-                   withStyles, likeHeading, plainMath, tidyTable };
+                   withStyles, likeHeading, plainMath, tidyTable,
+                   indentPara, keepNext };

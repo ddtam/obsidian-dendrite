@@ -166,3 +166,49 @@ test('simple inline math becomes text in the body\'s font, the rest is ' +
     assert.deepEqual(wt.plainMath('n = $\\frac{a}{b}$').left,
                      ['\\frac{a}{b}']);
 });
+
+test('the template\'s blank lines between headings and text are kept, ' +
+     'and text under an indented heading starts where it does', () => {
+    const indented = '<w:p><w:pPr><w:ind w:left="720"/></w:pPr>' +
+        run('2.1 Detail') + '</w:p>';
+    const tpl = doc(para(run('1. Outline')), '<w:p></w:p>',
+                    para(run('2. Resources')), '<w:p></w:p>', indented,
+                    para(run('Fill this in.', true)));
+    const { items } = wt.templateItems(wt.splitDocument(tpl).blocks);
+    assert.deepEqual(items.map((x) => x.kind),
+                     ['heading', 'gap', 'heading', 'gap', 'heading']);
+    const ms = wt.manuscriptSections(wt.splitDocument(doc(
+        heading(1, '1. Outline'), para(run('One.')),
+        '<w:bookmarkEnd w:id="1" />', '<w:bookmarkStart w:id="2" w:name="r" />',
+        heading(1, '2. Resources'),
+        heading(2, '2.1 Detail'), para(run('Two.')),
+        '<w:p><w:pPr><w:ind w:left="360"/></w:pPr>' + run('Item') +
+        '</w:p>')).blocks);
+    const { blocks } = wt.fillBody(items, ms, {});
+    const shape = blocks.filter((b) => /^<w:(p|tbl)[ >]/.test(b))
+        .map((b) => wt.textOf(b).trim() || '(blank)');
+    assert.deepEqual(shape, ['1. Outline', 'One.', '(blank)',
+        '2. Resources', '(blank)', '2.1 Detail', 'Two.', 'Item']);
+    const two = blocks.find((b) => wt.textOf(b) === 'Two.');
+    assert.match(two, /<w:ind w:left="720"\/>/);
+    const item = blocks.find((b) => wt.textOf(b) === 'Item');
+    assert.match(item, /<w:ind w:left="1080"\/>/, 'a list\'s own on top');
+});
+
+test('a table is set off by the template\'s blank line above its ' +
+     'caption and below it', () => {
+    const tpl = doc(para(run('1. Outline')), '<w:p></w:p>',
+                    para(run('2. Data')));
+    const { items } = wt.templateItems(wt.splitDocument(tpl).blocks);
+    const caption = '<w:p><w:pPr><w:pStyle w:val="TableCaption" />' +
+        '</w:pPr>' + run('Table 1. Sizes.') + '</w:p>';
+    const ms = wt.manuscriptSections(wt.splitDocument(doc(
+        heading(1, '1. Outline'), para(run('Before.')), caption,
+        table(row(cell(run('A'))), row(cell(run('1')))),
+        para(run('After.')), heading(1, '2. Data'))).blocks);
+    const { blocks } = wt.fillBody(items, ms, {});
+    const shape = blocks.filter((b) => /^<w:(p|tbl)[ >]/.test(b))
+        .map((b) => wt.textOf(b).trim() || '(blank)');
+    assert.deepEqual(shape, ['1. Outline', 'Before.', '(blank)',
+        'Table 1. Sizes.', 'A1', '(blank)', 'After.', '(blank)', '2. Data']);
+});

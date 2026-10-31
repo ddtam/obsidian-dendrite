@@ -6876,6 +6876,13 @@ var require_wordtemplate = __commonJS({
       const items = [];
       for (const b of blocks.slice(from)) {
         if (isPara(b)) {
+          if (emptyPara(b) && !/<w:sectPr/.test(b)) {
+            const last = items[items.length - 1];
+            if (last && last.kind !== "gap") {
+              items.push({ kind: "gap", xml: b });
+            }
+            continue;
+          }
           const p = stripItalic(b);
           if (emptyPara(p)) continue;
           const n = numbered(textOf(p));
@@ -6898,7 +6905,7 @@ var require_wordtemplate = __commonJS({
         }
       }
       items.forEach((it, k) => {
-        const next = items[k + 1];
+        const next = items.slice(k + 1).find((x) => x.kind !== "gap");
         const words = /^\p{L}/u.test(textOf(it.xml).trim()) && !/[#{}=;$<>]/.test(textOf(it.xml));
         if (it.kind === "p" && words && next && next.kind === "heading" && !next.num.includes(".")) {
           it.kind = "part";
@@ -7056,6 +7063,50 @@ var require_wordtemplate = __commonJS({
       "sectPr",
       "pPrChange"
     ].join("|") + ")\\b|</w:pPr>");
+    var AFTER_IND = new RegExp("<w:(?:" + [
+      "contextualSpacing",
+      "mirrorIndents",
+      "suppressOverlap",
+      "jc",
+      "textDirection",
+      "textAlignment",
+      "textboxTightWrap",
+      "outlineLvl",
+      "divId",
+      "cnfStyle",
+      "rPr",
+      "sectPr",
+      "pPrChange"
+    ].join("|") + ")\\b|</w:pPr>");
+    function indentOf(p) {
+      const m = /<w:ind\b[^>]*\bw:(?:left|start)="(-?[\d.]+)"/.exec(p);
+      const v = m ? Math.round(Number(m[1])) : 0;
+      return v >= 200 ? v : 0;
+    }
+    function indentPara(p, left) {
+      if (!left) return p;
+      const add = (tag) => tag.replace(
+        /\bw:(left|start)="(-?[\d.]+)"/,
+        (m, k, v) => `w:${k}="${Math.round(Number(v)) + left}"`
+      );
+      if (/<w:pPr>/.test(p)) {
+        return p.replace(/<w:pPr>[^]*?<\/w:pPr>/, (pPr) => {
+          const ind = /<w:ind\b[^>]*\/>/.exec(pPr);
+          if (ind) {
+            return pPr.replace(ind[0], /\bw:(?:left|start)="/.test(ind[0]) ? add(ind[0]) : ind[0].replace(
+              "<w:ind",
+              `<w:ind w:left="${left}"`
+            ));
+          }
+          const at = pPr.search(AFTER_IND);
+          return pPr.slice(0, at) + `<w:ind w:left="${left}"/>` + pPr.slice(at);
+        });
+      }
+      return p.replace(
+        /^<w:p\b([^>]*)>/,
+        `<w:p$1><w:pPr><w:ind w:left="${left}"/></w:pPr>`
+      );
+    }
     function tidyTable(tbl, widths = null) {
       let out = tbl.replace(/<w:trHeight\b[^>]*\/>/g, "");
       const spacing = '<w:spacing w:before="30" w:after="30" w:line="240" w:lineRule="auto"/>';
@@ -7101,6 +7152,13 @@ var require_wordtemplate = __commonJS({
       const rPr = ((/<w:rPr>([^]*?)<\/w:rPr>/.exec(first) || [])[1] || "").replace(/<w:(?:i|iCs|color)(?:\s[^>]*)?\/>/g, "");
       return `<w:p>${pPr}<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ""}<w:t xml:space="preserve">${escape(text)}</w:t></w:r></w:p>`;
     }
+    function keepNext(p) {
+      if (/<w:keepNext\b/.test(p)) return p;
+      if (/<w:pPr>/.test(p)) {
+        return /<w:pStyle\b[^>]*\/>/.test(p) ? p.replace(/(<w:pPr>\s*<w:pStyle\b[^>]*\/>)/, "$1<w:keepNext/>") : p.replace("<w:pPr>", "<w:pPr><w:keepNext/>");
+      }
+      return p.replace(/^<w:p\b([^>]*)>/, "<w:p$1><w:pPr><w:keepNext/></w:pPr>");
+    }
     var depthOf = (num) => num ? num.split(".").length : 1;
     function fillBody(tItems, ms, opts = {}) {
       const report = { filled: [], dropped: [], unplaced: [], tables: [] };
@@ -7126,6 +7184,35 @@ var require_wordtemplate = __commonJS({
       };
       const firstPart = tItems.find((x) => x.kind === "part");
       const out = [...ms.pre];
+      const gapAt = (k) => tItems[k] && tItems[k].kind === "gap" ? tItems[k].xml : null;
+      const firstGap = (tItems.find((x) => x.kind === "gap") || {}).xml;
+      const gap = (xml, beforeHeading = false) => {
+        const k = out.map((b) => isPara(b) || isTable(b)).lastIndexOf(true);
+        const last = out[k];
+        if (last && isPara(last) && emptyPara(last)) {
+          if (beforeHeading) out[k] = keepNext(last);
+          return;
+        }
+        if (xml && last) out.push(beforeHeading ? keepNext(xml) : xml);
+      };
+      const isCaption = (b) => isPara(b) && /<w:pStyle w:val="(?:Table|Image)?Caption"/.test(b);
+      const pushTable = (into, t) => {
+        if (firstGap) {
+          const k = into.length - 1;
+          if (k >= 0 && isCaption(into[k])) {
+            const before = into[k - 1];
+            if (before && !(isPara(before) && emptyPara(before))) {
+              into.splice(k, 0, firstGap);
+            }
+          } else if (into === out) {
+            gap(firstGap);
+          } else if (into.length) {
+            into.push(firstGap);
+          }
+        }
+        into.push(t);
+        if (firstGap) into.push(firstGap);
+      };
       const unplacedAfter = (s) => {
         const i = ms.sections.indexOf(s);
         const extra = [];
@@ -7133,7 +7220,17 @@ var require_wordtemplate = __commonJS({
           const x = ms.sections[k];
           x.placed = true;
           report.unplaced.push(x.num ? `${x.num} ${x.title}` : x.title);
-          extra.push(ownHeading(x), ...x.blocks.map((b) => isTable(b) && model ? restyleTable(b, model.xml) : b));
+          if (firstGap) extra.push(keepNext(firstGap));
+          const h = keepNext(ownHeading(x));
+          const left = indentOf(h);
+          extra.push(h);
+          for (const b of x.blocks) {
+            if (isTable(b)) {
+              pushTable(extra, model ? restyleTable(b, model.xml) : b);
+            } else {
+              extra.push(isPara(b) ? indentPara(b, left) : b);
+            }
+          }
         }
         return extra;
       };
@@ -7143,7 +7240,8 @@ var require_wordtemplate = __commonJS({
           const until = tItems.findIndex((x, j) => j > k && x.kind === "part");
           const span = tItems.slice(k + 1, until < 0 ? void 0 : until);
           if (span.some((x) => kept.has(x))) {
-            out.push(it === firstPart ? it.xml : likeHeading(firstPart.xml, it.title));
+            gap(gapAt(k - 1), true);
+            out.push(keepNext(it === firstPart ? it.xml : likeHeading(firstPart.xml, it.title)));
           }
           continue;
         }
@@ -7152,7 +7250,8 @@ var require_wordtemplate = __commonJS({
           report.dropped.push(`${it.num} ${norm(it.title)}`);
           continue;
         }
-        out.push(it.xml);
+        gap(gapAt(k - 1), true);
+        out.push(keepNext(it.xml));
         const s = matchOf.get(it);
         if (!s) continue;
         report.filled.push(`${it.num} ${s.title}`);
@@ -7160,9 +7259,10 @@ var require_wordtemplate = __commonJS({
         for (let j = k + 1; j < tItems.length && tItems[j].kind !== "heading" && tItems[j].kind !== "part"; j++) {
           if (tItems[j].kind === "table") own.push(tItems[j]);
         }
+        const left = indentOf(it.xml);
         for (const b of s.blocks) {
           if (!isTable(b)) {
-            out.push(b);
+            out.push(isPara(b) ? indentPara(b, left) : b);
             continue;
           }
           let done = null;
@@ -7175,7 +7275,7 @@ var require_wordtemplate = __commonJS({
               break;
             }
           }
-          out.push(done || (model ? restyleTable(b, model.xml) : b));
+          pushTable(out, done || (model ? restyleTable(b, model.xml) : b));
         }
         out.push(...unplacedAfter(s));
       }
@@ -7452,7 +7552,9 @@ var require_wordtemplate = __commonJS({
       withStyles,
       likeHeading,
       plainMath,
-      tidyTable
+      tidyTable,
+      indentPara,
+      keepNext
     };
   }
 });
