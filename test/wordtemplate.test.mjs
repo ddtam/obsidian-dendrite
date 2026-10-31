@@ -255,3 +255,24 @@ test('Pandoc\'s heading over the reference list is the list\'s one ' +
     assert.match(wt.widowControl('<w:pPrDefault><w:pPr><w:spacing/>' +
         '</w:pPr></w:pPrDefault>'), /<w:pPr><w:widowControl\/>/);
 });
+
+test('a heading over a table stays with it: no blank line between them, ' +
+     'and the blank line above a table is kept with the table', () => {
+    const tpl = doc(para(run('1. Outline')), '<w:p></w:p>',
+                    para(run('2. Team')));
+    const { items } = wt.templateItems(wt.splitDocument(tpl).blocks);
+    const caption = '<w:p><w:pPr><w:pStyle w:val="TableCaption" />' +
+        '</w:pPr>' + run('Table 1. Team.') + '</w:p>';
+    const ms = wt.manuscriptSections(wt.splitDocument(doc(
+        heading(1, '1. Outline'), para(run('Text.')),
+        heading(1, '2. Team'), caption,
+        table(row(cell(run('Name'))), row(cell(run('Derek')))))).blocks);
+    const { blocks } = wt.fillBody(items, ms, {});
+    const shown = blocks.filter((b) => /^<w:(p|tbl)[ >]/.test(b));
+    const shape = shown.map((b) => wt.textOf(b).trim() || '(blank)');
+    assert.deepEqual(shape, ['1. Outline', 'Text.', '(blank)', '2. Team',
+                             'Table 1. Team.', 'NameDerek', '(blank)']);
+    // The heading, the blank line above it and the caption all kept
+    // with what follows.
+    for (const k of [2, 3, 4]) assert.match(shown[k], /<w:keepNext\/>/);
+});

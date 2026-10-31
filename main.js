@@ -7230,19 +7230,21 @@ var require_wordtemplate = __commonJS({
       };
       const isCaption = (b) => isPara(b) && /<w:pStyle w:val="(?:Table|Image)?Caption"/.test(b);
       const pushTable = (into, t) => {
-        if (firstGap) {
-          const k = into.length - 1;
-          if (k >= 0 && isCaption(into[k])) {
-            into[k] = keepNext(into[k]);
-            const before = into[k - 1];
-            if (before && !(isPara(before) && emptyPara(before))) {
-              into.splice(k, 0, firstGap);
-            }
-          } else if (into === out) {
-            gap(firstGap);
-          } else if (into.length) {
-            into.push(firstGap);
+        const lastBlock = (upTo) => {
+          for (let j = upTo; j >= 0; j--) {
+            if (isPara(into[j]) || isTable(into[j])) return into[j];
           }
+          return null;
+        };
+        const blankOrHeading = (b) => !b || isPara(b) && (emptyPara(b) || /<w:keepNext\b/.test(b));
+        let k = into.length - 1;
+        if (k >= 0 && isCaption(into[k])) {
+          into[k] = keepNext(into[k]);
+          if (firstGap && !blankOrHeading(lastBlock(k - 1))) {
+            into.splice(k, 0, keepNext(firstGap));
+          }
+        } else if (firstGap && !blankOrHeading(lastBlock(k))) {
+          into.push(keepNext(firstGap));
         }
         into.push(t);
         if (firstGap) into.push(firstGap);
