@@ -212,3 +212,46 @@ test('a table is set off by the template\'s blank line above its ' +
     assert.deepEqual(shape, ['1. Outline', 'Before.', '(blank)',
         'Table 1. Sizes.', 'A1', '(blank)', 'After.', '(blank)', '2. Data']);
 });
+
+test('a table is kept together: no row splits across pages, its header ' +
+     'repeats and stays with the row after it, and a short table stays ' +
+     'on one page with its caption', () => {
+    const tr = (t) => '<w:tr><w:trPr><w:cantSplit w:val="0"/><w:tblHeader ' +
+        `w:val="0"/></w:trPr>${cell(run(t))}</w:tr>`;
+    const short = wt.tidyTable(`<w:tbl><w:tblPr/>${tr('H')}${tr('a')}` +
+                               `${tr('b')}</w:tbl>`);
+    const rows = short.match(/<w:tr>[^]*?<\/w:tr>/g);
+    assert.ok(rows.every((r) => /<w:cantSplit\/>/.test(r)), 'no splits');
+    assert.match(rows[0], /<w:tblHeader\/>/);
+    assert.doesNotMatch(rows[1], /tblHeader/);
+    assert.ok(rows.slice(0, -1).every((r) => /<w:keepNext\/>/.test(r)),
+              'short: kept together');
+    assert.doesNotMatch(rows[2], /keepNext/);
+    const long = wt.tidyTable('<w:tbl><w:tblPr/>' + tr('H') +
+        Array.from({ length: 40 }, (x, i) => tr(String(i))).join('') +
+        '</w:tbl>').match(/<w:tr>[^]*?<\/w:tr>/g);
+    assert.match(long[0], /<w:keepNext\/>/, 'the header with the next row');
+    assert.doesNotMatch(long[5], /keepNext/, 'long: free to break');
+});
+
+test('Pandoc\'s heading over the reference list is the list\'s one ' +
+     'heading, not a section, and widow control is on throughout', () => {
+    const { items } = wt.templateItems(wt.splitDocument(doc(
+        para(run('1. Outline')))).blocks);
+    const bib = '<w:p><w:pPr><w:pStyle w:val="Bibliography" /></w:pPr>' +
+        run('1. Ref.') + '</w:p>';
+    const ms = wt.manuscriptSections(wt.splitDocument(doc(
+        heading(1, '1. Outline'), para(run('Text [1].')),
+        heading(1, 'References'), bib)).blocks);
+    assert.equal(ms.refsTitle, 'References');
+    const { blocks, report } = wt.fillBody(items, ms, {});
+    const text = blocks.map((b) => wt.textOf(b).trim()).filter(Boolean);
+    assert.deepEqual(text, ['1. Outline', 'Text [1].', 'References',
+                            '1. Ref.']);
+    assert.deepEqual(report.unplaced, []);
+    const styles = '<w:docDefaults><w:pPrDefault><w:pPr><w:widowControl ' +
+        'w:val="0"/></w:pPr></w:pPrDefault></w:docDefaults>';
+    assert.match(wt.widowControl(styles), /<w:widowControl\/>/);
+    assert.match(wt.widowControl('<w:pPrDefault><w:pPr><w:spacing/>' +
+        '</w:pPr></w:pPrDefault>'), /<w:pPr><w:widowControl\/>/);
+});

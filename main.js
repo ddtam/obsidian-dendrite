@@ -6948,6 +6948,11 @@ var require_wordtemplate = __commonJS({
         pending = [];
       }
       (cur ? cur.blocks : out.pre).push(...pending);
+      const last = out.sections[out.sections.length - 1];
+      if (last && out.refs.length && !last.blocks.some((b) => isTable(b) || isPara(b) && !emptyPara(b))) {
+        out.sections.pop();
+        out.refsTitle = last.title;
+      }
       return out;
     }
     function sameSection(h, s) {
@@ -7107,8 +7112,36 @@ var require_wordtemplate = __commonJS({
         `<w:p$1><w:pPr><w:ind w:left="${left}"/></w:pPr>`
       );
     }
+    var KEEP_ROWS = 30;
+    function keepTogether(tbl) {
+      const count = (tbl.match(/<w:tr\b/g) || []).length;
+      let k = 0;
+      return tbl.replace(/<w:tr\b[^>]*>[^]*?<\/w:tr>/g, (tr) => {
+        const i = k++;
+        const flags = "<w:cantSplit/>" + (i === 0 ? "<w:tblHeader/>" : "");
+        let out = tr.replace(/<w:(?:cantSplit|tblHeader)\b[^>]*\/>/g, "");
+        if (/<w:trPr>/.test(out)) {
+          out = out.replace(/<w:trPr>[^]*?<\/w:trPr>/, (pr) => {
+            const at = pr.search(
+              /<w:(?:tblCellSpacing|jc|hidden)\b|<\/w:trPr>/
+            );
+            return pr.slice(0, at) + flags + pr.slice(at);
+          });
+        } else {
+          out = out.replace(
+            /^(<w:tr\b[^>]*>)/,
+            `$1<w:trPr>${flags}</w:trPr>`
+          );
+        }
+        const keep = i < count - 1 && (count <= KEEP_ROWS || i === 0);
+        return keep ? out.replace(
+          /<w:p\b[^>]*>(?:<w:pPr>[^]*?<\/w:pPr>)?/g,
+          (p) => keepNext(p + "</w:p>").slice(0, -"</w:p>".length)
+        ) : out;
+      });
+    }
     function tidyTable(tbl, widths = null) {
-      let out = tbl.replace(/<w:trHeight\b[^>]*\/>/g, "");
+      let out = keepTogether(tbl.replace(/<w:trHeight\b[^>]*\/>/g, ""));
       const spacing = '<w:spacing w:before="30" w:after="30" w:line="240" w:lineRule="auto"/>';
       out = out.replace(
         /<w:p\b([^>]*)>(<w:pPr>[^]*?<\/w:pPr>)?/g,
@@ -7200,6 +7233,7 @@ var require_wordtemplate = __commonJS({
         if (firstGap) {
           const k = into.length - 1;
           if (k >= 0 && isCaption(into[k])) {
+            into[k] = keepNext(into[k]);
             const before = into[k - 1];
             if (before && !(isPara(before) && emptyPara(before))) {
               into.splice(k, 0, firstGap);
@@ -7286,7 +7320,10 @@ var require_wordtemplate = __commonJS({
         out.push(ownHeading(s), ...s.blocks);
       }
       if (ms.refs.length && opts.references !== "none") {
-        out.push('<w:p><w:pPr><w:keepNext /></w:pPr><w:r><w:rPr><w:b /></w:rPr><w:t xml:space="preserve">' + escape(opts.referencesTitle || "References") + "</w:t></w:r></w:p>", ...ms.refs);
+        const title = ms.refsTitle || opts.referencesTitle || "References";
+        const top = heads.find((h) => depthOf(h.num) === 1);
+        gap(firstGap, true);
+        out.push(keepNext(top ? likeHeading(top.xml, title) : `<w:p><w:r><w:rPr><w:b /></w:rPr><w:t xml:space="preserve">${escape(title)}</w:t></w:r></w:p>`), ...ms.refs);
       }
       return { blocks: out, report };
     }
@@ -7340,6 +7377,17 @@ var require_wordtemplate = __commonJS({
         "</w:styles>",
         add.join("") + "</w:styles>"
       ) : styles;
+    }
+    function widowControl(xml) {
+      let out = xml.replace(
+        /<w:widowControl\s+w:val="(?:0|false|off)"\s*\/>/g,
+        "<w:widowControl/>"
+      );
+      out = out.replace(
+        /(<w:pPrDefault>\s*<w:pPr>)(?![^]*?<w:widowControl)/,
+        "$1<w:widowControl/>"
+      );
+      return out;
     }
     function oneFont(xml, font, pt) {
       let out = xml;
@@ -7395,6 +7443,10 @@ var require_wordtemplate = __commonJS({
         }
         return f;
       });
+      out = out.map((f) => /^word\/(document|styles)\.xml$/.test(f.name) ? { name: f.name, data: B.from(
+        widowControl(f.data.toString("utf8")),
+        "utf8"
+      ) } : f);
       if (opts.defaultStyles) {
         const named = out.filter((f) => /^word\/(document|footnotes)\.xml$/.test(f.name)).map((f) => f.data.toString("utf8"));
         out = out.map((f) => f.name === "word/styles.xml" ? {
@@ -7474,7 +7526,7 @@ var require_wordtemplate = __commonJS({
       const doc = splitDocument(f.data.toString("utf8"));
       const ms = manuscriptSections(doc.blocks);
       if (!ms.refs.length) return null;
-      const title = '<w:p><w:pPr><w:keepNext /></w:pPr><w:r><w:rPr><w:b /></w:rPr><w:t xml:space="preserve">' + escape(opts.referencesTitle || "References") + "</w:t></w:r></w:p>";
+      const title = '<w:p><w:pPr><w:keepNext /></w:pPr><w:r><w:rPr><w:b /></w:rPr><w:t xml:space="preserve">' + escape(ms.refsTitle || opts.referencesTitle || "References") + "</w:t></w:r></w:p>";
       const xml = fillFields(doc.head + title + ms.refs.join("") + firstPageGone(doc.sectPr) + doc.tail, opts.fields);
       return docx.writeZip(files.map((x) => x === f ? { name: x.name, data: B.from(xml, "utf8") } : x), zlib);
     }
@@ -7554,7 +7606,8 @@ var require_wordtemplate = __commonJS({
       plainMath,
       tidyTable,
       indentPara,
-      keepNext
+      keepNext,
+      widowControl
     };
   }
 });
