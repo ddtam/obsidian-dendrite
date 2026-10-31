@@ -411,9 +411,11 @@ function fillTable(tbl, src) {
     const cols = all.map((w) => Number(/[\d.]+/.exec(w)[0]));
     const kept = cols.filter((c, k) => keepCol[k] !== false);
     const sum = (a) => a.reduce((x, y) => x + y, 0);
-    const widths = kept.length && sum(kept) ? kept.map((c) =>
+    let widths = kept.length && sum(kept) ? kept.map((c) =>
         Math.round(c * sum(cols) / sum(kept))) : null;
-    return tidyTable(head + rows.join('') + '</w:tbl>', widths);
+    const filled = head + rows.join('') + '</w:tbl>';
+    if (widths) widths = roomForWords(filled, widths);
+    return tidyTable(filled, widths);
 }
 
 // What comes after spacing in a paragraph's properties, which Word
@@ -461,15 +463,12 @@ function indentPara(p, left) {
                      `<w:p$1><w:pPr><w:ind w:left="${left}"/></w:pPr>`);
 }
 
-// Up to this many rows, a table is kept on one page, as in Dendrite's
-// other Word export (docx.keepTables).
-const KEEP_ROWS = 30;
-
 /**
- * A table kept together: no row split across pages, so a wrapped cell
- * stays whole; its first row a header repeated on each page; and every
- * row but the last kept with the next, so a short table stays on one
- * page, a long one at least its header with its first row.
+ * A table that breaks between pages cleanly: no row split across pages,
+ * so a wrapped cell stays whole; its first row a header repeated on each
+ * page and kept with the first body row, which a caption above stays
+ * with; and its last two rows together, so none is left alone. It may
+ * break anywhere else, rather than move whole and leave a gap.
  */
 function keepTogether(tbl) {
     const count = (tbl.match(/<w:tr\b/g) || []).length;
@@ -488,7 +487,10 @@ function keepTogether(tbl) {
             out = out.replace(/^(<w:tr\b[^>]*>)/,
                               `$1<w:trPr>${flags}</w:trPr>`);
         }
-        const keep = i < count - 1 && (count <= KEEP_ROWS || i === 0);
+        // The header with the first row, and the last row with the one
+        // before it: the table breaks anywhere else, never leaving its
+        // caption, header or one row alone on a page.
+        const keep = i < count - 1 && (i <= 1 || i === count - 2);
         return keep ? out.replace(/<w:p\b[^>]*>(?:<w:pPr>[^]*?<\/w:pPr>)?/g,
                                   (p) => keepNext(p + '</w:p>')
                                       .slice(0, -'</w:p>'.length)) : out;
@@ -535,6 +537,49 @@ function tidyTable(tbl, widths = null) {
     return out;
 }
 
+// Twips a character takes at about 10 pt, bold included, with the
+// cell's margins: enough that a word is not broken inside it.
+const CHAR_TWIPS = 125;
+const CELL_MARGIN = 230;
+
+/**
+ * Column widths `widths` (twips) for table `tbl`, each at least as wide
+ * as its longest word, so none breaks inside a word; the room taken
+ * from the widest columns, the total kept.
+ */
+function roomForWords(tbl, widths) {
+    const need = widths.map(() => 0);
+    for (const r of tableRows(tbl)) {
+        r.cells.forEach((c, k) => {
+            if (k >= need.length) return;
+            const longest = Math.max(0, ...c.text.split(/\s+/)
+                .map((w) => w.length));
+            need[k] = Math.max(need[k], longest * CHAR_TWIPS + CELL_MARGIN);
+        });
+    }
+    const out = [...widths];
+    const total = out.reduce((a, b) => a + b, 0);
+    // Not enough room for every word: as it was.
+    if (need.reduce((a, b) => a + b, 0) > total) return widths;
+    for (let k = 0; k < out.length; k++) {
+        while (out[k] < need[k]) {
+            // From the column with most to spare.
+            let from = -1;
+            for (let j = 0; j < out.length; j++) {
+                if (j !== k && out[j] - need[j] > 0 &&
+                    (from < 0 || out[j] - need[j] > out[from] - need[from])) {
+                    from = j;
+                }
+            }
+            if (from < 0) break;
+            const take = Math.min(need[k] - out[k], out[from] - need[from]);
+            out[k] += take;
+            out[from] -= take;
+        }
+    }
+    return out;
+}
+
 /**
  * Manuscript table `src` in the template's table look: `model`'s table
  * properties, borders and all, with the manuscript's width.
@@ -545,7 +590,89 @@ function restyleTable(src, model) {
     const width = /<w:tblW\b[^>]*\/>/.exec(src);
     let props = tp[0];
     if (width) props = props.replace(/<w:tblW\b[^>]*\/>/, width[0]);
-    return tidyTable(src.replace(/<w:tblPr>[^]*?<\/w:tblPr>/, props));
+    return tidyTable(headerLike(
+        src.replace(/<w:tblPr>[^]*?<\/w:tblPr>/, props), model));
+}
+
+// A run's properties in the order Word reads them.
+const RPR_ORDER = ['rStyle', 'rFonts', 'b', 'bCs', 'i', 'iCs', 'caps',
+    'smallCaps', 'strike', 'dstrike', 'outline', 'shadow', 'emboss',
+    'imprint', 'noProof', 'snapToGrid', 'vanish', 'webHidden', 'color',
+    'spacing', 'w', 'kern', 'position', 'sz', 'szCs', 'highlight', 'u',
+    'effect', 'bdr', 'shd', 'fitText', 'vertAlign', 'rtl', 'cs', 'em',
+    'lang', 'eastAsianLayout', 'specVanish', 'oMath'];
+
+/** A run's property elements `xml` put in Word's order. */
+function orderedRunProps(xml) {
+    const parts = xml.match(/<w:(\w+)\b[^>]*?(?:\/>|>[^]*?<\/w:\1>)/g) ||
+        [];
+    const rank = (p) => {
+        const k = RPR_ORDER.indexOf(/^<w:(\w+)/.exec(p)[1]);
+        return k < 0 ? RPR_ORDER.length : k;
+    };
+    return parts.map((p, i) => [rank(p), i, p])
+        .sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]).join('');
+}
+
+/**
+ * Of tables `tables`, the first whose header row's look, its bold and
+ * italic, the most of them share; undefined for none.
+ */
+function commonTable(tables) {
+    const lookOf = (t) => {
+        const row = tableRows(t.xml)[0];
+        const c = row && (row.cells.find((x) => x.text.trim()) || row.cells[0]);
+        const rp = c ? (/<w:rPr>([^]*?)<\/w:rPr>/.exec(c.xml) || [])[1] ||
+            '' : '';
+        return `${/<w:b(?:\s+w:val="(?:1|true|on)")?\s*\/>/.test(rp)}` +
+            `${/<w:i(?:\s+w:val="(?:1|true|on)")?\s*\/>/.test(rp)}`;
+    };
+    const count = new Map();
+    for (const t of tables) {
+        const k = lookOf(t);
+        count.set(k, (count.get(k) || 0) + 1);
+    }
+    let best = null;
+    for (const [k, n] of count) if (!best || n > count.get(best)) best = k;
+    return tables.find((t) => lookOf(t) === best);
+}
+
+/**
+ * Table `tbl`'s header row in the look of `model`'s: its bold, italic
+ * and size on each run, and its first header cell's shading on each
+ * cell. Italic in a template's table header is its style, not an
+ * instruction.
+ */
+function headerLike(tbl, model) {
+    const mrow = tableRows(model)[0];
+    if (!mrow) return tbl;
+    const mcell = mrow.cells.find((c) => c.text.trim()) || mrow.cells[0];
+    const rp = (/<w:r\b[^>]*>\s*<w:rPr>([^]*?)<\/w:rPr>/.exec(mcell.xml) ||
+        [])[1] || '';
+    const look = (rp.match(/<w:(?:b|bCs|i|iCs|sz|szCs)\b[^>]*\/>/g) || [])
+        .join('');
+    const shd = (/<w:shd\b[^>]*\/>/.exec((/<w:tcPr>[^]*?<\/w:tcPr>/
+        .exec(mcell.xml) || [''])[0]) || [''])[0];
+    if (!look && !shd) return tbl;
+    return tbl.replace(/<w:tr\b[^>]*>[^]*?<\/w:tr>/, (tr) => {
+        let out = tr;
+        if (look) {
+            out = out.replace(/<w:r\b([^>]*)>(?:\s*<w:rPr>([^]*?)<\/w:rPr>)?/g,
+                (m, attrs, own) => {
+                    const kept = (own || '').replace(
+                        /<w:(?:b|bCs|i|iCs|sz|szCs)\b[^>]*\/>/g, '');
+                    return `<w:r${attrs}><w:rPr>` +
+                        `${orderedRunProps(look + kept)}</w:rPr>`;
+                });
+        }
+        if (shd) {
+            const tcPr = /<w:tc>(?:<w:tcPr\s*\/>|<w:tcPr>([^]*?)<\/w:tcPr>)?/g;
+            out = out.replace(tcPr,
+                (m, inner) => '<w:tc><w:tcPr>' + (inner || '')
+                    .replace(/<w:shd\b[^>]*\/>/g, '') + shd + '</w:tcPr>');
+        }
+        return out;
+    });
 }
 
 /**
@@ -606,8 +733,10 @@ function fillBody(tItems, ms, opts = {}) {
         if (matchOf.has(h) || heads.some((x) => matchOf.has(x) && x.num &&
             h.num && x.num.startsWith(h.num + '.'))) kept.add(h);
     }
+    // The template's own tables differ: a manuscript table takes the
+    // look of the most of them, by their header's bold and italic.
     const model = opts.restyleTables === false ? null :
-        tItems.find((x) => x.kind === 'table');
+        commonTable(tItems.filter((x) => x.kind === 'table'));
     // A manuscript heading with no template one, made like the
     // template's heading at its depth, or the deepest it has.
     const ownHeading = (x) => {
@@ -1066,4 +1195,5 @@ module.exports = { bodyBlocks, splitDocument, stripItalic, textOf, norm,
                    firstPageGone, fillDocx, referencesDocx, partPages,
                    italicRun, emptyPara, settled, oneFont,
                    withStyles, likeHeading, plainMath, tidyTable,
-                   indentPara, keepNext, widowControl };
+                   indentPara, keepNext, widowControl, roomForWords,
+                   headerLike };

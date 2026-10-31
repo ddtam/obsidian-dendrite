@@ -213,25 +213,20 @@ test('a table is set off by the template\'s blank line above its ' +
         'Table 1. Sizes.', 'A1', '(blank)', 'After.', '(blank)', '2. Data']);
 });
 
-test('a table is kept together: no row splits across pages, its header ' +
-     'repeats and stays with the row after it, and a short table stays ' +
-     'on one page with its caption', () => {
+test('a table breaks between pages cleanly: no row splits, its header ' +
+     'repeats and stays with the first row, its last two rows stay ' +
+     'together, and it may break anywhere else', () => {
     const tr = (t) => '<w:tr><w:trPr><w:cantSplit w:val="0"/><w:tblHeader ' +
         `w:val="0"/></w:trPr>${cell(run(t))}</w:tr>`;
-    const short = wt.tidyTable(`<w:tbl><w:tblPr/>${tr('H')}${tr('a')}` +
-                               `${tr('b')}</w:tbl>`);
-    const rows = short.match(/<w:tr>[^]*?<\/w:tr>/g);
+    const rows = wt.tidyTable('<w:tbl><w:tblPr/>' + tr('H') +
+        Array.from({ length: 8 }, (x, i) => tr(String(i))).join('') +
+        '</w:tbl>').match(/<w:tr>[^]*?<\/w:tr>/g);
     assert.ok(rows.every((r) => /<w:cantSplit\/>/.test(r)), 'no splits');
     assert.match(rows[0], /<w:tblHeader\/>/);
     assert.doesNotMatch(rows[1], /tblHeader/);
-    assert.ok(rows.slice(0, -1).every((r) => /<w:keepNext\/>/.test(r)),
-              'short: kept together');
-    assert.doesNotMatch(rows[2], /keepNext/);
-    const long = wt.tidyTable('<w:tbl><w:tblPr/>' + tr('H') +
-        Array.from({ length: 40 }, (x, i) => tr(String(i))).join('') +
-        '</w:tbl>').match(/<w:tr>[^]*?<\/w:tr>/g);
-    assert.match(long[0], /<w:keepNext\/>/, 'the header with the next row');
-    assert.doesNotMatch(long[5], /keepNext/, 'long: free to break');
+    const kept = rows.map((r) => /<w:keepNext\/>/.test(r));
+    assert.deepEqual(kept, [true, true, false, false, false, false, false,
+                            true, false]);
 });
 
 test('Pandoc\'s heading over the reference list is the list\'s one ' +
@@ -275,4 +270,31 @@ test('a heading over a table stays with it: no blank line between them, ' +
     // The heading, the blank line above it and the caption all kept
     // with what follows.
     for (const k of [2, 3, 4]) assert.match(shown[k], /<w:keepNext\/>/);
+});
+
+test('a column is at least as wide as its longest word, the room taken ' +
+     'from the widest, the total kept', () => {
+    const t = table(row(cell(run('Full Name')), cell(run('/nearline (TB)'))),
+                    row(cell(run('Derek Tam')), cell(run('0'))));
+    const out = wt.roomForWords(t, [4000, 600]);
+    assert.equal(out[0] + out[1], 4600);
+    assert.ok(out[1] >= '/nearline'.length * 125, 'the word fits');
+    assert.ok(out[0] >= 'Derek'.length * 125);
+    assert.deepEqual(wt.roomForWords(t, [400, 400]), [400, 400],
+                     'no room for every word: as it was');
+});
+
+test('a manuscript table with no template counterpart takes the ' +
+     'template table header\'s bold, italic and shading on its first row',
+     () => {
+    const model = '<w:tbl><w:tblPr><w:tblBorders/></w:tblPr><w:tr><w:tc>' +
+        '<w:tcPr><w:shd w:fill="EEEEEE"/></w:tcPr><w:p><w:r><w:rPr><w:b/>' +
+        '<w:i/></w:rPr><w:t>Head</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    const src = table(row(cell(run('Data'))), row(cell(run('x'))));
+    const out = wt.restyleTable(src, model);
+    const [head, body] = wt.tableRows(out);
+    assert.match(head.xml, /<w:b\/><w:i\/>/);
+    assert.match(head.xml, /<w:shd w:fill="EEEEEE"\/>/);
+    assert.doesNotMatch(body.xml, /<w:b\/>|<w:shd/, 'the body as it was');
+    assert.match(out, /<w:tblBorders\/>/, 'the template\'s borders');
 });

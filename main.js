@@ -7049,8 +7049,10 @@ var require_wordtemplate = __commonJS({
       const cols = all.map((w) => Number(/[\d.]+/.exec(w)[0]));
       const kept = cols.filter((c, k) => keepCol[k] !== false);
       const sum = (a) => a.reduce((x, y) => x + y, 0);
-      const widths = kept.length && sum(kept) ? kept.map((c) => Math.round(c * sum(cols) / sum(kept))) : null;
-      return tidyTable(head + rows.join("") + "</w:tbl>", widths);
+      let widths = kept.length && sum(kept) ? kept.map((c) => Math.round(c * sum(cols) / sum(kept))) : null;
+      const filled = head + rows.join("") + "</w:tbl>";
+      if (widths) widths = roomForWords(filled, widths);
+      return tidyTable(filled, widths);
     }
     var AFTER_SPACING = new RegExp("<w:(?:" + [
       "ind",
@@ -7112,7 +7114,6 @@ var require_wordtemplate = __commonJS({
         `<w:p$1><w:pPr><w:ind w:left="${left}"/></w:pPr>`
       );
     }
-    var KEEP_ROWS = 30;
     function keepTogether(tbl) {
       const count = (tbl.match(/<w:tr\b/g) || []).length;
       let k = 0;
@@ -7133,7 +7134,7 @@ var require_wordtemplate = __commonJS({
             `$1<w:trPr>${flags}</w:trPr>`
           );
         }
-        const keep = i < count - 1 && (count <= KEEP_ROWS || i === 0);
+        const keep = i < count - 1 && (i <= 1 || i === count - 2);
         return keep ? out.replace(
           /<w:p\b[^>]*>(?:<w:pPr>[^]*?<\/w:pPr>)?/g,
           (p) => keepNext(p + "</w:p>").slice(0, -"</w:p>".length)
@@ -7170,13 +7171,143 @@ var require_wordtemplate = __commonJS({
       }
       return out;
     }
+    var CHAR_TWIPS = 125;
+    var CELL_MARGIN = 230;
+    function roomForWords(tbl, widths) {
+      const need = widths.map(() => 0);
+      for (const r of tableRows(tbl)) {
+        r.cells.forEach((c, k) => {
+          if (k >= need.length) return;
+          const longest = Math.max(0, ...c.text.split(/\s+/).map((w) => w.length));
+          need[k] = Math.max(need[k], longest * CHAR_TWIPS + CELL_MARGIN);
+        });
+      }
+      const out = [...widths];
+      const total = out.reduce((a, b) => a + b, 0);
+      if (need.reduce((a, b) => a + b, 0) > total) return widths;
+      for (let k = 0; k < out.length; k++) {
+        while (out[k] < need[k]) {
+          let from = -1;
+          for (let j = 0; j < out.length; j++) {
+            if (j !== k && out[j] - need[j] > 0 && (from < 0 || out[j] - need[j] > out[from] - need[from])) {
+              from = j;
+            }
+          }
+          if (from < 0) break;
+          const take = Math.min(need[k] - out[k], out[from] - need[from]);
+          out[k] += take;
+          out[from] -= take;
+        }
+      }
+      return out;
+    }
     function restyleTable(src, model) {
       const tp = /<w:tblPr>[^]*?<\/w:tblPr>/.exec(model);
       if (!tp) return src;
       const width = /<w:tblW\b[^>]*\/>/.exec(src);
       let props = tp[0];
       if (width) props = props.replace(/<w:tblW\b[^>]*\/>/, width[0]);
-      return tidyTable(src.replace(/<w:tblPr>[^]*?<\/w:tblPr>/, props));
+      return tidyTable(headerLike(
+        src.replace(/<w:tblPr>[^]*?<\/w:tblPr>/, props),
+        model
+      ));
+    }
+    var RPR_ORDER = [
+      "rStyle",
+      "rFonts",
+      "b",
+      "bCs",
+      "i",
+      "iCs",
+      "caps",
+      "smallCaps",
+      "strike",
+      "dstrike",
+      "outline",
+      "shadow",
+      "emboss",
+      "imprint",
+      "noProof",
+      "snapToGrid",
+      "vanish",
+      "webHidden",
+      "color",
+      "spacing",
+      "w",
+      "kern",
+      "position",
+      "sz",
+      "szCs",
+      "highlight",
+      "u",
+      "effect",
+      "bdr",
+      "shd",
+      "fitText",
+      "vertAlign",
+      "rtl",
+      "cs",
+      "em",
+      "lang",
+      "eastAsianLayout",
+      "specVanish",
+      "oMath"
+    ];
+    function orderedRunProps(xml) {
+      const parts = xml.match(/<w:(\w+)\b[^>]*?(?:\/>|>[^]*?<\/w:\1>)/g) || [];
+      const rank = (p) => {
+        const k = RPR_ORDER.indexOf(/^<w:(\w+)/.exec(p)[1]);
+        return k < 0 ? RPR_ORDER.length : k;
+      };
+      return parts.map((p, i) => [rank(p), i, p]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]).join("");
+    }
+    function commonTable(tables) {
+      const lookOf = (t) => {
+        const row = tableRows(t.xml)[0];
+        const c = row && (row.cells.find((x) => x.text.trim()) || row.cells[0]);
+        const rp = c ? (/<w:rPr>([^]*?)<\/w:rPr>/.exec(c.xml) || [])[1] || "" : "";
+        return `${/<w:b(?:\s+w:val="(?:1|true|on)")?\s*\/>/.test(rp)}${/<w:i(?:\s+w:val="(?:1|true|on)")?\s*\/>/.test(rp)}`;
+      };
+      const count = /* @__PURE__ */ new Map();
+      for (const t of tables) {
+        const k = lookOf(t);
+        count.set(k, (count.get(k) || 0) + 1);
+      }
+      let best = null;
+      for (const [k, n] of count) if (!best || n > count.get(best)) best = k;
+      return tables.find((t) => lookOf(t) === best);
+    }
+    function headerLike(tbl, model) {
+      const mrow = tableRows(model)[0];
+      if (!mrow) return tbl;
+      const mcell = mrow.cells.find((c) => c.text.trim()) || mrow.cells[0];
+      const rp = (/<w:r\b[^>]*>\s*<w:rPr>([^]*?)<\/w:rPr>/.exec(mcell.xml) || [])[1] || "";
+      const look = (rp.match(/<w:(?:b|bCs|i|iCs|sz|szCs)\b[^>]*\/>/g) || []).join("");
+      const shd = (/<w:shd\b[^>]*\/>/.exec((/<w:tcPr>[^]*?<\/w:tcPr>/.exec(mcell.xml) || [""])[0]) || [""])[0];
+      if (!look && !shd) return tbl;
+      return tbl.replace(/<w:tr\b[^>]*>[^]*?<\/w:tr>/, (tr) => {
+        let out = tr;
+        if (look) {
+          out = out.replace(
+            /<w:r\b([^>]*)>(?:\s*<w:rPr>([^]*?)<\/w:rPr>)?/g,
+            (m, attrs, own) => {
+              const kept = (own || "").replace(
+                /<w:(?:b|bCs|i|iCs|sz|szCs)\b[^>]*\/>/g,
+                ""
+              );
+              return `<w:r${attrs}><w:rPr>${orderedRunProps(look + kept)}</w:rPr>`;
+            }
+          );
+        }
+        if (shd) {
+          const tcPr = /<w:tc>(?:<w:tcPr\s*\/>|<w:tcPr>([^]*?)<\/w:tcPr>)?/g;
+          out = out.replace(
+            tcPr,
+            (m, inner) => "<w:tc><w:tcPr>" + (inner || "").replace(/<w:shd\b[^>]*\/>/g, "") + shd + "</w:tcPr>"
+          );
+        }
+        return out;
+      });
     }
     function likeHeading(model, text) {
       const pPr = (/<w:pPr>[^]*?<\/w:pPr>/.exec(model) || [""])[0];
@@ -7208,7 +7339,7 @@ var require_wordtemplate = __commonJS({
       for (const h of heads) {
         if (matchOf.has(h) || heads.some((x) => matchOf.has(x) && x.num && h.num && x.num.startsWith(h.num + "."))) kept.add(h);
       }
-      const model = opts.restyleTables === false ? null : tItems.find((x) => x.kind === "table");
+      const model = opts.restyleTables === false ? null : commonTable(tItems.filter((x) => x.kind === "table"));
       const ownHeading = (x) => {
         const d = x.num ? depthOf(x.num) : x.level;
         const like = heads.find((h) => depthOf(h.num) === d) || [...heads].reverse().find((h) => depthOf(h.num) < d);
@@ -7609,7 +7740,9 @@ var require_wordtemplate = __commonJS({
       tidyTable,
       indentPara,
       keepNext,
-      widowControl
+      widowControl,
+      roomForWords,
+      headerLike
     };
   }
 });
