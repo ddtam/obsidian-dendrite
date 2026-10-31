@@ -779,6 +779,24 @@ const tail = (s, n) => s.slice(Math.max(0, s.length - n));
  * cards' headings, so it is not taken for the same words in a table.
  */
 function locate(item, cards) {
+    const at = locateAs(item, cards);
+    if (at || item.heading) return at;
+    // A heading as exported carries its section number, which the card's
+    // heading line does not: found by its words, only where they are a
+    // card's whole heading line and only one card's, as a short heading
+    // is likely in body text too.
+    const m = /^\s*\d+(?:\.\d+)*\.?\s+(\S[^]*)$/.exec(item.quote || '');
+    if (!m) return null;
+    const want = normalise(m[1]).text;
+    const own = cards.filter((c) => String(c.text).split('\n').some((l) =>
+        /^#{1,6}\s/.test(l) &&
+        normalise(l.replace(/^#+\s*/, '')).text === want));
+    if (own.length !== 1) return null;
+    return locateAs({ ...item, quote: m[1], before: '', after: '',
+                      heading: true }, own);
+}
+
+function locateAs(item, cards) {
     if (item.card) {
         // By its short id, which a rename keeps, so a card named as it
         // was before one is still found.

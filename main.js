@@ -2366,6 +2366,22 @@ var require_review = __commonJS({
     }
     var tail = (s, n) => s.slice(Math.max(0, s.length - n));
     function locate(item, cards) {
+      const at = locateAs(item, cards);
+      if (at || item.heading) return at;
+      const m = /^\s*\d+(?:\.\d+)*\.?\s+(\S[^]*)$/.exec(item.quote || "");
+      if (!m) return null;
+      const want = normalise(m[1]).text;
+      const own = cards.filter((c) => String(c.text).split("\n").some((l) => /^#{1,6}\s/.test(l) && normalise(l.replace(/^#+\s*/, "")).text === want));
+      if (own.length !== 1) return null;
+      return locateAs({
+        ...item,
+        quote: m[1],
+        before: "",
+        after: "",
+        heading: true
+      }, own);
+    }
+    function locateAs(item, cards) {
       if (item.card) {
         const short = (x) => String(x).slice(String(x).lastIndexOf("-") + 1);
         const k2 = short(item.card);

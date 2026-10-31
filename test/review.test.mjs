@@ -1888,7 +1888,9 @@ test('a suggested change to a table cell, named by its row\'s first cell ' +
         column: 'Total', was: '83', replace: '100', date: '2026-10-30' });
     assert.equal(out.reason, undefined);
     const lines = out.md.split('\n');
-    assert.match(lines[4], /\| +100 \| +%%\{\d+%%83%%\}\d+ \[!suggest\] Claude, 2026-10-30: 100%% \|$/);
+    const sug = (v) => '%%\\{\\d+%%83%%\\}\\d+ \\[!suggest\\] Claude, ' +
+        `2026-10-30: ${v}%%`;
+    assert.match(lines[4], new RegExp(`\\| +100 \\| +${sug(100)} \\|$`));
     assert.equal(lines[5], md.split('\n')[5], 'the 83 in the next row kept');
     const items = r.reviewItems(out.md).filter((x) => x.kind === 'suggest');
     assert.equal(items.length, 1);
@@ -1896,7 +1898,8 @@ test('a suggested change to a table cell, named by its row\'s first cell ' +
     const two = r.suggestInto(md, 'G-aaaaa', { row: '/nearline (TB)',
         column: 2, was: '83', replace: '90', date: '2026-10-30' });
     assert.equal(two.reason, undefined);
-    assert.match(two.md.split('\n')[5], /\| +%%\{\d+%%83%%\}\d+ \[!suggest\] Claude, 2026-10-30: 90%% \| 120 \|$/);
+    assert.match(two.md.split('\n')[5],
+                 new RegExp(`\\| +${sug(90)} \\| 120 \\|$`));
     // Refused, saying why.
     assert.match(r.suggestInto(md, 'G-aaaaa', { row: '/project (TB)',
         column: 'Total', was: '84', replace: '100' }).reason,
@@ -1911,4 +1914,27 @@ test('a suggested change to a table cell, named by its row\'s first cell ' +
     assert.match(r.suggestInto(md, 'G-aaaaa', { quote: '83',
         replace: '100', date: '2026-10-30' }).reason,
         /table cell.*row.*column/);
+});
+
+test('a comment on a heading as exported, its section number added, is ' +
+     'placed on the card whose heading line it is', () => {
+    const cards = [{ id: 'G-aaaaa', text: 'Storage is on Fir.' },
+                   { id: 'G-bbbbb', text: '### Storage Details\n\nText.' }];
+    const at = r.locate({ kind: 'comment', quote: '4.3.1 Storage Details',
+                          before: '', after: '' }, cards);
+    assert.ok(at, 'placed');
+    assert.equal(at.id, 'G-bbbbb');
+});
+
+test('a numbered heading quote goes only to the one card whose heading ' +
+     'line it is, whole, never to body text or a longer heading', () => {
+    const q = { kind: 'comment', quote: '4.3.1 Storage Details',
+                before: '', after: '' };
+    const body = { id: 'G-aaaaa', text: 'The storage details are below.' };
+    const longer = { id: 'G-ccccc', text: '# Storage Details and Costs\n\nX.' };
+    const own = { id: 'G-bbbbb', text: '### Storage Details\n\nText.' };
+    assert.equal(r.locate(q, [body, longer, own]).id, 'G-bbbbb');
+    assert.equal(r.locate(q, [body, longer]), null, 'no heading of it');
+    const twin = { id: 'G-ddddd', text: '## Storage Details\n\nMore.' };
+    assert.equal(r.locate(q, [own, twin]), null, 'two: not placed');
 });
