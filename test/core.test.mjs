@@ -1119,3 +1119,18 @@ test('a card\'s alias, for finding it by name: a table\'s or figure\'s ' +
     const a = c.cardAlias(`# ${long}`, null);
     assert.ok(a.length <= 101 && a.endsWith('…'), 'kept short');
 });
+
+test('a footnote holding only citations becomes one citation before the ' +
+     'punctuation it followed; a footnote with words of its own is kept',
+     () => {
+    const t = (s) => c.footnoteCitations(s);
+    assert.deepEqual(t('Few survive.^[[@kantarjian2021]] Next.'),
+                     { md: 'Few survive [@kantarjian2021]. Next.', n: 1 });
+    assert.deepEqual(t('Tools^[[@a; @b, p. 4]] and more^[[@c][@d]], too.'),
+                     { md: 'Tools [@a; @b, p. 4] and more [@c; @d], too.',
+                       n: 2 });
+    const kept = 'A claim.^[As shown in [@a], with caveats.]';
+    assert.deepEqual(t(kept), { md: kept, n: 0 });
+    assert.deepEqual(t('Inline [@a] stays.'),
+                     { md: 'Inline [@a] stays.', n: 0 });
+});

@@ -120,6 +120,18 @@ async function fetchBib(keys, port, deps) {
     return missing.length ? { missing } : { bib: JSON.stringify(all) };
 }
 
+/**
+ * A citation style with an explicit `<name/>` first in each `<names>`
+ * that has none: Pandoc's citation processor applies the name options a
+ * style sets on its root (initials, family name first, et al.) only to
+ * a name element written out, and styles from the CSL variant builder
+ * leave it implied, so authors printed in full, given name first.
+ */
+function cslWithNames(xml) {
+    return xml.replace(/<names\b[^>]*[^/]>(?=\s*<(\/?[\w-]+))/g,
+        (open, next) => (next === 'name' ? open : `${open}<name/>`));
+}
+
 // Sizes LaTeX's article class takes; others need extarticle.
 const ARTICLE_SIZES = [10, 11, 12];
 
@@ -644,8 +656,24 @@ async function exportDocument(o, deps) {
         }
     }
     await deps.writeFile(input, text);
+    // The style, with the name elements Pandoc needs written out.
+    let csl = o.csl;
+    let cslCopy = null;
+    if (csl && deps.readFile) {
+        try {
+            const xml = String(await deps.readFile(csl));
+            const fixed = cslWithNames(xml);
+            if (fixed !== xml) {
+                cslCopy = deps.join(dir, `dendrite-${Date.now()}.csl`);
+                await deps.writeFile(cslCopy, fixed);
+                csl = cslCopy;
+            }
+        } catch (err) {
+            // The style as it is; Pandoc says if it cannot read it.
+        }
+    }
     const args = pandocArgs({ input, output: o.output, format: o.format,
-                              engine: o.engine, bibliography, csl: o.csl,
+                              engine: o.engine, bibliography, csl,
                               resourcePath: o.resourcePath, header,
                               tables, style });
     try {
@@ -670,6 +698,7 @@ async function exportDocument(o, deps) {
         if (header) deps.remove(header);
         if (tables) deps.remove(tables);
         if (reference) deps.remove(reference);
+        if (cslCopy) deps.remove(cslCopy);
         if (bibliography && bibliography !== o.fallbackBib) {
             deps.remove(bibliography);
         }
@@ -748,4 +777,5 @@ function condaBins(names, home) {
 module.exports = { citekeys, pandocCaptions, pandocError, searchPath,
                    condaBins, toPandoc, TABLES_LUA, lineChars,
                    restyledReference, fetchBib, pandocArgs, exportDocument,
-                   pdfPages, measuredRate, footnoteGap, preamble, BODY_END };
+                   pdfPages, measuredRate, footnoteGap, preamble, BODY_END,
+                   cslWithNames };

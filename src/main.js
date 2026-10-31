@@ -1167,6 +1167,44 @@ class DendriteView extends ItemView {
     }
 
     /**
+     * Footnotes in every card that hold only citations made citations,
+     * which the manuscript's citation style prints in the text or as a
+     * footnote as it sets; one step to undo.
+     */
+    async convertFootnoteCitations() {
+        if (this.editing) await this.endEdit();
+        const restores = [];
+        const changed = [];
+        let count = 0;
+        for (const n of core.allNodes(this.root)) {
+            const f = this.cardFile(n.id);
+            if (!f) continue;
+            const data = await this.app.vault.read(f);
+            const { body } = core.splitFrontmatter(data);
+            const out = core.footnoteCitations(body);
+            if (!out.n) continue;
+            await this.writeCard(f, (d) => core.splitFrontmatter(d).fm +
+                                 out.md);
+            restores.push({ path: f.path, text: data, ifBody: out.md });
+            changed.push(n.id);
+            count += out.n;
+        }
+        if (restores.length) {
+            this.pushUndo({ active: this.active, files: [], text: true,
+                            restores });
+            for (const id of changed) {
+                this.invalidate(id);
+                await this.renderCard(id);
+            }
+        }
+        new Notice(count ? `Dendrite: made ${count} footnote` +
+            `${count === 1 ? '' : 's'} holding only citations into ` +
+            `citations, in ${changed.length} card` +
+            `${changed.length === 1 ? '' : 's'}. Undo takes them back.` :
+            'Dendrite: no footnote holds only citations.');
+    }
+
+    /**
      * Whether a card's own text prints: it is not scaffolding, and
      * neither it nor a card above it is left out, as an old version is.
      */
@@ -12845,6 +12883,8 @@ module.exports = class DendritePlugin extends Plugin {
             false, (v) => v.sweepTypes());
         viewCommand('mend-tables', 'Mend tables split at a comment\'s ' +
             'priority', false, (v) => v.mendTables());
+        viewCommand('footnote-citations', 'Convert citation-only footnotes ' +
+            'to citations', false, (v) => v.convertFootnoteCitations());
         viewCommand('merge-into-above', 'Merge card into the card above',
             false, (v) => v.merge('above'));
         viewCommand('merge-into-parent', 'Merge card into its parent',

@@ -1304,7 +1304,20 @@ var require_core = __commonJS({
       const s = String(id || "");
       return s.slice(s.lastIndexOf("-") + 1);
     }
+    function footnoteCitations(md) {
+      let n = 0;
+      const out = md.replace(
+        /([.,;:!?]*)\^\[\s*((?:\[@[^\[\]]+\]\s*[;,]?\s*)+)\.?\s*\]/g,
+        (all, punct, inner) => {
+          const cites = inner.match(/\[@[^\[\]]+\]/g).map((x) => x.slice(1, -1).trim());
+          n++;
+          return ` [${cites.join("; ")}]${punct}`;
+        }
+      );
+      return { md: out.replace(/ {2}\[@/g, " [@"), n };
+    }
     module2.exports = {
+      footnoteCitations,
       findPatterns,
       findMatches,
       printedRanges,
@@ -4872,6 +4885,12 @@ var require_pandoc = __commonJS({
       }
       return missing.length ? { missing } : { bib: JSON.stringify(all) };
     }
+    function cslWithNames(xml) {
+      return xml.replace(
+        /<names\b[^>]*[^/]>(?=\s*<(\/?[\w-]+))/g,
+        (open, next) => next === "name" ? open : `${open}<name/>`
+      );
+    }
     var ARTICLE_SIZES = [10, 11, 12];
     function footnoteGap(st) {
       if (st.footnoteGap) return st.footnoteGap;
@@ -5294,13 +5313,27 @@ return {
         }
       }
       await deps.writeFile(input, text);
+      let csl = o.csl;
+      let cslCopy = null;
+      if (csl && deps.readFile) {
+        try {
+          const xml = String(await deps.readFile(csl));
+          const fixed = cslWithNames(xml);
+          if (fixed !== xml) {
+            cslCopy = deps.join(dir, `dendrite-${Date.now()}.csl`);
+            await deps.writeFile(cslCopy, fixed);
+            csl = cslCopy;
+          }
+        } catch (err) {
+        }
+      }
       const args = pandocArgs({
         input,
         output: o.output,
         format: o.format,
         engine: o.engine,
         bibliography,
-        csl: o.csl,
+        csl,
         resourcePath: o.resourcePath,
         header,
         tables,
@@ -5330,6 +5363,7 @@ return {
         if (header) deps.remove(header);
         if (tables) deps.remove(tables);
         if (reference) deps.remove(reference);
+        if (cslCopy) deps.remove(cslCopy);
         if (bibliography && bibliography !== o.fallbackBib) {
           deps.remove(bibliography);
         }
@@ -5387,7 +5421,8 @@ return {
       measuredRate,
       footnoteGap,
       preamble,
-      BODY_END
+      BODY_END,
+      cslWithNames
     };
   }
 });
@@ -8592,6 +8627,42 @@ var DendriteView = class extends ItemView {
       }
     }
     new Notice(restores.length ? `Dendrite: mended the tables of ${restores.length} card${restores.length === 1 ? "" : "s"}: ${mended.map((id) => core.shortId(id)).join(", ")}.` : "Dendrite: no table needed mending.");
+  }
+  /**
+   * Footnotes in every card that hold only citations made citations,
+   * which the manuscript's citation style prints in the text or as a
+   * footnote as it sets; one step to undo.
+   */
+  async convertFootnoteCitations() {
+    if (this.editing) await this.endEdit();
+    const restores = [];
+    const changed = [];
+    let count = 0;
+    for (const n of core.allNodes(this.root)) {
+      const f = this.cardFile(n.id);
+      if (!f) continue;
+      const data = await this.app.vault.read(f);
+      const { body } = core.splitFrontmatter(data);
+      const out = core.footnoteCitations(body);
+      if (!out.n) continue;
+      await this.writeCard(f, (d) => core.splitFrontmatter(d).fm + out.md);
+      restores.push({ path: f.path, text: data, ifBody: out.md });
+      changed.push(n.id);
+      count += out.n;
+    }
+    if (restores.length) {
+      this.pushUndo({
+        active: this.active,
+        files: [],
+        text: true,
+        restores
+      });
+      for (const id of changed) {
+        this.invalidate(id);
+        await this.renderCard(id);
+      }
+    }
+    new Notice(count ? `Dendrite: made ${count} footnote${count === 1 ? "" : "s"} holding only citations into citations, in ${changed.length} card${changed.length === 1 ? "" : "s"}. Undo takes them back.` : "Dendrite: no footnote holds only citations.");
   }
   /**
    * Whether a card's own text prints: it is not scaffolding, and
@@ -19421,6 +19492,7 @@ module.exports = class DendritePlugin extends Plugin {
       (v) => v.sweepTypes()
     );
     viewCommand("mend-tables", "Mend tables split at a comment's priority", false, (v) => v.mendTables());
+    viewCommand("footnote-citations", "Convert citation-only footnotes to citations", false, (v) => v.convertFootnoteCitations());
     viewCommand(
       "merge-into-above",
       "Merge card into the card above",

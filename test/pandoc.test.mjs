@@ -586,3 +586,21 @@ test('in Word, keep-with-next follows the paragraph\'s style, and a ' +
     assert.match(out, /<w:trPr><w:cantSplit \/><w:tblHeader/);
     assert.equal(d.keepTables(tbl(31)), tbl(31));
 });
+
+test('a style whose names take its name rules from the style element ' +
+     'gets an explicit name in each, so Pandoc applies initials, order ' +
+     'and et al.; one with its own name is left alone', () => {
+    const { cslWithNames } = require('../src/pandoc.js');
+    const csl = '<style initialize-with="" name-as-sort-order="all">' +
+        '<macro name="author"><names variable="author">\n' +
+        '<label prefix=", "/><substitute><names variable="editor"/>' +
+        '</substitute></names></macro><macro name="ed"><names ' +
+        'variable="editor"><name initialize-with=". "/></names></macro>' +
+        '</style>';
+    const out = cslWithNames(csl);
+    assert.match(out, /<names variable="author">\s*<name\/>\s*<label/);
+    assert.match(out, /<names variable="editor"\/>/, 'self-closed: as is');
+    assert.match(out, /<names variable="editor"><name initialize-with/);
+    assert.equal((out.match(/<name\/>/g) || []).length, 1);
+    assert.equal(cslWithNames(out), out, 'once only');
+});

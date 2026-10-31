@@ -7591,3 +7591,18 @@ test('back and forward go between the cards jumped to through the ' +
     assert.deepEqual(view.editing.editor.selection(), [6, 10]);
     await view.endEdit();
 });
+
+test('footnotes holding only citations are made citations across the ' +
+     'cards, as one step to undo', async () => {
+    const { view, text } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': 'Few survive.^[[@k2021]] More.',
+          'G-bbbbb': 'A note.^[With words [@x].]' });
+    await view.convertFootnoteCitations();
+    await tick(20);
+    assert.equal(text(cardPath('G-aaaaa')), 'Few survive [@k2021]. More.');
+    assert.equal(text(cardPath('G-bbbbb')), 'A note.^[With words [@x].]');
+    await view.doUndo();
+    await tick(20);
+    assert.equal(text(cardPath('G-aaaaa')), 'Few survive.^[[@k2021]] More.');
+});

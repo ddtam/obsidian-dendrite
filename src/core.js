@@ -1851,7 +1851,30 @@ function shortId(id) {
     return s.slice(s.lastIndexOf('-') + 1);
 }
 
+/**
+ * Footnotes holding only citations, `^[[@a]]`, `^[[@a; @b]]` or
+ * `^[[@a][@b]]`, as one citation each, `[@a; @b]`, which the citation
+ * style then prints in the text or as a footnote as it sets; set before
+ * the punctuation the footnote mark followed, as an in-text citation
+ * is. A footnote with words of its own is kept. `{ md, n }`, n the
+ * number converted.
+ */
+function footnoteCitations(md) {
+    let n = 0;
+    const out = md.replace(
+        /([.,;:!?]*)\^\[\s*((?:\[@[^\[\]]+\]\s*[;,]?\s*)+)\.?\s*\]/g,
+        (all, punct, inner) => {
+            const cites = inner.match(/\[@[^\[\]]+\]/g)
+                .map((x) => x.slice(1, -1).trim());
+            n++;
+            return ` [${cites.join('; ')}]${punct}`;
+        });
+    // No space doubled where the text before already ended in one.
+    return { md: out.replace(/ {2}\[@/g, ' [@'), n };
+}
+
 module.exports = {
+    footnoteCitations,
     findPatterns, findMatches, printedRanges, shortId,
     roundFingerprints, changedSince,
     parseLimit, formatLimit, countText, wordsPerPage, measure,
