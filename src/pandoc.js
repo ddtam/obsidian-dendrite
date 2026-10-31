@@ -581,7 +581,8 @@ function pdfPages(buf, inflate) {
 /**
  * Export markdown to PDF or Word. `o` holds md, format ('pdf' | 'docx'),
  * output, csl, port, fallbackBib, pandoc, engine, resourcePath, resolve,
- * and style, as pandocArgs takes it.
+ * and style, as pandocArgs takes it; for Word, transform(buf), a last
+ * step on the finished file, answering the file to write.
  * Returns { ok, keys } or { error } with a message for the writer; for a
  * PDF, also `layout`: { pages, bodyEnd } as pdfPages reads them, or null.
  */
@@ -656,6 +657,11 @@ async function exportDocument(o, deps) {
                 await deps.writeFile(o.output, docx.keepDocument(
                     await deps.readFile(o.output), deps.zlib));
             } catch (err) { /* kept as Pandoc wrote it */ }
+        }
+        // Then the caller's own step, as filling a template.
+        if (o.format === 'docx' && o.transform) {
+            await deps.writeFile(o.output,
+                await o.transform(await deps.readFile(o.output)));
         }
     } catch (err) {
         return { error: pandocError(err, o.pandoc || 'pandoc') };

@@ -38,6 +38,8 @@ const float = require('./float.js');
 const timing = require('./timing.js');
 const { History, idbStore, hash: versionHash } = require('./history.js');
 const { Ledger, makeFolders, moveDone } = require('./ledger.js');
+const wordtemplate = require('./wordtemplate.js');
+const docxLib = require('./docx.js');
 const zotero = require('./zotero.js');
 const reviewlog = require('./reviewlog.js');
 const { PdfLinks } = zotero;
@@ -8293,6 +8295,14 @@ class DendriteView extends ItemView {
                 .onClick(() => this.exportTo(node, 'pdf')));
             m.addItem((i) => i.setTitle('Word')
                 .onClick(() => this.exportTo(node, 'docx')));
+            // The manuscript in its template, when it names one.
+            if (!node && this.manuscript().style.template) {
+                m.addSeparator();
+                m.addItem((i) => i.setTitle('Word, from template')
+                    .onClick(() => this.exportTo(null, 'tdocx')));
+                m.addItem((i) => i.setTitle('PDF, from template')
+                    .onClick(() => this.exportTo(null, 'tpdf')));
+            }
         }
         if (event) m.showAtMouseEvent(event);
     }
@@ -8339,6 +8349,11 @@ class DendriteView extends ItemView {
         }
         const name = safeName(this.file.basename +
             (node ? ' - ' + (node.label || node.id) : ''));
+        if (format === 'tdocx' || format === 'tpdf') {
+            await this.exportTemplate(text, format === 'tpdf', dir, name,
+                                      ms);
+            return;
+        }
         if (format !== 'md') {
             await this.exportPandoc(text, format, dir, name, ms, !node);
             return;
@@ -8354,6 +8369,208 @@ class DendriteView extends ItemView {
         }
         await this.app.workspace.getLeaf('tab').openFile(out);
         new Notice(`Dendrite: exported to ${path}`);
+    }
+
+    /**
+     * The manuscript in the Word template its index names, as Word, and
+     * as a PDF made from that by LibreOffice when `pdf`, measured page by
+     * page against the index's page limits. Over its total limit with a
+     * reference list, the list goes to a file of its own and both counts
+     * are said.
+     */
+    async exportTemplate(text, pdf, dir, name, ms) {
+        const s = this.plugin.settings;
+        const st = ms.style;
+        const deps = this.plugin.pandocDeps();
+        const nodePath = require('path');
+        const base = this.app.vault.adapter.getBasePath ?
+            this.app.vault.adapter.getBasePath() : '';
+        const home = this.file.parent && this.file.parent.path !== '/' ?
+            this.file.parent.path + '/' : '';
+        const tf = this.app.vault.getAbstractFileByPath(
+            normalizePath(home + st.template)) ||
+            this.app.vault.getAbstractFileByPath(normalizePath(st.template));
+        if (!(tf instanceof TFile)) {
+            new Notice(`Dendrite: no template at ${st.template}, from the ` +
+                       'index\'s folder or the vault root.', 10000);
+            return;
+        }
+        const templatePath = nodePath.join(base, tf.path);
+        const tplBuf = await deps.readFile(templatePath);
+        const pandocPath = s.pandocPath || 'pandoc';
+        // Pandoc's own styles, for those it names and does not add.
+        let defaultStyles = null;
+        const tmpRef = deps.join(deps.tmpdir(),
+                                 `dendrite-${Date.now()}-default.docx`);
+        try {
+            await deps.run(pandocPath, ['-o', tmpRef,
+                '--print-default-data-file', 'reference.docx']);
+            const f = docxLib.readZip(await deps.readFile(tmpRef), deps.zlib)
+                .find((x) => x.name === 'word/styles.xml');
+            defaultStyles = f ? f.data.toString('utf8') : null;
+        } catch (err) {
+            defaultStyles = null;
+        } finally {
+            deps.remove(tmpRef);
+        }
+        const opts = (refs) => ({ startAt: st.templateStart,
+            fields: st.templateFields || {}, font: st.font,
+            fontSize: st.fontSize, defaultStyles,
+            references: refs ? 'inline' : 'none',
+            referencesTitle: st.referencesTitle || 'References' });
+        const rel = normalizePath(`${dir}/${name}.docx`);
+        const output = nodePath.join(base, rel);
+        const inVault = (p) => (p ? nodePath.join(base, p) : null);
+        // Simple math as text, in the template's font; the rest said.
+        const math = wordtemplate.plainMath(text);
+        text = math.md;
+        let raw = null;
+        let report = null;
+        const notice = new Notice('Dendrite: filling the template…', 0);
+        const result = await pandoc.exportDocument({
+            md: text, format: 'docx', output,
+            csl: ms.csl ? nodePath.join(base, ms.csl) : null,
+            style: Object.assign({}, st, { referenceDocx: templatePath,
+                                           defaults: inVault(st.defaults) }),
+            port: s.zoteroPort, fallbackBib: s.fallbackBib || null,
+            pandoc: pandocPath, resourcePath: base,
+            resolve: (link) => {
+                const f = this.app.metadataCache.getFirstLinkpathDest(
+                    link, this.file.path);
+                return f ? nodePath.join(base, f.path) : null;
+            },
+            transform: async (buf) => {
+                raw = buf;
+                const r = wordtemplate.fillDocx(buf, tplBuf, opts(true),
+                                                deps.zlib);
+                report = r.report;
+                return r.buf;
+            },
+        }, deps);
+        if (result.error) {
+            notice.hide();
+            new Notice(`Dendrite: ${result.error}`, 12000);
+            return;
+        }
+        const said = [];
+        if (math.left.length) {
+            said.push(`Math set as an equation, not in the body's font: ` +
+                `${math.left.map((m) => `$${m}$`).join(', ')}.`);
+        }
+        if (report.unplaced.length) {
+            said.push(`No heading in the template for ` +
+                `${report.unplaced.join(', ')}: each follows the section ` +
+                'before it.');
+        }
+        if (!pdf) {
+            notice.hide();
+            new Notice(`Dendrite: filled the template: ${rel}. ` +
+                       said.join(' '), 15000);
+            await this.plugin.showExport(rel, output, 'docx');
+            return;
+        }
+        const pdfRel = normalizePath(`${dir}/${name}.pdf`);
+        let pages = await this.pdfOf(output, nodePath.join(base, dir), deps);
+        if (!pages) {
+            notice.hide();
+            new Notice('Dendrite: wrote the Word file, but LibreOffice ' +
+                       'could not make a PDF of it. Is it installed? ' +
+                       `${rel}`, 15000);
+            return;
+        }
+        const limits = st.pageLimits || {};
+        const totalKey = Object.keys(limits).find((k) =>
+            /^(total|pages|all)$/i.test(k));
+        const total = totalKey ? limits[totalKey] : null;
+        const parts = Object.keys(limits).filter((k) => k !== totalKey);
+        const title = st.referencesTitle || 'References';
+        // Where the reference list starts, for the pages without it.
+        const refsAt = (p) => {
+            if (!report.refs) return p.length;
+            const want = wordtemplate.norm(title);
+            for (let k = p.length - 1; k >= 0; k--) {
+                if (p[k].split('\n').some((l) =>
+                    wordtemplate.norm(l) === want)) return k + 1;
+            }
+            return p.length;
+        };
+        const withRefs = pages.length;
+        let body = refsAt(pages);
+        let refsFile = null;
+        if (total && withRefs > total && report.refs) {
+            // Over the limit: the list in a file of its own.
+            const r = wordtemplate.fillDocx(raw, tplBuf, opts(false),
+                                            deps.zlib);
+            await deps.writeFile(output, r.buf);
+            const refBuf = wordtemplate.referencesDocx(raw, opts(false),
+                                                       deps.zlib);
+            const refRel = normalizePath(`${dir}/${name} References.docx`);
+            await deps.writeFile(nodePath.join(base, refRel), refBuf);
+            await this.pdfOf(nodePath.join(base, refRel),
+                             nodePath.join(base, dir), deps);
+            pages = await this.pdfOf(output, nodePath.join(base, dir), deps);
+            body = pages ? pages.length : body;
+            refsFile = refRel.replace(/\.docx$/, '.pdf');
+        }
+        const counted = wordtemplate.partPages(pages || [], parts, body);
+        const per = counted.map((c) => `${c.part} ` + (c.pages === null ?
+            'not found' : `${c.pages} of ${limits[c.part]}`));
+        const over = counted.filter((c) => c.pages > limits[c.part])
+            .map((c) => c.part);
+        const lines = [`${body} pages without the reference list` +
+            (report.refs ? `, ${withRefs} with it` : '') +
+            (total ? `; the limit is ${total}` : '') + '.'];
+        if (per.length) lines.push(`By part: ${per.join('; ')}.`);
+        if (over.length) lines.push(`Over: ${over.join(', ')}.`);
+        if (refsFile) {
+            lines.push(`Over the limit with them, so the reference ` +
+                       `list is in ${refsFile}.`);
+        }
+        notice.hide();
+        new Notice(`Dendrite: filled the template: ${pdfRel}. ` +
+                   [...lines, ...said].join(' '), 30000);
+        await this.plugin.showExport(pdfRel, nodePath.join(base, pdfRel),
+                                     'pdf');
+    }
+
+    /**
+     * A .docx made a PDF beside it by LibreOffice, in a profile of its
+     * own so an open LibreOffice does not refuse; its pages' text, read
+     * with pdftotext where there is one, else as many empty pages. Null
+     * when no PDF was made.
+     */
+    async pdfOf(docxPath, outDir, deps) {
+        const nodePath = require('path');
+        const fs = require('fs');
+        const s = this.plugin.settings;
+        const mac = '/Applications/LibreOffice.app/Contents/MacOS/soffice';
+        const office = s.sofficePath ||
+            (globalThis.process.platform === 'darwin' && fs.existsSync(mac) ?
+                mac : 'soffice');
+        const profile = 'file://' + nodePath.join(deps.tmpdir(),
+                                                  'dendrite-libreoffice');
+        const pdfPath = docxPath.replace(/\.docx$/, '.pdf');
+        try {
+            await deps.run(office, [`-env:UserInstallation=${profile}`,
+                '--headless', '--convert-to', 'pdf', '--outdir', outDir,
+                docxPath]);
+        } catch (err) {
+            return null;
+        }
+        if (!fs.existsSync(pdfPath)) return null;
+        const txt = deps.join(deps.tmpdir(), `dendrite-${Date.now()}.txt`);
+        try {
+            await deps.run('pdftotext', ['-layout', pdfPath, txt]);
+            const out = String(await deps.readFile(txt)).split('\f');
+            if (out.length && !out[out.length - 1].trim()) out.pop();
+            return out;
+        } catch (err) {
+            const layout = pandoc.pdfPages(await deps.readFile(pdfPath),
+                                           deps.inflate);
+            return layout ? new Array(layout.pages).fill('') : null;
+        } finally {
+            deps.remove(txt);
+        }
     }
 
     /**
@@ -9690,7 +9907,39 @@ function exportStyle(fm) {
         header: slots(fm, 'header'),
         footer: slots(fm, 'footer'),
         headerInMargin: fm.dendrite_header_in_margin === true,
+        // A Word template to fill: its path, from the index's folder or
+        // the vault root; the text its content starts at, what goes in
+        // its placeholders, and the page limits to report against.
+        template: textProp(fm.dendrite_template),
+        templateStart: textProp(fm.dendrite_template_start),
+        templateFields: namedValues(fm.dendrite_template_fields),
+        pageLimits: namedValues(fm.dendrite_page_limits, true),
     };
+}
+
+/**
+ * A property naming values: a map, or a list of `name: value` lines,
+ * as Obsidian's property editor writes a list; values as numbers when
+ * `numbers`. Null when it names none.
+ */
+function namedValues(v, numbers = false) {
+    const out = {};
+    const put = (k, x) => {
+        const key = String(k).trim();
+        if (!key) return;
+        const val = numbers ? Number(x) : String(x ?? '').trim();
+        if (numbers && !(val > 0)) return;
+        out[key] = val;
+    };
+    if (Array.isArray(v)) {
+        for (const line of v) {
+            const m = /^([^:]+):\s*(.*)$/.exec(String(line));
+            if (m) put(m[1], m[2]);
+        }
+    } else if (v && typeof v === 'object') {
+        for (const [k, x] of Object.entries(v)) put(k, x);
+    }
+    return Object.keys(out).length ? out : null;
 }
 
 /**
@@ -12479,6 +12728,36 @@ module.exports = class DendritePlugin extends Plugin {
                 this.app.workspace.getActiveViewOfType(DendriteView) ||
                 this.app.workspace.getActiveViewOfType(DendritePreview)),
         });
+        // The manuscript into the Word template its index names.
+        for (const [id, name, fmt] of [
+            ['export-template-docx', 'Export into the template as Word',
+             'tdocx'],
+            ['export-template-pdf', 'Export into the template as PDF',
+             'tpdf']]) {
+            this.addCommand({ id, name, checkCallback: (checking) => {
+                const v = this.app.workspace.getActiveViewOfType(
+                    DendriteView);
+                if (!v || !Platform.isDesktopApp ||
+                    !v.manuscript().style.template) return false;
+                if (!checking) v.exportTo(null, fmt);
+                return true;
+            } });
+        }
+        // The manuscript into the Word template its index names.
+        for (const [id, name, fmt] of [
+            ['export-template-docx', 'Export into the template as Word',
+             'tdocx'],
+            ['export-template-pdf', 'Export into the template as PDF',
+             'tpdf']]) {
+            this.addCommand({ id, name, checkCallback: (checking) => {
+                const v = this.app.workspace.getActiveViewOfType(
+                    DendriteView);
+                if (!v || !Platform.isDesktopApp ||
+                    !v.manuscript().style.template) return false;
+                if (!checking) v.exportTo(null, fmt);
+                return true;
+            } });
+        }
         this.addCommand({
             id: 'open-preview',
             name: 'Open the manuscript preview',
