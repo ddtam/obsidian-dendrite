@@ -768,8 +768,6 @@ function fillBody(tItems, ms, opts = {}) {
     };
     // A table set off by a blank line above, over its caption when it
     // has one, and below, as the template sets its own.
-    const isCaption = (b) => isPara(b) &&
-        /<w:pStyle w:val="(?:Table|Image)?Caption"/.test(b);
     const pushTable = (into, t) => {
         // The blank line above goes with the table, under a heading as
         // under text.
@@ -1188,6 +1186,259 @@ function plainMath(md) {
     return { md: out, left };
 }
 
+// Floating tables. A table kept whole with its caption, and with a
+// heading above it, goes to the next page when it does not fit, and
+// leaves the foot of the page empty. LaTeX would set the text after the
+// table there and the table at the top of the next page. This does the
+// same from a PDF of the export: the paragraphs after such a table that
+// fit the space are moved above it, and the PDF is made again.
+
+/** A table or figure caption. */
+const isCaption = (b) => isPara(b) &&
+    /<w:pStyle w:val="(?:Table|Image)?Caption"/.test(b);
+
+/** The index of the next paragraph or table after `k`, or -1. */
+function nextBlock(blocks, k) {
+    for (let j = k + 1; j < blocks.length; j++) {
+        if (isPara(blocks[j]) || isTable(blocks[j])) return j;
+    }
+    return -1;
+}
+
+/** The index of the paragraph or table before `k`, or -1. */
+function prevBlock(blocks, k) {
+    for (let j = k - 1; j >= 0; j--) {
+        if (isPara(blocks[j]) || isTable(blocks[j])) return j;
+    }
+    return -1;
+}
+
+/**
+ * The pages of pdftotext's -bbox-layout output `html`, each { height,
+ * lines: [{ top, bottom, text }] } from the top down, in points.
+ */
+function pdfLines(html) {
+    const pages = [];
+    const pageRe = /<page\b[^>]*\bheight="([\d.]+)"[^>]*>([^]*?)<\/page>/g;
+    const lineRe = new RegExp('<line\\b[^>]*\\byMin="([\\d.]+)"[^>]*' +
+                              '\\byMax="([\\d.]+)"[^>]*>([^]*?)</line>', 'g');
+    for (let p = pageRe.exec(html); p; p = pageRe.exec(html)) {
+        const lines = [];
+        for (const m of p[2].matchAll(lineRe)) {
+            const words = [...m[3].matchAll(/<word\b[^>]*>([^<]*)<\/word>/g)]
+                .map((w) => unescape(w[1]));
+            lines.push({ top: +m[1], bottom: +m[2], text: words.join(' ') });
+        }
+        lines.sort((a, b) => a.top - b.top);
+        pages.push({ height: +p[1], lines });
+    }
+    return pages;
+}
+
+/**
+ * Pages `pages` without their running header and footer: the lines
+ * whose text, numbers aside, recurs at the same height on half the
+ * pages or more.
+ */
+function bodyLines(pages) {
+    const key = (l) => `${Math.round(l.top / 2)} ` +
+        norm(l.text).replace(/\d+/g, '#');
+    const seen = new Map();
+    for (const p of pages) {
+        for (const k of new Set(p.lines.map(key))) {
+            seen.set(k, (seen.get(k) || 0) + 1);
+        }
+    }
+    const least = Math.max(2, pages.length / 2);
+    return pages.map((p) => ({ height: p.height,
+        lines: p.lines.filter((l) => (seen.get(key(l)) || 0) < least) }));
+}
+
+/** Letters and digits only, for matching text to the lines it is in. */
+const squash = (t) => String(t).toLowerCase().replace(/[^\p{L}\p{N}]+/gu,
+                                                      '');
+
+/**
+ * Where each paragraph of `blocks` with text was set on `pages`: block
+ * index to its lines, each with its page's index, found in order by
+ * taking the paragraph's letters line by line.
+ */
+function placeBlocks(blocks, pages) {
+    const lines = [];
+    pages.forEach((p, n) => p.lines.forEach((l) => lines.push(
+        Object.assign({}, l, { page: n, s: squash(l.text) }))));
+    const at = new Map();
+    let i = 0;
+    blocks.forEach((b, k) => {
+        if (!isPara(b)) return;
+        const s = squash(textOf(b));
+        if (!s) return;
+        const opens = (l) => l.s && s.startsWith(l.s) &&
+            (l.s.length >= 12 || l.s === s);
+        let j = i;
+        while (j < lines.length && !opens(lines[j])) j++;
+        if (j >= lines.length) return;
+        const first = j;
+        let rest = s.slice(lines[j].s.length);
+        for (j++; rest && j < lines.length && rest.startsWith(lines[j].s);
+             j++) rest = rest.slice(lines[j].s.length);
+        at.set(k, lines.slice(first, j));
+        i = j;
+    });
+    return at;
+}
+
+function median(xs) {
+    if (!xs.length) return 0;
+    const s = [...xs].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+}
+
+/**
+ * The paragraphs of text after table `t`, past the blank line below it,
+ * up to anything else: a heading, which is kept with what follows it,
+ * a caption, a table, a blank line or a page break.
+ */
+function parasAfter(blocks, t) {
+    const out = [];
+    let j = nextBlock(blocks, t);
+    if (j >= 0 && isPara(blocks[j]) && emptyPara(blocks[j])) {
+        j = nextBlock(blocks, j);
+    }
+    for (; j >= 0; j = nextBlock(blocks, j)) {
+        const b = blocks[j];
+        if (!isPara(b) || emptyPara(b) || isCaption(b) ||
+            /<w:keepNext\b|<w:pageBreakBefore\b|<w:br w:type="page"/
+                .test(b)) break;
+        out.push(j);
+    }
+    return out;
+}
+
+/**
+ * Where the run kept with caption `c` starts: the blank line above the
+ * caption, if there is one, else the caption.
+ */
+function floatStart(blocks, c) {
+    const prev = prevBlock(blocks, c);
+    return prev >= 0 && isPara(blocks[prev]) && emptyPara(blocks[prev]) ?
+        prev : c;
+}
+
+/**
+ * The first table of `blocks` worth floating on `pages`, pdfLines of
+ * their PDF, and not in `done`, the captions already tried: one whose
+ * caption, or the heading kept with it, opens a page while the page
+ * before ends short by the room one or more of the paragraphs after the
+ * table take. { at, take, caption, label }: its caption's index, how
+ * many paragraphs to move above it, its caption's text, and the
+ * caption's label, as "Table 2". Null if none.
+ */
+function floatPlan(blocks, rawPages, done = new Set()) {
+    const pages = bodyLines(rawPages);
+    const at = placeBlocks(blocks, pages);
+    // The spacing as set: a line's pitch, and the extra space between
+    // paragraphs.
+    const pitches = [];
+    const gaps = [];
+    for (const [k, ls] of at) {
+        for (let i = 1; i < ls.length; i++) {
+            if (ls[i].page === ls[i - 1].page) {
+                pitches.push(ls[i].top - ls[i - 1].top);
+            }
+        }
+        const next = at.get(nextBlock(blocks, k));
+        const last = ls[ls.length - 1];
+        if (next && next[0].page === last.page) {
+            gaps.push(next[0].top - last.top);
+        }
+    }
+    const pitch = median(pitches);
+    const gap = Math.max(0, median(gaps) - pitch);
+    if (!pitch) return null;
+    // The foot of the text, as far down as any page's text reaches.
+    const foot = Math.max(...pages.flatMap((p) => p.lines.map((l) =>
+        l.bottom)));
+    for (let c = 0; c < blocks.length; c++) {
+        if (!isCaption(blocks[c]) || !at.has(c)) continue;
+        const caption = norm(textOf(blocks[c]));
+        if (done.has(caption)) continue;
+        const t = nextBlock(blocks, c);
+        if (t < 0 || !isTable(blocks[t])) continue;
+        const head = prevBlock(blocks, floatStart(blocks, c));
+        const lead = head >= 0 && at.has(head) &&
+            /<w:keepNext\b/.test(blocks[head]) ? head : null;
+        const top = at.get(lead === null ? c : lead)[0];
+        const page = pages[top.page];
+        if (!top.page || page.lines[0].top !== top.top) continue;
+        const above = pages[top.page - 1].lines;
+        if (!above.length) continue;
+        const room = foot - above[above.length - 1].bottom;
+        // A heading kept with the table stays above the moved text.
+        let need = lead === null ? 0 :
+            at.get(c)[0].top - top.top - pitch;
+        let take = 0;
+        for (const j of parasAfter(blocks, t)) {
+            if (!at.has(j)) break;
+            need += gap + at.get(j).length * pitch;
+            if (need > room) break;
+            take++;
+        }
+        if (take) {
+            const label = textOf(blocks[c]).split(/[.:]/)[0].trim();
+            return { at: c, take, caption, label };
+        }
+    }
+    return null;
+}
+
+/**
+ * Blocks `blocks` with `move`'s paragraphs, as floatPlan gives it, moved
+ * from below its table to above the table's caption, and the blank line
+ * above the caption; a heading kept with the table stays above them.
+ */
+function floatTables(blocks, move) {
+    const s = floatStart(blocks, move.at);
+    const t = nextBlock(blocks, move.at);
+    const all = parasAfter(blocks, t);
+    const moved = all.slice(0, move.take);
+    const gone = new Set(moved);
+    const out = [];
+    blocks.forEach((b, k) => {
+        if (k === s) out.push(...moved.map((j) => blocks[j]));
+        if (!gone.has(k)) out.push(b);
+    });
+    // All of them moved: the table's blank line below it then meets the
+    // next one.
+    const ti = out.indexOf(blocks[t]);
+    const below = nextBlock(out, ti);
+    const then = below >= 0 ? nextBlock(out, below) : -1;
+    if (below >= 0 && then >= 0 && emptyPara(out[below]) &&
+        isPara(out[then]) && emptyPara(out[then])) out.splice(below, 1);
+    return out;
+}
+
+/** floatPlan on the .docx `buf` and pdftotext's -bbox-layout `html`. */
+function floatPlanDocx(buf, html, done, zlib) {
+    const f = docx.readZip(buf, zlib).find((x) =>
+        x.name === 'word/document.xml');
+    if (!f) return null;
+    const doc = splitDocument(f.data.toString('utf8'));
+    return floatPlan(doc.blocks, pdfLines(html), done);
+}
+
+/** The .docx `buf` with `move`, from floatPlanDocx, made. */
+function floatDocx(buf, move, zlib) {
+    const files = docx.readZip(buf, zlib).map((f) => {
+        if (f.name !== 'word/document.xml') return f;
+        const doc = splitDocument(f.data.toString('utf8'));
+        const xml = doc.head + floatTables(doc.blocks, move).join('') +
+            doc.sectPr + doc.tail;
+        return { name: f.name, data: B.from(xml, 'utf8') };
+    });
+    return docx.writeZip(files, zlib);
+}
+
 module.exports = { bodyBlocks, splitDocument, stripItalic, textOf, norm,
                    numbered, tableRows, templateItems, manuscriptSections,
                    fillTable, restyleTable, fillBody, fillFields,
@@ -1195,4 +1446,5 @@ module.exports = { bodyBlocks, splitDocument, stripItalic, textOf, norm,
                    italicRun, emptyPara, settled, oneFont,
                    withStyles, likeHeading, plainMath, tidyTable,
                    indentPara, keepNext, widowControl, roomForWords,
-                   headerLike };
+                   headerLike, pdfLines, bodyLines, placeBlocks, floatPlan,
+                   floatTables, floatPlanDocx, floatDocx };

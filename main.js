@@ -7375,7 +7375,6 @@ var require_wordtemplate = __commonJS({
         }
         if (xml && last) out.push(beforeHeading ? keepNext(xml) : xml);
       };
-      const isCaption = (b) => isPara(b) && /<w:pStyle w:val="(?:Table|Image)?Caption"/.test(b);
       const pushTable = (into, t) => {
         const lastBlock = (upTo) => {
           for (let j = upTo; j >= 0; j--) {
@@ -7728,6 +7727,179 @@ var require_wordtemplate = __commonJS({
       });
       return { md: out, left };
     }
+    var isCaption = (b) => isPara(b) && /<w:pStyle w:val="(?:Table|Image)?Caption"/.test(b);
+    function nextBlock(blocks, k) {
+      for (let j = k + 1; j < blocks.length; j++) {
+        if (isPara(blocks[j]) || isTable(blocks[j])) return j;
+      }
+      return -1;
+    }
+    function prevBlock(blocks, k) {
+      for (let j = k - 1; j >= 0; j--) {
+        if (isPara(blocks[j]) || isTable(blocks[j])) return j;
+      }
+      return -1;
+    }
+    function pdfLines(html) {
+      const pages = [];
+      const pageRe = /<page\b[^>]*\bheight="([\d.]+)"[^>]*>([^]*?)<\/page>/g;
+      const lineRe = new RegExp('<line\\b[^>]*\\byMin="([\\d.]+)"[^>]*\\byMax="([\\d.]+)"[^>]*>([^]*?)</line>', "g");
+      for (let p = pageRe.exec(html); p; p = pageRe.exec(html)) {
+        const lines = [];
+        for (const m of p[2].matchAll(lineRe)) {
+          const words = [...m[3].matchAll(/<word\b[^>]*>([^<]*)<\/word>/g)].map((w) => unescape(w[1]));
+          lines.push({ top: +m[1], bottom: +m[2], text: words.join(" ") });
+        }
+        lines.sort((a, b) => a.top - b.top);
+        pages.push({ height: +p[1], lines });
+      }
+      return pages;
+    }
+    function bodyLines(pages) {
+      const key = (l) => `${Math.round(l.top / 2)} ` + norm(l.text).replace(/\d+/g, "#");
+      const seen = /* @__PURE__ */ new Map();
+      for (const p of pages) {
+        for (const k of new Set(p.lines.map(key))) {
+          seen.set(k, (seen.get(k) || 0) + 1);
+        }
+      }
+      const least = Math.max(2, pages.length / 2);
+      return pages.map((p) => ({
+        height: p.height,
+        lines: p.lines.filter((l) => (seen.get(key(l)) || 0) < least)
+      }));
+    }
+    var squash = (t) => String(t).toLowerCase().replace(
+      /[^\p{L}\p{N}]+/gu,
+      ""
+    );
+    function placeBlocks(blocks, pages) {
+      const lines = [];
+      pages.forEach((p, n) => p.lines.forEach((l) => lines.push(
+        Object.assign({}, l, { page: n, s: squash(l.text) })
+      )));
+      const at = /* @__PURE__ */ new Map();
+      let i = 0;
+      blocks.forEach((b, k) => {
+        if (!isPara(b)) return;
+        const s = squash(textOf(b));
+        if (!s) return;
+        const opens = (l) => l.s && s.startsWith(l.s) && (l.s.length >= 12 || l.s === s);
+        let j = i;
+        while (j < lines.length && !opens(lines[j])) j++;
+        if (j >= lines.length) return;
+        const first = j;
+        let rest = s.slice(lines[j].s.length);
+        for (j++; rest && j < lines.length && rest.startsWith(lines[j].s); j++) rest = rest.slice(lines[j].s.length);
+        at.set(k, lines.slice(first, j));
+        i = j;
+      });
+      return at;
+    }
+    function median(xs) {
+      if (!xs.length) return 0;
+      const s = [...xs].sort((a, b) => a - b);
+      return s[Math.floor(s.length / 2)];
+    }
+    function parasAfter(blocks, t) {
+      const out = [];
+      let j = nextBlock(blocks, t);
+      if (j >= 0 && isPara(blocks[j]) && emptyPara(blocks[j])) {
+        j = nextBlock(blocks, j);
+      }
+      for (; j >= 0; j = nextBlock(blocks, j)) {
+        const b = blocks[j];
+        if (!isPara(b) || emptyPara(b) || isCaption(b) || /<w:keepNext\b|<w:pageBreakBefore\b|<w:br w:type="page"/.test(b)) break;
+        out.push(j);
+      }
+      return out;
+    }
+    function floatStart(blocks, c) {
+      const prev = prevBlock(blocks, c);
+      return prev >= 0 && isPara(blocks[prev]) && emptyPara(blocks[prev]) ? prev : c;
+    }
+    function floatPlan(blocks, rawPages, done = /* @__PURE__ */ new Set()) {
+      const pages = bodyLines(rawPages);
+      const at = placeBlocks(blocks, pages);
+      const pitches = [];
+      const gaps = [];
+      for (const [k, ls] of at) {
+        for (let i = 1; i < ls.length; i++) {
+          if (ls[i].page === ls[i - 1].page) {
+            pitches.push(ls[i].top - ls[i - 1].top);
+          }
+        }
+        const next = at.get(nextBlock(blocks, k));
+        const last = ls[ls.length - 1];
+        if (next && next[0].page === last.page) {
+          gaps.push(next[0].top - last.top);
+        }
+      }
+      const pitch = median(pitches);
+      const gap = Math.max(0, median(gaps) - pitch);
+      if (!pitch) return null;
+      const foot = Math.max(...pages.flatMap((p) => p.lines.map((l) => l.bottom)));
+      for (let c = 0; c < blocks.length; c++) {
+        if (!isCaption(blocks[c]) || !at.has(c)) continue;
+        const caption = norm(textOf(blocks[c]));
+        if (done.has(caption)) continue;
+        const t = nextBlock(blocks, c);
+        if (t < 0 || !isTable(blocks[t])) continue;
+        const head = prevBlock(blocks, floatStart(blocks, c));
+        const lead = head >= 0 && at.has(head) && /<w:keepNext\b/.test(blocks[head]) ? head : null;
+        const top = at.get(lead === null ? c : lead)[0];
+        const page = pages[top.page];
+        if (!top.page || page.lines[0].top !== top.top) continue;
+        const above = pages[top.page - 1].lines;
+        if (!above.length) continue;
+        const room = foot - above[above.length - 1].bottom;
+        let need = lead === null ? 0 : at.get(c)[0].top - top.top - pitch;
+        let take = 0;
+        for (const j of parasAfter(blocks, t)) {
+          if (!at.has(j)) break;
+          need += gap + at.get(j).length * pitch;
+          if (need > room) break;
+          take++;
+        }
+        if (take) {
+          const label = textOf(blocks[c]).split(/[.:]/)[0].trim();
+          return { at: c, take, caption, label };
+        }
+      }
+      return null;
+    }
+    function floatTables(blocks, move) {
+      const s = floatStart(blocks, move.at);
+      const t = nextBlock(blocks, move.at);
+      const all = parasAfter(blocks, t);
+      const moved = all.slice(0, move.take);
+      const gone = new Set(moved);
+      const out = [];
+      blocks.forEach((b, k) => {
+        if (k === s) out.push(...moved.map((j) => blocks[j]));
+        if (!gone.has(k)) out.push(b);
+      });
+      const ti = out.indexOf(blocks[t]);
+      const below = nextBlock(out, ti);
+      const then = below >= 0 ? nextBlock(out, below) : -1;
+      if (below >= 0 && then >= 0 && emptyPara(out[below]) && isPara(out[then]) && emptyPara(out[then])) out.splice(below, 1);
+      return out;
+    }
+    function floatPlanDocx(buf, html, done, zlib) {
+      const f = docx.readZip(buf, zlib).find((x) => x.name === "word/document.xml");
+      if (!f) return null;
+      const doc = splitDocument(f.data.toString("utf8"));
+      return floatPlan(doc.blocks, pdfLines(html), done);
+    }
+    function floatDocx(buf, move, zlib) {
+      const files = docx.readZip(buf, zlib).map((f) => {
+        if (f.name !== "word/document.xml") return f;
+        const doc = splitDocument(f.data.toString("utf8"));
+        const xml = doc.head + floatTables(doc.blocks, move).join("") + doc.sectPr + doc.tail;
+        return { name: f.name, data: B.from(xml, "utf8") };
+      });
+      return docx.writeZip(files, zlib);
+    }
     module2.exports = {
       bodyBlocks,
       splitDocument,
@@ -7758,7 +7930,14 @@ var require_wordtemplate = __commonJS({
       keepNext,
       widowControl,
       roomForWords,
-      headerLike
+      headerLike,
+      pdfLines,
+      bodyLines,
+      placeBlocks,
+      floatPlan,
+      floatTables,
+      floatPlanDocx,
+      floatDocx
     };
   }
 });
@@ -15912,6 +16091,13 @@ var DendriteView = class extends ItemView {
       new Notice(`Dendrite: wrote the Word file, but LibreOffice could not make a PDF of it. Is it installed? ${rel}`, 15e3);
       return;
     }
+    let floated = await this.floatTables(
+      output,
+      nodePath.join(base, dir),
+      deps,
+      pages
+    );
+    pages = floated.pages;
     const limits = st.pageLimits || {};
     const totalKey = Object.keys(limits).find((k) => /^(total|pages|all)$/i.test(k));
     const total = totalKey ? limits[totalKey] : null;
@@ -15949,6 +16135,15 @@ var DendriteView = class extends ItemView {
         deps
       );
       pages = await this.pdfOf(output, nodePath.join(base, dir), deps);
+      if (pages) {
+        floated = await this.floatTables(
+          output,
+          nodePath.join(base, dir),
+          deps,
+          pages
+        );
+        pages = floated.pages;
+      }
       body = pages ? pages.length : body;
       refsFile = refRel.replace(/\.docx$/, ".pdf");
     }
@@ -15956,6 +16151,9 @@ var DendriteView = class extends ItemView {
     const per = counted.map((c) => `${c.part} ` + (c.pages === null ? "not found" : `${c.pages} of ${limits[c.part]}`));
     const over = counted.filter((c) => c.pages > limits[c.part]).map((c) => c.part);
     const lines = [`${body} pages without the reference list` + (report.refs ? `, ${withRefs} with it` : "") + (total ? `; the limit is ${total}` : "") + "."];
+    if (floated.moved.length) {
+      lines.push(`Floated ${floated.moved.join(", ")} to the top of the next page, with the text after it above it.`);
+    }
     if (per.length) lines.push(`By part: ${per.join("; ")}.`);
     if (over.length) lines.push(`Over: ${over.join(", ")}.`);
     if (refsFile) {
@@ -15968,6 +16166,63 @@ var DendriteView = class extends ItemView {
       nodePath.join(base, pdfRel),
       "pdf"
     );
+  }
+  /**
+   * The tables of the .docx at `output`, whose PDF has pages `pages`,
+   * floated as LaTeX places them: while a table kept with its caption
+   * left the foot of the page before it empty, the paragraphs after it
+   * that fit there go above it and the PDF is made again; a move that
+   * adds a page is undone. Returns { pages, moved }: the final PDF's
+   * pages, and the floated tables' labels.
+   */
+  async floatTables(output, outDir, deps, pages) {
+    const moved = [];
+    const done = /* @__PURE__ */ new Set();
+    let buf = await deps.readFile(output);
+    let html = await this.pdfBoxes(output, deps);
+    for (let pass = 0; html && pass < 8; pass++) {
+      const move = wordtemplate.floatPlanDocx(
+        buf,
+        html,
+        done,
+        deps.zlib
+      );
+      if (!move) break;
+      done.add(move.caption);
+      const next = wordtemplate.floatDocx(buf, move, deps.zlib);
+      await deps.writeFile(output, next);
+      const after = await this.pdfOf(output, outDir, deps);
+      const boxes = after && await this.pdfBoxes(output, deps);
+      if (!boxes || after.length > pages.length) {
+        await deps.writeFile(output, buf);
+        pages = await this.pdfOf(output, outDir, deps) || pages;
+        continue;
+      }
+      buf = next;
+      html = boxes;
+      pages = after;
+      moved.push(move.label);
+    }
+    return { pages, moved };
+  }
+  /**
+   * Where each line of the PDF beside the .docx at `docxPath` sits, as
+   * pdftotext -bbox-layout gives it, or null without pdftotext.
+   */
+  async pdfBoxes(docxPath, deps) {
+    const out = deps.join(deps.tmpdir(), `dendrite-${Date.now()}.html`);
+    try {
+      await deps.run("pdftotext", [
+        "-bbox-layout",
+        docxPath.replace(/\.docx$/, ".pdf"),
+        out
+      ]);
+      return String(await deps.readFile(out));
+    } catch (err) {
+      return null;
+    } finally {
+      deps.remove(out);
+    }
   }
   /**
    * A .docx made a PDF beside it by LibreOffice, in a profile of its

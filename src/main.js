@@ -8554,6 +8554,9 @@ class DendriteView extends ItemView {
                        `${rel}`, 15000);
             return;
         }
+        let floated = await this.floatTables(output, nodePath.join(base, dir),
+                                             deps, pages);
+        pages = floated.pages;
         const limits = st.pageLimits || {};
         const totalKey = Object.keys(limits).find((k) =>
             /^(total|pages|all)$/i.test(k));
@@ -8585,6 +8588,11 @@ class DendriteView extends ItemView {
             await this.pdfOf(nodePath.join(base, refRel),
                              nodePath.join(base, dir), deps);
             pages = await this.pdfOf(output, nodePath.join(base, dir), deps);
+            if (pages) {
+                floated = await this.floatTables(output,
+                    nodePath.join(base, dir), deps, pages);
+                pages = floated.pages;
+            }
             body = pages ? pages.length : body;
             refsFile = refRel.replace(/\.docx$/, '.pdf');
         }
@@ -8596,6 +8604,10 @@ class DendriteView extends ItemView {
         const lines = [`${body} pages without the reference list` +
             (report.refs ? `, ${withRefs} with it` : '') +
             (total ? `; the limit is ${total}` : '') + '.'];
+        if (floated.moved.length) {
+            lines.push(`Floated ${floated.moved.join(', ')} to the top of ` +
+                       'the next page, with the text after it above it.');
+        }
         if (per.length) lines.push(`By part: ${per.join('; ')}.`);
         if (over.length) lines.push(`Over: ${over.join(', ')}.`);
         if (refsFile) {
@@ -8607,6 +8619,58 @@ class DendriteView extends ItemView {
                    [...lines, ...said].join(' '), 30000);
         await this.plugin.showExport(pdfRel, nodePath.join(base, pdfRel),
                                      'pdf');
+    }
+
+    /**
+     * The tables of the .docx at `output`, whose PDF has pages `pages`,
+     * floated as LaTeX places them: while a table kept with its caption
+     * left the foot of the page before it empty, the paragraphs after it
+     * that fit there go above it and the PDF is made again; a move that
+     * adds a page is undone. Returns { pages, moved }: the final PDF's
+     * pages, and the floated tables' labels.
+     */
+    async floatTables(output, outDir, deps, pages) {
+        const moved = [];
+        const done = new Set();
+        let buf = await deps.readFile(output);
+        let html = await this.pdfBoxes(output, deps);
+        for (let pass = 0; html && pass < 8; pass++) {
+            const move = wordtemplate.floatPlanDocx(buf, html, done,
+                                                    deps.zlib);
+            if (!move) break;
+            done.add(move.caption);
+            const next = wordtemplate.floatDocx(buf, move, deps.zlib);
+            await deps.writeFile(output, next);
+            const after = await this.pdfOf(output, outDir, deps);
+            const boxes = after && await this.pdfBoxes(output, deps);
+            if (!boxes || after.length > pages.length) {
+                await deps.writeFile(output, buf);
+                pages = await this.pdfOf(output, outDir, deps) || pages;
+                continue;
+            }
+            buf = next;
+            html = boxes;
+            pages = after;
+            moved.push(move.label);
+        }
+        return { pages, moved };
+    }
+
+    /**
+     * Where each line of the PDF beside the .docx at `docxPath` sits, as
+     * pdftotext -bbox-layout gives it, or null without pdftotext.
+     */
+    async pdfBoxes(docxPath, deps) {
+        const out = deps.join(deps.tmpdir(), `dendrite-${Date.now()}.html`);
+        try {
+            await deps.run('pdftotext', ['-bbox-layout',
+                docxPath.replace(/\.docx$/, '.pdf'), out]);
+            return String(await deps.readFile(out));
+        } catch (err) {
+            return null;
+        } finally {
+            deps.remove(out);
+        }
     }
 
     /**

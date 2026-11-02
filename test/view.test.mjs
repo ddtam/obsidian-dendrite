@@ -7678,3 +7678,34 @@ test('footnotes holding only citations are made citations across the ' +
     await tick(20);
     assert.equal(text(cardPath('G-aaaaa')), 'Few survive.^[[@k2021]] More.');
 });
+
+test('a template PDF\'s tables float one at a time, each kept only if ' +
+     'the PDF does not grow', async () => {
+    const Plugin = require('../src/main.js');
+    const wt = require('../src/wordtemplate.js');
+    const saved = { plan: wt.floatPlanDocx, move: wt.floatDocx };
+    // Two tables to float: Table A saves a page, Table B would add one.
+    const moves = [{ caption: 'a', label: 'Table A' },
+                   { caption: 'b', label: 'Table B' }];
+    wt.floatPlanDocx = (buf, html, done) =>
+        moves.find((m) => !done.has(m.caption)) || null;
+    wt.floatDocx = (buf, move) => Buffer.from(String(buf) + move.caption);
+    const length = { '': 9, a: 8, ab: 10 };
+    let file = Buffer.from('');
+    const deps = { readFile: async () => file,
+                   writeFile: async (p, b) => { file = b; } };
+    const self = {
+        pdfOf: async () => new Array(length[String(file)]).fill(''),
+        pdfBoxes: async () => '<page/>',
+    };
+    try {
+        const out = await Plugin.DendriteView.prototype.floatTables.call(
+            self, '/v/G.docx', '/v', deps, new Array(9).fill(''));
+        assert.deepEqual(out.moved, ['Table A']);
+        assert.equal(out.pages.length, 8);
+        assert.equal(String(file), 'a', 'Table B\'s move undone');
+    } finally {
+        wt.floatPlanDocx = saved.plan;
+        wt.floatDocx = saved.move;
+    }
+});

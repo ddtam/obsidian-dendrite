@@ -299,3 +299,58 @@ test('a manuscript table with no template counterpart takes the ' +
     assert.doesNotMatch(body.xml, /<w:b\/>|<w:shd/, 'the body as it was');
     assert.match(out, /<w:tblBorders\/>/, 'the template\'s borders');
 });
+
+test('a table that left the foot of a page empty floats: the paragraphs ' +
+     'after it that fit move above it, under the heading kept with it',
+     () => {
+    // A page of pdftotext's -bbox-layout output, from [top, text] lines
+    // 12 points high.
+    const page = (lines) => '<page width="612" height="792"><flow><block>' +
+        lines.map(([y, t]) => `<line xMin="72" yMin="${y}" xMax="500" ` +
+            `yMax="${y + 12}">` + t.split(' ').map((w) =>
+            `<word>${w}</word>`).join('') + '</line>').join('') +
+        '</block></flow></page>';
+    const chrome = (n) => [[10, 'Running title'], [770, String(n)]];
+    // An opening paragraph filling page 1 to 606, on a 14-point pitch.
+    const intro = Array.from({ length: 36 }, (x, i) =>
+        `Introductory line number ${String(i).padStart(2, '0')}`);
+    const two = (name, y) => [[y, `${name} paragraph begins here`],
+                              [y + 14, `and ${name} ends.`]];
+    const html = page([...chrome(1), ...intro.map((t, i) =>
+        [104 + 14 * i, t])]) + page([...chrome(2), [60, '2. Team'],
+        [100, 'Table 1. Team.'], [130, 'Name Role'],
+        ...two('Alpha', 300), ...two('Beta', 334), ...two('Gamma', 368),
+        [420, '3. Next'], ...two('Omega', 680)]);
+    const pages = wt.pdfLines(html);
+    assert.equal(pages.length, 2);
+    assert.deepEqual(wt.bodyLines(pages)[1].lines.map((l) => l.text)
+        .slice(0, 2), ['2. Team', 'Table 1. Team.'],
+        'the running title and page number are not text');
+    const kept = (t) => `<w:p><w:pPr><w:keepNext/></w:pPr>${run(t)}</w:p>`;
+    const blank = '<w:p></w:p>';
+    const caption = '<w:p><w:pPr><w:pStyle w:val="TableCaption" />' +
+        '<w:keepNext/></w:pPr>' + run('Table 1. Team.') + '</w:p>';
+    const text = (name) => para(run(`${name} paragraph begins here and ` +
+                                    `${name} ends.`));
+    const blocks = [para(run(intro.join(' '))), blank, kept('2. Team'),
+        kept(''), caption, table(row(cell(run('Name')), cell(run('Role')))),
+        blank, text('Alpha'), text('Beta'), text('Gamma'), kept(''),
+        kept('3. Next'), text('Omega')];
+    // 100 points free at the foot of page 1: the heading's 26 and two
+    // paragraphs of 34, not three.
+    const move = wt.floatPlan(blocks, pages);
+    assert.deepEqual(move, { at: 4, take: 2, caption: 'table 1 team',
+                             label: 'Table 1' });
+    const shape = (bs) => bs.map((b) => (b.startsWith('<w:tbl') ?
+        '(table)' : wt.textOf(b).split(' ')[0] || '(blank)'));
+    assert.deepEqual(shape(wt.floatTables(blocks, move)), ['Introductory',
+        '(blank)', '2.', 'Alpha', 'Beta', '(blank)', 'Table', '(table)',
+        '(blank)', 'Gamma', '(blank)', '3.', 'Omega']);
+    assert.equal(wt.floatPlan(blocks, pages, new Set(['table 1 team'])),
+                 null, 'a table tried already is not tried again');
+    // All three moved: one blank line between the table and the next
+    // heading, not two.
+    assert.deepEqual(shape(wt.floatTables(blocks, { at: 4, take: 3 })),
+        ['Introductory', '(blank)', '2.', 'Alpha', 'Beta', 'Gamma',
+         '(blank)', 'Table', '(table)', '(blank)', '3.', 'Omega']);
+});
