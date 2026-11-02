@@ -251,8 +251,8 @@ test('Pandoc\'s heading over the reference list is the list\'s one ' +
         '</w:pPr></w:pPrDefault>'), /<w:pPr><w:widowControl\/>/);
 });
 
-test('a heading over a table stays with it: no blank line between them, ' +
-     'and the blank line above a table is kept with the table', () => {
+test('a heading over a table stays with it, a blank line between them ' +
+     'as between a table and text, all kept with the table', () => {
     const tpl = doc(para(run('1. Outline')), '<w:p></w:p>',
                     para(run('2. Team')));
     const { items } = wt.templateItems(wt.splitDocument(tpl).blocks);
@@ -266,10 +266,11 @@ test('a heading over a table stays with it: no blank line between them, ' +
     const shown = blocks.filter((b) => /^<w:(p|tbl)[ >]/.test(b));
     const shape = shown.map((b) => wt.textOf(b).trim() || '(blank)');
     assert.deepEqual(shape, ['1. Outline', 'Text.', '(blank)', '2. Team',
-                             'Table 1. Team.', 'NameDerek', '(blank)']);
-    // The heading, the blank line above it and the caption all kept
-    // with what follows.
-    for (const k of [2, 3, 4]) assert.match(shown[k], /<w:keepNext\/>/);
+                             '(blank)', 'Table 1. Team.', 'NameDerek',
+                             '(blank)']);
+    // The heading, the blank lines either side of it and the caption all
+    // kept with what follows.
+    for (const k of [2, 3, 4, 5]) assert.match(shown[k], /<w:keepNext\/>/);
 });
 
 test('a column is at least as wide as its longest word, the room taken ' +

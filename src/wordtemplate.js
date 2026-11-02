@@ -771,23 +771,22 @@ function fillBody(tItems, ms, opts = {}) {
     const isCaption = (b) => isPara(b) &&
         /<w:pStyle w:val="(?:Table|Image)?Caption"/.test(b);
     const pushTable = (into, t) => {
-        // The blank line above goes with the table, and none comes
-        // between a heading and the table under it.
+        // The blank line above goes with the table, under a heading as
+        // under text.
         const lastBlock = (upTo) => {
             for (let j = upTo; j >= 0; j--) {
                 if (isPara(into[j]) || isTable(into[j])) return into[j];
             }
             return null;
         };
-        const blankOrHeading = (b) => !b || (isPara(b) &&
-            (emptyPara(b) || /<w:keepNext\b/.test(b)));
+        const blank = (b) => !b || (isPara(b) && emptyPara(b));
         let k = into.length - 1;
         if (k >= 0 && isCaption(into[k])) {
             into[k] = keepNext(into[k]);
-            if (firstGap && !blankOrHeading(lastBlock(k - 1))) {
+            if (firstGap && !blank(lastBlock(k - 1))) {
                 into.splice(k, 0, keepNext(firstGap));
             }
-        } else if (firstGap && !blankOrHeading(lastBlock(k))) {
+        } else if (firstGap && !blank(lastBlock(k))) {
             into.push(keepNext(firstGap));
         }
         into.push(t);

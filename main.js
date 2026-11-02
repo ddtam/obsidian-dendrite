@@ -7383,14 +7383,14 @@ var require_wordtemplate = __commonJS({
           }
           return null;
         };
-        const blankOrHeading = (b) => !b || isPara(b) && (emptyPara(b) || /<w:keepNext\b/.test(b));
+        const blank = (b) => !b || isPara(b) && emptyPara(b);
         let k = into.length - 1;
         if (k >= 0 && isCaption(into[k])) {
           into[k] = keepNext(into[k]);
-          if (firstGap && !blankOrHeading(lastBlock(k - 1))) {
+          if (firstGap && !blank(lastBlock(k - 1))) {
             into.splice(k, 0, keepNext(firstGap));
           }
-        } else if (firstGap && !blankOrHeading(lastBlock(k))) {
+        } else if (firstGap && !blank(lastBlock(k))) {
           into.push(keepNext(firstGap));
         }
         into.push(t);
