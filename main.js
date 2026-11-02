@@ -8542,8 +8542,7 @@ function previewShare() {
   return Platform.isTablet ? 1 / 2 : 1 / 3;
 }
 function narrowSplit(leaf, share = 1 / 3) {
-  let item = leaf;
-  while (item && item.parent && !(item.parent.direction === "vertical" && (item.parent.children || []).length > 1)) item = item.parent;
+  const item = splitItem(leaf);
   const split = item && item.parent;
   if (!split || typeof item.setDimension !== "function") return false;
   const rest = split.children.filter((c) => c !== item);
@@ -8555,10 +8554,23 @@ function narrowSplit(leaf, share = 1 / 3) {
   }
   return true;
 }
-var SIDEBAR_WIDTH = 300;
-function fitSplit(leaf, fixed) {
+function splitItem(leaf) {
   let item = leaf;
   while (item && item.parent && !(item.parent.direction === "vertical" && (item.parent.children || []).length > 1)) item = item.parent;
+  return item;
+}
+function paneKind(ws, pane) {
+  const holds = (types) => types.some((t) => ws.getLeavesOfType(t).some((l) => l === pane || l.parent === pane));
+  if (holds([COMMENTS, FLOATS])) return "side";
+  return holds([PREVIEW]) ? "preview" : null;
+}
+function paneWidth(pane) {
+  const el = pane && pane.containerEl;
+  return el && el.getBoundingClientRect ? el.getBoundingClientRect().width : 0;
+}
+var SIDEBAR_WIDTH = 300;
+function fitSplit(leaf, fixed) {
+  const item = splitItem(leaf);
   const split = item && item.parent;
   if (!split || typeof item.setDimension !== "function") return false;
   const width = (el) => el && el.getBoundingClientRect ? el.getBoundingClientRect().width : 0;
@@ -21251,7 +21263,7 @@ module.exports = class DendritePlugin extends Plugin {
   /** Open a manuscript's preview beside its board, or close it. */
   async togglePreview(file) {
     const open = this.previewLeaf(file);
-    if (open) open.detach();
+    if (open) this.closePanes([open]);
     else await this.openPreview(file);
   }
   async openPreview(file) {
@@ -21271,27 +21283,50 @@ module.exports = class DendritePlugin extends Plugin {
   /**
    * The split `leaf` was opened in, `own` its kind, 'preview' or
    * 'side', sized: a side list, of comments or of tables and figures,
-   * a sidebar's width, a preview a
-   * third, a half on a tablet, of the window, each whatever else is
-   * open, the boards the rest.
+   * a sidebar's width, a preview a third, a half on a tablet, of the
+   * window; a preview or side list already open keeps the width it
+   * has; the boards the rest.
    */
   fitPanes(leaf, own) {
-    const ws = this.app.workspace;
-    const lists = /* @__PURE__ */ new Set([
-      ...ws.getLeavesOfType(COMMENTS),
-      ...ws.getLeavesOfType(FLOATS)
-    ]);
-    const previews = new Set(ws.getLeavesOfType(PREVIEW));
     let mine = leaf;
     while (mine && mine.parent && !(mine.parent.direction === "vertical" && (mine.parent.children || []).length > 1)) {
       mine = mine.parent;
     }
     return fitSplit(leaf, (c, total) => {
-      const kind = c === mine ? own : lists.has(c) ? "side" : previews.has(c) ? "preview" : null;
+      const kind = c === mine ? own : paneKind(this.app.workspace, c);
+      const now = c === mine ? 0 : paneWidth(c);
+      if (kind && now && total) return now / total;
       if (kind === "side") {
         return total ? Math.min(0.4, SIDEBAR_WIDTH / total) : 0.25;
       }
       return kind === "preview" ? previewShare() : null;
+    });
+  }
+  /**
+   * `leaves` closed, a preview and side lists beside them keeping the
+   * widths they had and the boards taking up the difference.
+   */
+  closePanes(leaves) {
+    const ws = this.app.workspace;
+    const held = [];
+    let split = null;
+    for (const l of leaves) {
+      const item = splitItem(l);
+      if (!split && item && item.parent) {
+        split = item.parent;
+        for (const c of split.children) {
+          if (c !== item && paneKind(ws, c)) {
+            held.push([c, paneWidth(c)]);
+          }
+        }
+      }
+    }
+    for (const l of leaves) l.detach();
+    const rest = split && (split.children || [])[0];
+    if (!rest || !held.length) return;
+    fitSplit(rest, (c, total) => {
+      const h = held.find(([x]) => x === c);
+      return h && h[1] && total ? h[1] / total : null;
     });
   }
   /**
@@ -21334,9 +21369,7 @@ module.exports = class DendritePlugin extends Plugin {
   async setFloats(from, on) {
     if (on) await this.showFloatList(from);
     else {
-      for (const l of this.app.workspace.getLeavesOfType(FLOATS)) {
-        l.detach();
-      }
+      this.closePanes(this.app.workspace.getLeavesOfType(FLOATS));
     }
     this.floatsChanged();
   }
@@ -21409,9 +21442,7 @@ module.exports = class DendritePlugin extends Plugin {
   async setReview(from, on) {
     if (on) await this.showCommentList(from);
     else {
-      for (const l of this.app.workspace.getLeavesOfType(COMMENTS)) {
-        l.detach();
-      }
+      this.closePanes(this.app.workspace.getLeavesOfType(COMMENTS));
     }
     this.reviewChanged();
   }

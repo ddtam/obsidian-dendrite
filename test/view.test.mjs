@@ -2335,6 +2335,53 @@ test('the preview opens beside the board at a third of the width',
     assert.deepEqual(dims.sort(), [['board', 67], ['preview', 33]]);
 });
 
+test('the preview and the comment list each keep their own width as ' +
+     'the other opens and closes, the board taking up the difference',
+     async () => {
+    const Plugin = require('../src/main.js');
+    const px = new Map();
+    const dims = new Map();
+    const box = (name) => ({ getBoundingClientRect: () =>
+        ({ width: px.get(name) }) });
+    const split = { direction: 'vertical', children: [],
+                    containerEl: box('split') };
+    // Each pane a tab group holding one leaf, as Obsidian has it.
+    const pane = (name, type) => {
+        const tabs = { name, parent: split, containerEl: box(name),
+                       setDimension: (d) => dims.set(name, Math.round(d)) };
+        const leaf = { type, parent: tabs, view: {},
+                       detach: () => split.children.splice(
+                           split.children.indexOf(tabs), 1) };
+        tabs.children = [leaf];
+        split.children.push(tabs);
+        return leaf;
+    };
+    px.set('split', 1200);
+    // The preview resized by hand to 480 of 1200.
+    px.set('board', 720);
+    px.set('preview', 480);
+    const board = pane('board', 'dendrite');
+    const preview = pane('preview', 'dendrite-preview');
+    const comments = pane('comments', 'dendrite-comments');
+    const leaves = (t) => [board, preview, comments].filter((l) =>
+        l.type === t && split.children.includes(l.parent));
+    const self = { app: { workspace: { getLeavesOfType: leaves } },
+                   reviewChanged: () => {},
+                   closePanes: Plugin.prototype.closePanes };
+    Plugin.prototype.fitPanes.call(self, comments, 'side');
+    assert.equal(dims.get('preview'), 40, 'the preview as it was');
+    assert.equal(dims.get('comments'), 25, 'the list a sidebar\'s width');
+    assert.equal(dims.get('board'), 35, 'the board the rest');
+    // Closed: the preview keeps its 480 of 1200, the board the rest.
+    px.set('board', 420);
+    px.set('comments', 300);
+    dims.clear();
+    await Plugin.prototype.setReview.call(self, null, false);
+    assert.deepEqual(split.children.map((c) => c.name), ['board', 'preview']);
+    assert.equal(dims.get('preview'), 40);
+    assert.equal(dims.get('board'), 60);
+});
+
 test('an exported PDF opens beside the preview, or in the tab already ' +
      'showing an export, never by splitting the board', async () => {
     const Plugin = require('../src/main.js');
