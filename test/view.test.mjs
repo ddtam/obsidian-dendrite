@@ -7737,3 +7737,135 @@ test('applying a suggestion on a card its suggestions would leave with ' +
     assert.equal(text(cardPath('G-aaaaa')), md, 'one step undoes it');
     assert.doesNotMatch(read(cardPath('G-aaaaa')), /dendrite_role: notes/);
 });
+
+test('a second name linked to a person already linked joins their row, ' +
+     'in their colour', async () => {
+    const cards = {
+        'G-aaaaa': 'First ==one==%%[!review] Joshua Bridgers, 2026-10-23: ' +
+            'Why?%%.',
+        'G-bbbbb': 'Second ==two==%%[!review] joshbridgers@live.com, ' +
+            '2026-11-02: Hm.%%.' };
+    const { app, view } = await open('---\ndendrite_prefix: G\n' +
+        'dendrite_reviewer_colours:\n  - "[[Joshua Bridgers]]: blue"\n' +
+        '  - "joshbridgers@live.com: green"\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n', cards);
+    app.vault.folders.add('People');
+    await app.vault.create('People/Joshua Bridgers.md', 'A person.');
+    await tick(30);
+    const fm = () => app.metadataCache.getFileCache(
+        app.vault.getAbstractFileByPath(INDEX)).frontmatter
+        .dendrite_reviewer_colours;
+    await menuItem(view.reviewMenu(), 'Reviewers…').click();
+    const modal = h.obsidian.lastModal;
+    const rows = () => [...modal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')];
+    const live = rows().find((r) => r.dataset.name ===
+        'joshbridgers@live.com');
+    const note = live.querySelector('input.dendrite-reviewer-note');
+    note.value = 'Joshua Bridgers';
+    note.dispatchEvent(new h.window.Event('change'));
+    await tick(30);
+    assert.deepEqual(fm(), ['[[Joshua Bridgers]]: blue',
+        '[[Joshua Bridgers|joshbridgers@live.com]]: blue']);
+    const josh = rows().filter((r) => r.dataset.person ===
+        'Joshua Bridgers');
+    assert.equal(josh.length, 1, 'one row for the person');
+    assert.deepEqual([...josh[0].querySelectorAll(
+        '.dendrite-reviewer-alias')].map((c) => c.dataset.name),
+        ['Joshua Bridgers', 'joshbridgers@live.com']);
+    // Drawn again from the property as saved, as when the dialog opens.
+    modal.close();
+    await menuItem(view.reviewMenu(), 'Reviewers…').click();
+    const again = [...h.obsidian.lastModal.contentEl.querySelectorAll(
+        '.dendrite-reviewer')].filter((r) => r.dataset.person ===
+        'Joshua Bridgers');
+    assert.equal(again.length, 1);
+    assert.equal(again[0].querySelectorAll('.dendrite-reviewer-alias')
+        .length, 2);
+});
+
+test('a heading with a suggestion on it groups the comment list by its ' +
+     'words, not its markup', async () => {
+    const { DendriteComments } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Cluster]]\n    - [[G-bbbbb|Fir]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), '# %%{1%%Cluster ' +
+        'Selection%%}1 [!suggest] Josh, 2026-11-02: %%');
+    await app.vault.create(cardPath('G-bbbbb'),
+        'Fir is ==chosen==%%[!review] Josh, 2026-11-02: Why?%%.');
+    app.workspace.getLeavesOfType = () => [];
+    const plugin = { settings: { headingTop: 1 },
+        commentFilterState: { author: '', waiting: '', kind: '' },
+        selfNames: () => new Set(['Me']), commentFilter: () => null,
+        previewLeaf: () => null };
+    const list = new DendriteComments({ app }, plugin);
+    await list.onOpen();
+    await list.show(app.vault.getAbstractFileByPath(INDEX));
+    const where = [...list.contentEl.querySelectorAll(
+        '.dendrite-cgroup')].map((el) => el.textContent);
+    assert.deepEqual(where, ['Cluster Selection']);
+});
+
+test('splitting text out of a card that returns it to an earlier version ' +
+     'is this device\'s change, not an older copy', async () => {
+    const before = '# Compute\n\n| Sub | Content |\n| - | - |\n| 1 | A |';
+    const { view, read } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Compute]]\n', { 'G-aaaaa': before });
+    let t = Date.parse('2026-11-02T15:00:00Z');
+    view.history.now = () => t;
+    await view.checkVersion('G-aaaaa',
+        await view.app.vault.read(view.cardFile('G-aaaaa')), true);
+    // A paragraph added later, as a suggestion applied, in a version of
+    // its own.
+    t += 20 * 60 * 1000;
+    await view.reviewAction('G-aaaaa', 0, 'text', '# Compute\n\n' +
+        'Not applicable\n\n' + before.slice('# Compute\n\n'.length));
+    await tick(20);
+    // A minute on, split into a child: the card's text is as it was.
+    t += 60 * 1000;
+    await view.startEdit('G-aaaaa');
+    const at = '# Compute\n\n'.length;
+    view.editing.ta.setSelectionRange(at, at + 'Not applicable\n\n'.length);
+    await view.moveSelection('child');
+    await view.endEdit();
+    await tick(50);
+    assert.equal(view.byId.get('G-aaaaa').children.length, 1);
+    assert.match(read(cardPath('G-aaaaa')), /# Compute\n\n\| Sub/);
+    assert.ok(!view.reverted.has('G-aaaaa'), 'not marked as gone back');
+});
+
+test('a card another device wrote since this device\'s copy last changed ' +
+     'is behind, until that text arrives', async () => {
+    const DendritePlugin = require('../src/main.js');
+    const { Ledger } = require('../src/ledger.js');
+    const { hash } = require('../src/history.js');
+    const { app, view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': 'Plain.', 'G-bbbbb': 'Old text.' });
+    const p = new DendritePlugin();
+    p.app = app;
+    p.settings = { reviewQueue: [] };
+    p.saveSettings = async () => {};
+    p.openViews = () => [view];
+    p.device = 'nix';
+    p.ledger = new Ledger(app.vault, 'nix');
+    const newer = 'Old text, with a comment ==added==%%[!review] Josh, ' +
+        '2026-11-02: Why?%%.';
+    const at = Date.parse('2026-11-02T22:29:41Z');
+    app.vault.folders.add('W/Grant/_dendrite/devices');
+    await app.vault.create('W/Grant/_dendrite/devices/dtam03.json',
+        JSON.stringify({ device: 'dtam03', cards: {
+            'G-bbbbb': { wrote: { h: hash(newer), at } } } }));
+    const f = app.vault.getAbstractFileByPath(cardPath('G-bbbbb'));
+    f.stat = { mtime: Date.parse('2026-10-30T17:46:00-07:00') };
+    const sync = async () => (await p.threadsFor('G', { status: true }))
+        .json.sync;
+    assert.deepEqual(await sync(), [{ card: 'G-bbbbb', state: 'behind',
+        since: new Date(at).toISOString(), device: 'nix' }]);
+    // Its text arrives: not behind.
+    await app.vault.modify(f, newer);
+    f.stat = { mtime: at + 5000 };
+    assert.deepEqual(await sync(), []);
+});

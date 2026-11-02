@@ -10504,10 +10504,12 @@ class DendriteComments extends ItemView {
                         await app.vault.cachedRead(f)).body);
                 }
             }
+            // Its words, without a comment or suggestion made on it.
             const headingOf = (id) => {
-                const line = (bodies.get(id) || '').trim().split('\n')[0];
+                const line = review.stripReview(bodies.get(id) || '')
+                    .trim().split('\n')[0];
                 const h = core.HEADING.exec(line || '');
-                return h ? h[2] : null;
+                return h ? h[2].trim() : null;
             };
             const numbers = fm.dendrite_number_sections === true ?
                 core.sectionNumbers(root.children, (id) => !!headingOf(id),
@@ -13546,7 +13548,8 @@ module.exports = class DendritePlugin extends Plugin {
      * one was resolved, applied, dismissed or withdrawn after its file
      * here last changed, yet it is still open in it. Another device did
      * it, and its card has not arrived here, or is held by the sync as a
-     * conflict: { card, state: 'behind', since }, since the newest such.
+     * conflict: { card, state: 'behind', since }, since the newest such;
+     * and each card another device's record has a newer text for.
      */
     async behindCards(file) {
         const gone = new Set(['resolve', 'apply', 'dismiss', 'withdraw']);
@@ -13574,6 +13577,33 @@ module.exports = class DendritePlugin extends Plugin {
                 out.push({ card, state: 'behind',
                            since: still[still.length - 1].at });
             }
+        }
+        // Another device wrote or kept a text for a card after its file
+        // here last changed, and the file does not hold it: that text has
+        // not arrived, as with a comment added there.
+        const ledger = this.ledger;
+        const newest = new Map();
+        for (const rec of ledger ? await ledger.others(
+            ledger.dirOf(file)) : []) {
+            for (const [card, c] of Object.entries(rec.cards || {})) {
+                for (const x of [c.wrote, c.kept]) {
+                    if (x && x.h && x.at && !(newest.get(card)?.at >= x.at)) {
+                        newest.set(card, x);
+                    }
+                }
+            }
+        }
+        for (const [card, x] of newest) {
+            if (out.some((o) => o.card === card)) continue;
+            const f = this.app.metadataCache.getFirstLinkpathDest(card,
+                                                                file.path);
+            if (!(f instanceof TFile)) continue;
+            if (x.at <= (f.stat ? f.stat.mtime : 0)) continue;
+            const body = core.splitFrontmatter(await this.app.vault.read(f))
+                .body;
+            if (versionHash(body) === x.h) continue;
+            out.push({ card, state: 'behind',
+                       since: new Date(x.at).toISOString() });
         }
         return out;
     }

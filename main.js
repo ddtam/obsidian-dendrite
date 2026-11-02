@@ -17962,9 +17962,9 @@ var DendriteComments = class extends ItemView {
         }
       }
       const headingOf = (id) => {
-        const line = (bodies.get(id) || "").trim().split("\n")[0];
+        const line = review.stripReview(bodies.get(id) || "").trim().split("\n")[0];
         const h = core.HEADING.exec(line || "");
-        return h ? h[2] : null;
+        return h ? h[2].trim() : null;
       };
       const numbers = fm.dendrite_number_sections === true ? core.sectionNumbers(
         root.children,
@@ -20667,7 +20667,8 @@ module.exports = class DendritePlugin extends Plugin {
    * one was resolved, applied, dismissed or withdrawn after its file
    * here last changed, yet it is still open in it. Another device did
    * it, and its card has not arrived here, or is held by the sync as a
-   * conflict: { card, state: 'behind', since }, since the newest such.
+   * conflict: { card, state: 'behind', since }, since the newest such;
+   * and each card another device's record has a newer text for.
    */
   async behindCards(file) {
     const gone = /* @__PURE__ */ new Set(["resolve", "apply", "dismiss", "withdraw"]);
@@ -20697,6 +20698,35 @@ module.exports = class DendritePlugin extends Plugin {
           since: still[still.length - 1].at
         });
       }
+    }
+    const ledger = this.ledger;
+    const newest = /* @__PURE__ */ new Map();
+    for (const rec of ledger ? await ledger.others(
+      ledger.dirOf(file)
+    ) : []) {
+      for (const [card, c] of Object.entries(rec.cards || {})) {
+        for (const x of [c.wrote, c.kept]) {
+          if (x && x.h && x.at && !(newest.get(card)?.at >= x.at)) {
+            newest.set(card, x);
+          }
+        }
+      }
+    }
+    for (const [card, x] of newest) {
+      if (out.some((o) => o.card === card)) continue;
+      const f = this.app.metadataCache.getFirstLinkpathDest(
+        card,
+        file.path
+      );
+      if (!(f instanceof TFile)) continue;
+      if (x.at <= (f.stat ? f.stat.mtime : 0)) continue;
+      const body = core.splitFrontmatter(await this.app.vault.read(f)).body;
+      if (versionHash(body) === x.h) continue;
+      out.push({
+        card,
+        state: "behind",
+        since: new Date(x.at).toISOString()
+      });
     }
     return out;
   }
