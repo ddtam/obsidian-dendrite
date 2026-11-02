@@ -2335,8 +2335,8 @@ test('the preview opens beside the board at a third of the width',
     assert.deepEqual(dims.sort(), [['board', 67], ['preview', 33]]);
 });
 
-test('the preview and the comment list each keep their own width as ' +
-     'the other opens and closes, the board taking up the difference',
+test('the preview and the comment list each keep a width of their own, ' +
+     'whichever opens or closes, the board taking up the difference',
      async () => {
     const Plugin = require('../src/main.js');
     const px = new Map();
@@ -2347,39 +2347,64 @@ test('the preview and the comment list each keep their own width as ' +
                     containerEl: box('split') };
     // Each pane a tab group holding one leaf, as Obsidian has it.
     const pane = (name, type) => {
+        // A dimension set is a percentage of the split, applied.
         const tabs = { name, parent: split, containerEl: box(name),
-                       setDimension: (d) => dims.set(name, Math.round(d)) };
+                       setDimension: (d) => {
+                           dims.set(name, Math.round(d));
+                           px.set(name, d * px.get('split') / 100);
+                       } };
         const leaf = { type, parent: tabs, view: {},
                        detach: () => split.children.splice(
                            split.children.indexOf(tabs), 1) };
         tabs.children = [leaf];
-        split.children.push(tabs);
         return leaf;
+    };
+    const board = pane('board', 'dendrite');
+    const preview = pane('preview', 'dendrite-preview');
+    const comments = pane('comments', 'dendrite-comments');
+    split.children.push(board.parent, preview.parent);
+    const leaves = (t) => [board, preview, comments].filter((l) =>
+        l.type === t && split.children.includes(l.parent));
+    const self = { app: { workspace: { getLeavesOfType: leaves } },
+                   reviewChanged: () => {}, previewLeaf: () => preview,
+                   closePanes: Plugin.prototype.closePanes };
+    // Obsidian splits the preview's pane in half to make the list's.
+    const open = () => {
+        const before = Plugin.paneWidths(preview);
+        split.children.push(comments.parent);
+        px.set('comments', px.get('preview') / 2);
+        px.set('preview', px.get('preview') / 2);
+        dims.clear();
+        Plugin.prototype.fitPanes.call(self, comments, 'side', before);
     };
     px.set('split', 1200);
     // The preview resized by hand to 480 of 1200.
     px.set('board', 720);
     px.set('preview', 480);
-    const board = pane('board', 'dendrite');
-    const preview = pane('preview', 'dendrite-preview');
-    const comments = pane('comments', 'dendrite-comments');
-    const leaves = (t) => [board, preview, comments].filter((l) =>
-        l.type === t && split.children.includes(l.parent));
-    const self = { app: { workspace: { getLeavesOfType: leaves } },
-                   reviewChanged: () => {},
-                   closePanes: Plugin.prototype.closePanes };
-    Plugin.prototype.fitPanes.call(self, comments, 'side');
+    open();
     assert.equal(dims.get('preview'), 40, 'the preview as it was');
     assert.equal(dims.get('comments'), 25, 'the list a sidebar\'s width');
     assert.equal(dims.get('board'), 35, 'the board the rest');
-    // Closed: the preview keeps its 480 of 1200, the board the rest.
-    px.set('board', 420);
-    px.set('comments', 300);
+    // The list widened by hand to 360, then closed: the preview keeps
+    // its 480, the board the rest.
+    px.set('board', 360);
+    px.set('comments', 360);
     dims.clear();
+    assert.equal(px.get('preview'), 480);
     await Plugin.prototype.setReview.call(self, null, false);
     assert.deepEqual(split.children.map((c) => c.name), ['board', 'preview']);
     assert.equal(dims.get('preview'), 40);
     assert.equal(dims.get('board'), 60);
+    // Opened again: at the 360 it was closed at.
+    open();
+    assert.equal(dims.get('comments'), 30, 'the list as it was left');
+    assert.equal(dims.get('preview'), 40);
+    // The preview closed: the list keeps its 360.
+    dims.clear();
+    Plugin.prototype.closePanes.call(self, [preview]);
+    assert.deepEqual(split.children.map((c) => c.name), ['board', 'comments']);
+    assert.equal(dims.get('comments'), 30);
+    assert.equal(dims.get('board'), 70);
 });
 
 test('an exported PDF opens beside the preview, or in the tab already ' +

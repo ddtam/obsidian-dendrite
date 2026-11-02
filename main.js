@@ -8564,6 +8564,11 @@ function paneKind(ws, pane) {
   if (holds([COMMENTS, FLOATS])) return "side";
   return holds([PREVIEW]) ? "preview" : null;
 }
+function paneWidths(leaf) {
+  const item = splitItem(leaf);
+  const split = item && item.parent;
+  return new Map(split ? (split.children || []).map((c) => [c, paneWidth(c)]) : []);
+}
 function paneWidth(pane) {
   const el = pane && pane.containerEl;
   return el && el.getBoundingClientRect ? el.getBoundingClientRect().width : 0;
@@ -21272,8 +21277,10 @@ module.exports = class DendritePlugin extends Plugin {
       this.app.workspace.revealLeaf(open);
       return;
     }
-    const leaf = this.app.workspace.getLeaf("split", "vertical");
-    this.fitPanes(leaf, "preview");
+    const ws = this.app.workspace;
+    const before = paneWidths(ws.getMostRecentLeaf ? ws.getMostRecentLeaf() : ws.activeLeaf);
+    const leaf = ws.getLeaf("split", "vertical");
+    this.fitPanes(leaf, "preview", before);
     await leaf.setViewState({
       type: PREVIEW,
       active: false,
@@ -21282,20 +21289,20 @@ module.exports = class DendritePlugin extends Plugin {
   }
   /**
    * The split `leaf` was opened in, `own` its kind, 'preview' or
-   * 'side', sized: a side list, of comments or of tables and figures,
-   * a sidebar's width, a preview a third, a half on a tablet, of the
-   * window; a preview or side list already open keeps the width it
-   * has; the boards the rest.
+   * 'side', sized: the new pane at the width its kind was last closed
+   * at, else a side list, of comments or of tables and figures, a
+   * sidebar's width, and a preview a third, a half on a tablet, of the
+   * window; a preview or side list already open at the width it had
+   * before the split, `before` as paneWidths gave it; the boards the
+   * rest.
    */
-  fitPanes(leaf, own) {
-    let mine = leaf;
-    while (mine && mine.parent && !(mine.parent.direction === "vertical" && (mine.parent.children || []).length > 1)) {
-      mine = mine.parent;
-    }
+  fitPanes(leaf, own, before = null) {
+    const mine = splitItem(leaf);
+    const last = (this.paneSizes || {})[own];
     return fitSplit(leaf, (c, total) => {
       const kind = c === mine ? own : paneKind(this.app.workspace, c);
-      const now = c === mine ? 0 : paneWidth(c);
-      if (kind && now && total) return now / total;
+      const now = c === mine ? last : before && before.get(c) || paneWidth(c);
+      if (kind && now && total) return Math.min(0.6, now / total);
       if (kind === "side") {
         return total ? Math.min(0.4, SIDEBAR_WIDTH / total) : 0.25;
       }
@@ -21314,6 +21321,14 @@ module.exports = class DendritePlugin extends Plugin {
       const item = splitItem(l);
       if (!split && item && item.parent) {
         split = item.parent;
+        const kind = paneKind(ws, item);
+        if (kind && paneWidth(item)) {
+          this.paneSizes = Object.assign(
+            {},
+            this.paneSizes,
+            { [kind]: paneWidth(item) }
+          );
+        }
         for (const c of split.children) {
           if (c !== item && paneKind(ws, c)) {
             held.push([c, paneWidth(c)]);
@@ -21400,8 +21415,9 @@ module.exports = class DendritePlugin extends Plugin {
       await leaf.setViewState({ type, active: false });
     } else if (!leaf && popout) {
       const pv = ws.getLeavesOfType(PREVIEW).find((l) => l.view && l.view.file === from.file && inWindow(l));
+      const before = paneWidths(pv || from.leaf);
       leaf = ws.createLeafBySplit(pv || from.leaf, "vertical");
-      this.fitPanes(leaf, "side");
+      this.fitPanes(leaf, "side", before);
       await leaf.setViewState({ type, active: false });
     } else if (!leaf) {
       leaf = ws.getRightLeaf(false);
@@ -21641,6 +21657,7 @@ module.exports.DendriteFloats = DendriteFloats;
 module.exports.tidyKept = tidyKept;
 module.exports.readReviewLog = readReviewLog;
 module.exports.floatInventory = floatInventory;
+module.exports.paneWidths = paneWidths;
 module.exports.DendriteSettings = DendriteSettings;
 module.exports.exportStyle = exportStyle;
 module.exports.callers = callers;
