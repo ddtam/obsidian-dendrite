@@ -7869,3 +7869,37 @@ test('a card another device wrote since this device\'s copy last changed ' +
     f.stat = { mtime: at + 5000 };
     assert.deepEqual(await sync(), []);
 });
+
+test('a heading its suggestions would empty, over cards that print, is ' +
+     'offered as scaffolding, so the cards under it still print',
+     async () => {
+    const review = require('../src/review.js');
+    const md = review.addItems('# Research Goal', [{ kind: 'suggest',
+        start: 2, end: 15, author: 'Josh', date: '2026-11-02', text: '' }]);
+    const { view, read, text } = await open('---\ndendrite_prefix: G\n' +
+        '---\n- [[G-aaaaa|Goal]]\n    - [[G-bbbbb|AML]]\n',
+        { 'G-aaaaa': md, 'G-bbbbb': 'AML is deadly.' });
+    await view.reviewAction('G-aaaaa', 0, 'apply');
+    const m = h.obsidian.lastModal;
+    assert.match(m.contentEl.textContent, /cards under it still print/);
+    const buttons = [...m.contentEl.querySelectorAll('button')]
+        .map((b) => b.textContent);
+    assert.ok(buttons.includes('Stop printing the heading'));
+    assert.ok(!buttons.includes('Stop printing this card'));
+    await [...m.contentEl.querySelectorAll('button')].find((b) =>
+        b.textContent === 'Stop printing the heading').onclick();
+    assert.equal(text(cardPath('G-aaaaa')), '# Research Goal');
+    assert.match(read(cardPath('G-aaaaa')), /dendrite_role: scaffolding/);
+    assert.equal(text(cardPath('G-bbbbb')), 'AML is deadly.');
+    // Its cards' text taken out too, nothing under it would print: the
+    // card stops printing, branch and all.
+    const gone = review.addItems('Fir is chosen.', [{ kind: 'suggest',
+        start: 0, end: 14, author: 'Josh', date: '2026-11-02', text: '' }]);
+    const b = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|Goal]]\n    - [[G-bbbbb|Fir]]\n',
+        { 'G-aaaaa': md, 'G-bbbbb': gone });
+    await b.view.reviewAction('G-aaaaa', 0, 'apply');
+    const labels = [...h.obsidian.lastModal.contentEl
+        .querySelectorAll('button')].map((x) => x.textContent);
+    assert.ok(labels.includes('Stop printing this card'));
+});

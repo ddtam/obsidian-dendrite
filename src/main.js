@@ -7261,14 +7261,39 @@ class DendriteView extends ItemView {
             };
             const replies = item ? review.keptReplies(item) : [];
             // Its suggestions would leave the card with no text: kept and
-            // not printed instead, their text there to use elsewhere.
-            const stop = !review.emptiedBy(body) ? null : async () => {
-                const all = review.reviewItems(body).filter((x) =>
-                    x.kind === 'suggest');
-                await write(review.withoutSuggestions(body));
-                await this.setRole(id, 'notes');
-                for (const x of all) await this.rememberDone(x, 'dismiss', id);
+            // not printed instead, their text there to use elsewhere; as
+            // notes, or, over cards that print, as scaffolding, which
+            // prints them in its place.
+            const node = this.byId.get(id);
+            const roleOf = (x) => this.printRoleOf(x);
+            // A card below that prints, once its own suggestions are
+            // applied: its text, or one below it.
+            const prints = async (n) => {
+                if (core.roleFor(n, roleOf) === 'notes') return false;
+                const f = this.cardFile(n.id);
+                if (f && review.keepsText(core.splitFrontmatter(
+                    await this.app.vault.read(f)).body)) return true;
+                for (const c of n.children) if (await prints(c)) return true;
+                return false;
             };
+            let over = false;
+            for (const c of node ? node.children : []) {
+                if (await prints(c)) {
+                    over = true;
+                    break;
+                }
+            }
+            const stop = !review.emptiedBy(body) ? null : {
+                heading: over,
+                run: async () => {
+                    const all = review.reviewItems(body).filter((x) =>
+                        x.kind === 'suggest');
+                    await write(review.withoutSuggestions(body));
+                    await this.setRole(id, over ? 'scaffolding' : 'notes');
+                    for (const x of all) {
+                        await this.rememberDone(x, 'dismiss', id);
+                    }
+                } };
             new SuggestModal(this, id, body, after, done(after),
                 item && this.colourOf()(item.author || 'Reviewer'),
                 replies, replies.length ?
@@ -11325,19 +11350,23 @@ class SuggestModal extends VersionModal {
                     `${review.shortDate(r.date)}: ${r.text}` });
             }
         }
-        if (this.stop) {
+        const stop = this.stop;
+        if (stop) {
             contentEl.createEl('p', { text: 'The suggestions on this card, ' +
-                'all applied, would leave this card with no text. Stop ' +
-                'printing it instead to keep its text on the board, out of ' +
-                'the export: its suggestions are taken out, none applied.' });
+                'all applied, would leave this card with no text. ' +
+                (stop.heading ? 'Stop printing its heading instead, so the ' +
+                    'cards under it still print in its place' :
+                    'Stop printing it instead') + ', to keep its text on ' +
+                'the board, out of the export: its suggestions are taken ' +
+                'out, none applied.' });
         }
         const row = contentEl.createDiv({ cls: 'dendrite-version-choices' });
-        if (this.stop) {
-            row.createEl('button', { cls: 'mod-cta',
-                                     text: 'Stop printing this card' })
+        if (stop) {
+            row.createEl('button', { cls: 'mod-cta', text: stop.heading ?
+                'Stop printing the heading' : 'Stop printing this card' })
                 .onclick = async () => {
                     this.close();
-                    await this.stop();
+                    await stop.run();
                 };
         }
         const yes = row.createEl('button', { cls: this.stop ? '' : 'mod-cta',

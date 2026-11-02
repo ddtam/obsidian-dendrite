@@ -2279,6 +2279,10 @@ function emptiedBy(md) {
 /** A card's markdown with its suggestions taken out, none applied. */
 const withoutSuggestions = (md) => everySuggestion(md, false);
 
+/** Whether a card has text to print once its suggestions are applied. */
+const keepsText = (md) => /[\p{L}\p{N}]/u.test(stripReview(
+    everySuggestion(md, true)));
+
 // ---- Drawing them on a card -------------------------------------------
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug',
@@ -2920,6 +2924,6 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    firstOfComment, countComments,
                    itemText,
                    addItems, removeItem, applyKeeping, keptReplies,
-                   emptiedBy, withoutSuggestions,
+                   emptiedBy, withoutSuggestions, keepsText,
                    stripReview, renderMarkdown, decorate,
                    shortDate };

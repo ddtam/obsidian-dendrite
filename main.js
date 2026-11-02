@@ -3427,6 +3427,9 @@ var require_review = __commonJS({
       return some(md) && !some(everySuggestion(md, true));
     }
     var withoutSuggestions = (md) => everySuggestion(md, false);
+    var keepsText = (md) => /[\p{L}\p{N}]/u.test(stripReview(
+      everySuggestion(md, true)
+    ));
     var MONTHS = [
       "Jan",
       "Feb",
@@ -3959,6 +3962,7 @@ var require_review = __commonJS({
       keptReplies,
       emptiedBy,
       withoutSuggestions,
+      keepsText,
       stripReview,
       renderMarkdown,
       decorate,
@@ -14867,11 +14871,34 @@ var DendriteView = class extends ItemView {
         if (item) await this.rememberDone(item, "apply", id);
       };
       const replies = item ? review.keptReplies(item) : [];
-      const stop = !review.emptiedBy(body) ? null : async () => {
-        const all = review.reviewItems(body).filter((x) => x.kind === "suggest");
-        await write(review.withoutSuggestions(body));
-        await this.setRole(id, "notes");
-        for (const x of all) await this.rememberDone(x, "dismiss", id);
+      const node = this.byId.get(id);
+      const roleOf = (x) => this.printRoleOf(x);
+      const prints = async (n2) => {
+        if (core.roleFor(n2, roleOf) === "notes") return false;
+        const f2 = this.cardFile(n2.id);
+        if (f2 && review.keepsText(core.splitFrontmatter(
+          await this.app.vault.read(f2)
+        ).body)) return true;
+        for (const c of n2.children) if (await prints(c)) return true;
+        return false;
+      };
+      let over = false;
+      for (const c of node ? node.children : []) {
+        if (await prints(c)) {
+          over = true;
+          break;
+        }
+      }
+      const stop = !review.emptiedBy(body) ? null : {
+        heading: over,
+        run: async () => {
+          const all = review.reviewItems(body).filter((x) => x.kind === "suggest");
+          await write(review.withoutSuggestions(body));
+          await this.setRole(id, over ? "scaffolding" : "notes");
+          for (const x of all) {
+            await this.rememberDone(x, "dismiss", id);
+          }
+        }
       };
       new SuggestModal(
         this,
@@ -18691,17 +18718,15 @@ var SuggestModal = class extends VersionModal {
         list.createEl("li", { text: `${r.author}, ${review.shortDate(r.date)}: ${r.text}` });
       }
     }
-    if (this.stop) {
-      contentEl.createEl("p", { text: "The suggestions on this card, all applied, would leave this card with no text. Stop printing it instead to keep its text on the board, out of the export: its suggestions are taken out, none applied." });
+    const stop = this.stop;
+    if (stop) {
+      contentEl.createEl("p", { text: "The suggestions on this card, all applied, would leave this card with no text. " + (stop.heading ? "Stop printing its heading instead, so the cards under it still print in its place" : "Stop printing it instead") + ", to keep its text on the board, out of the export: its suggestions are taken out, none applied." });
     }
     const row = contentEl.createDiv({ cls: "dendrite-version-choices" });
-    if (this.stop) {
-      row.createEl("button", {
-        cls: "mod-cta",
-        text: "Stop printing this card"
-      }).onclick = async () => {
+    if (stop) {
+      row.createEl("button", { cls: "mod-cta", text: stop.heading ? "Stop printing the heading" : "Stop printing this card" }).onclick = async () => {
         this.close();
-        await this.stop();
+        await stop.run();
       };
     }
     const yes = row.createEl("button", {
