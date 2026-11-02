@@ -2269,19 +2269,23 @@ function everySuggestion(md, apply) {
  * Whether the suggestions in a card's markdown, all applied, would leave
  * it with no text to print, no letter or digit, where it has some now: a
  * reviewer taking out a whole card's text, which is better kept and not
- * printed than lost.
+ * printed than lost. `printed(text)` is the part of a card's text that
+ * prints, as a section's heading line alone.
  */
-function emptiedBy(md) {
-    const some = (t) => /[\p{L}\p{N}]/u.test(stripReview(t));
+function emptiedBy(md, printed = (t) => t) {
+    const some = (t) => /[\p{L}\p{N}]/u.test(printed(stripReview(t)));
     return some(md) && !some(everySuggestion(md, true));
 }
 
 /** A card's markdown with its suggestions taken out, none applied. */
 const withoutSuggestions = (md) => everySuggestion(md, false);
 
-/** Whether a card has text to print once its suggestions are applied. */
-const keepsText = (md) => /[\p{L}\p{N}]/u.test(stripReview(
-    everySuggestion(md, true)));
+/**
+ * Whether a card has text to print once its suggestions are applied,
+ * `printed` as for emptiedBy.
+ */
+const keepsText = (md, printed = (t) => t) => /[\p{L}\p{N}]/u.test(
+    printed(stripReview(everySuggestion(md, true))));
 
 // ---- Drawing them on a card -------------------------------------------
 

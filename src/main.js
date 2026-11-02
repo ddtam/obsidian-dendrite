@@ -7268,11 +7268,15 @@ class DendriteView extends ItemView {
             const roleOf = (x) => this.printRoleOf(x);
             // A card below that prints, once its own suggestions are
             // applied: its text, or one below it.
+            const printed = (n) => (t) => core.printedOnly(t,
+                core.roleFor(n, roleOf));
             const prints = async (n) => {
                 if (core.roleFor(n, roleOf) === 'notes') return false;
                 const f = this.cardFile(n.id);
                 if (f && review.keepsText(core.splitFrontmatter(
-                    await this.app.vault.read(f)).body)) return true;
+                    await this.app.vault.read(f)).body, printed(n))) {
+                    return true;
+                }
                 for (const c of n.children) if (await prints(c)) return true;
                 return false;
             };
@@ -7283,7 +7287,8 @@ class DendriteView extends ItemView {
                     break;
                 }
             }
-            const stop = !review.emptiedBy(body) ? null : {
+            const stop = !node || !review.emptiedBy(body, printed(node)) ?
+                null : {
                 heading: over,
                 run: async () => {
                     const all = review.reviewItems(body).filter((x) =>

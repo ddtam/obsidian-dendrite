@@ -3422,14 +3422,14 @@ var require_review = __commonJS({
       for (let k = next(); k >= 0; k = next()) out = removeItem(out, k, apply);
       return out;
     }
-    function emptiedBy(md) {
-      const some = (t) => /[\p{L}\p{N}]/u.test(stripReview(t));
+    function emptiedBy(md, printed = (t) => t) {
+      const some = (t) => /[\p{L}\p{N}]/u.test(printed(stripReview(t)));
       return some(md) && !some(everySuggestion(md, true));
     }
     var withoutSuggestions = (md) => everySuggestion(md, false);
-    var keepsText = (md) => /[\p{L}\p{N}]/u.test(stripReview(
-      everySuggestion(md, true)
-    ));
+    var keepsText = (md, printed = (t) => t) => /[\p{L}\p{N}]/u.test(
+      printed(stripReview(everySuggestion(md, true)))
+    );
     var MONTHS = [
       "Jan",
       "Feb",
@@ -14873,12 +14873,18 @@ var DendriteView = class extends ItemView {
       const replies = item ? review.keptReplies(item) : [];
       const node = this.byId.get(id);
       const roleOf = (x) => this.printRoleOf(x);
+      const printed = (n2) => (t) => core.printedOnly(
+        t,
+        core.roleFor(n2, roleOf)
+      );
       const prints = async (n2) => {
         if (core.roleFor(n2, roleOf) === "notes") return false;
         const f2 = this.cardFile(n2.id);
         if (f2 && review.keepsText(core.splitFrontmatter(
           await this.app.vault.read(f2)
-        ).body)) return true;
+        ).body, printed(n2))) {
+          return true;
+        }
         for (const c of n2.children) if (await prints(c)) return true;
         return false;
       };
@@ -14889,7 +14895,7 @@ var DendriteView = class extends ItemView {
           break;
         }
       }
-      const stop = !review.emptiedBy(body) ? null : {
+      const stop = !node || !review.emptiedBy(body, printed(node)) ? null : {
         heading: over,
         run: async () => {
           const all = review.reviewItems(body).filter((x) => x.kind === "suggest");

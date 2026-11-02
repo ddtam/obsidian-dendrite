@@ -7874,8 +7874,11 @@ test('a heading its suggestions would empty, over cards that print, is ' +
      'offered as scaffolding, so the cards under it still print',
      async () => {
     const review = require('../src/review.js');
-    const md = review.addItems('# Research Goal', [{ kind: 'suggest',
-        start: 2, end: 15, author: 'Josh', date: '2026-11-02', text: '' }]);
+    // A section's notes under its heading, which do not print.
+    const notes = '\n\n## What research will be done?\n\n- Several assays';
+    const md = review.addItems('# Research Goal' + notes, [{
+        kind: 'suggest', start: 2, end: 15, author: 'Josh',
+        date: '2026-11-02', text: '' }]);
     const { view, read, text } = await open('---\ndendrite_prefix: G\n' +
         '---\n- [[G-aaaaa|Goal]]\n    - [[G-bbbbb|AML]]\n',
         { 'G-aaaaa': md, 'G-bbbbb': 'AML is deadly.' });
@@ -7888,7 +7891,7 @@ test('a heading its suggestions would empty, over cards that print, is ' +
     assert.ok(!buttons.includes('Stop printing this card'));
     await [...m.contentEl.querySelectorAll('button')].find((b) =>
         b.textContent === 'Stop printing the heading').onclick();
-    assert.equal(text(cardPath('G-aaaaa')), '# Research Goal');
+    assert.equal(text(cardPath('G-aaaaa')), '# Research Goal' + notes);
     assert.match(read(cardPath('G-aaaaa')), /dendrite_role: scaffolding/);
     assert.equal(text(cardPath('G-bbbbb')), 'AML is deadly.');
     // Its cards' text taken out too, nothing under it would print: the
