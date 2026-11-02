@@ -1938,3 +1938,73 @@ test('a numbered heading quote goes only to the one card whose heading ' +
     const twin = { id: 'G-ddddd', text: '## Storage Details\n\nMore.' };
     assert.equal(r.locate(q, [own, twin]), null, 'two: not placed');
 });
+
+test('a paragraph a reviewer added where there was none places after ' +
+     'the paragraph before it, and applies as a paragraph of its own; a ' +
+     'lone space taken out of an empty line is left out', () => {
+    const by = 'w:author="Josh" w:date="2026-11-02T10:00:00Z"';
+    // The heading styled by hand, as a template's may be, so its
+    // number is still on it.
+    const body =
+        '<w:p><w:pPr><w:b/></w:pPr>' +
+        run('4.2 Compute Requests') + '</w:p>' +
+        `<w:p><w:ins w:id="1" ${by}>` + run('Not applicable') +
+        '</w:ins></w:p>' +
+        `<w:p><w:del w:id="2" ${by}><w:r><w:delText xml:space="preserve">` +
+        ' </w:delText></w:r></w:del></w:p>' +
+        '<w:p>' + run('Raw reads are kept on nearline.') + '</w:p>' +
+        '<w:p><w:commentRangeStart w:id="0"/>' +
+        `<w:ins w:id="3" ${by}>` + run('Fir is the selected cluster.') +
+        '</w:ins><w:commentRangeEnd w:id="0"/>' +
+        '<w:r><w:commentReference w:id="0"/></w:r></w:p>';
+    const comments = `<w:comments ${W}><w:comment w:id="0" ${by}><w:p>` +
+        run('Moved here so the compute section can go.') +
+        '</w:p></w:comment></w:comments>';
+    const buf = d.writeZip([
+        { name: 'word/document.xml',
+          data: Buffer.from(`<w:document ${W}><w:body>${body}` +
+                            '</w:body></w:document>') },
+        { name: 'word/comments.xml', data: Buffer.from(comments) }], zlib);
+    const cards = [
+        { id: 'H', text: '### Compute Requests' },
+        { id: 'S', text: 'Raw reads are kept on nearline.\n\nThe end.' }];
+    const items = r.readReview(buf, zlib);
+    assert.deepEqual(items.map((x) => [x.kind, x.insert || x.text]), [
+        ['change', '¶ Not applicable'],
+        ['comment', 'Moved here so the compute section can go.'],
+        ['change', '¶ Fir is the selected cluster.']]);
+    const where = items.map((x) => {
+        const at = r.locate(x, cards);
+        return at && [at.id, at.start];
+    });
+    assert.deepEqual(where, [['H', 20], ['S', 31], ['S', 31]]);
+    // Applied: a paragraph of its own after the one before it.
+    const md = r.addItems(cards[1].text, [{ kind: 'suggest', start: 31,
+        end: 31, author: 'Josh', date: '2026-11-02',
+        text: items[2].insert }]);
+    assert.equal(r.applyKeeping(md, 0), 'Raw reads are kept on ' +
+        'nearline.\n\nFir is the selected cluster.\n\nThe end.');
+    // At the end of a card, after its last line break: one blank line.
+    const last = r.addItems('Raw reads are kept.\n', [{ kind: 'suggest',
+        start: 20, end: 20, author: 'Josh', date: '2026-11-02',
+        text: items[2].insert }]);
+    assert.equal(r.applyKeeping(last, 0),
+                 'Raw reads are kept.\n\nFir is the selected cluster.\n');
+});
+
+test('a numbered heading a reviewer deleted is found on its card\'s ' +
+     'heading line before anywhere its words also appear', () => {
+    const cards = [
+        { id: 'T', text: '| Subsection | Content |\n| --- | --- |\n' +
+          '| 4.2.1 | Cluster Selection |\n| 4.2.2 | Size |' },
+        { id: 'F', text: '| Source | Research goal | Amount |\n' +
+          '| --- | --- | --- |\n| Grant 1.1 | Research | Goal $1 |' },
+        { id: 'C', text: '# Cluster Selection\n\nFir is chosen.' },
+        { id: 'R', text: '# Research Goal\n\nAML is deadly.' }];
+    const at = (quote) => r.locate({ kind: 'change', quote, insert: '',
+                                     before: '', after: '' }, cards);
+    const c = at('4.2.1 Cluster Selection');
+    assert.equal(c.id, 'C');
+    assert.equal(cards[2].text.slice(c.start, c.end), 'Cluster Selection');
+    assert.equal(at('1.1 Research Goal').id, 'R');
+});

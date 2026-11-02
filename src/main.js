@@ -7260,10 +7260,19 @@ class DendriteView extends ItemView {
                 if (item) await this.rememberDone(item, 'apply', id);
             };
             const replies = item ? review.keptReplies(item) : [];
+            // Its suggestions would leave the card with no text: kept and
+            // not printed instead, their text there to use elsewhere.
+            const stop = !review.emptiedBy(body) ? null : async () => {
+                const all = review.reviewItems(body).filter((x) =>
+                    x.kind === 'suggest');
+                await write(review.withoutSuggestions(body));
+                await this.setRole(id, 'notes');
+                for (const x of all) await this.rememberDone(x, 'dismiss', id);
+            };
             new SuggestModal(this, id, body, after, done(after),
                 item && this.colourOf()(item.author || 'Reviewer'),
                 replies, replies.length ?
-                    done(review.applyKeeping(body, n)) : null).open();
+                    done(review.applyKeeping(body, n)) : null, stop).open();
             return;
         }
         // A Google comment on several passages comes in as one comment
@@ -11273,7 +11282,7 @@ class VersionModal extends Modal {
  */
 class SuggestModal extends VersionModal {
     constructor(view, id, now, after, apply, tint = null, replies = [],
-                keep = null) {
+                keep = null, stop = null) {
         super(view, id);
         this.now = now;
         this.after = after;
@@ -11281,6 +11290,7 @@ class SuggestModal extends VersionModal {
         this.tint = tint;
         this.replies = replies;
         this.keep = keep;
+        this.stop = stop;
         this.labels = ['the card now', 'with the change'];
     }
 
@@ -11313,8 +11323,22 @@ class SuggestModal extends VersionModal {
                     `${review.shortDate(r.date)}: ${r.text}` });
             }
         }
+        if (this.stop) {
+            contentEl.createEl('p', { text: 'The suggestions on this card, ' +
+                'all applied, would leave this card with no text. Stop ' +
+                'printing it instead to keep its text on the board, out of ' +
+                'the export: its suggestions are taken out, none applied.' });
+        }
         const row = contentEl.createDiv({ cls: 'dendrite-version-choices' });
-        const yes = row.createEl('button', { cls: 'mod-cta',
+        if (this.stop) {
+            row.createEl('button', { cls: 'mod-cta',
+                                     text: 'Stop printing this card' })
+                .onclick = async () => {
+                    this.close();
+                    await this.stop();
+                };
+        }
+        const yes = row.createEl('button', { cls: this.stop ? '' : 'mod-cta',
                                              text: 'Apply' });
         yes.onclick = async () => {
             this.close();

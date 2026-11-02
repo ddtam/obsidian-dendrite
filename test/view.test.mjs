@@ -7709,3 +7709,31 @@ test('a template PDF\'s tables float one at a time, each kept only if ' +
         wt.floatDocx = saved.move;
     }
 });
+
+test('applying a suggestion on a card its suggestions would leave with ' +
+     'no text offers to stop printing it, keeping its text', async () => {
+    const review = require('../src/review.js');
+    const body = 'Fir is chosen.\n\nNibi would do.';
+    const md = review.addItems(body, [
+        { kind: 'suggest', start: 0, end: 14, author: 'Josh',
+          date: '2026-11-02', text: '' },
+        { kind: 'suggest', start: 16, end: 30, author: 'Josh',
+          date: '2026-11-02', text: '' }]);
+    const { view, read, text } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|A]]\n- [[G-bbbbb|B]]\n',
+        { 'G-aaaaa': md, 'G-bbbbb': 'Kept.' });
+    await view.reviewAction('G-aaaaa', 0, 'apply');
+    const m = h.obsidian.lastModal;
+    assert.match(m.contentEl.textContent, /would leave this card with no/);
+    const buttons = [...m.contentEl.querySelectorAll('button')];
+    const stop = buttons.find((b) => b.textContent ===
+        'Stop printing this card');
+    assert.ok(stop.classList.contains('mod-cta'), 'the safe choice first');
+    await stop.onclick();
+    assert.equal(text(cardPath('G-aaaaa')), body,
+                 'its text kept, its suggestions gone');
+    assert.match(read(cardPath('G-aaaaa')), /dendrite_role: notes/);
+    await view.doUndo();
+    assert.equal(text(cardPath('G-aaaaa')), md, 'one step undoes it');
+    assert.doesNotMatch(read(cardPath('G-aaaaa')), /dendrite_role: notes/);
+});

@@ -1905,6 +1905,7 @@ var require_review = __commonJS({
       return out;
     }
     var CONTEXT = 60;
+    var NEW_PARAGRAPH = "\xB6 ";
     function readReview(buf, zlib) {
       const files = new Map(docx.readZip(buf, zlib).map((f) => [f.name, f.data.toString("utf8")]));
       const body = files.get("word/document.xml");
@@ -1968,7 +1969,25 @@ var require_review = __commonJS({
       });
       items.sort((a, b) => a.at[0] - b.at[0] || a.at[1] - b.at[1]);
       linkGoogle(items, googleData(files));
-      return items;
+      return items.filter((it) => alone(it, paras));
+    }
+    function alone(it, paras) {
+      if ((it.before + it.quote + it.after).trim()) return true;
+      if (it.kind === "change" && !it.insert) return false;
+      const p = it.at[0];
+      for (let k = p - 1; k >= 0; k--) {
+        const t = paras[k].text;
+        if (!t.trim()) continue;
+        it.before = tail(
+          t.length < 80 ? t.replace(SECTION_NUMBER, "") : t,
+          CONTEXT
+        );
+        break;
+      }
+      if (it.kind === "change" && !paras[p].text.trim()) {
+        it.insert = NEW_PARAGRAPH + it.insert;
+      }
+      return true;
     }
     function protoFields(buf) {
       const out = [];
@@ -2366,20 +2385,22 @@ var require_review = __commonJS({
     }
     var tail = (s, n) => s.slice(Math.max(0, s.length - n));
     function locate(item, cards) {
-      const at = locateAs(item, cards);
-      if (at || item.heading) return at;
-      const m = /^\s*\d+(?:\.\d+)*\.?\s+(\S[^]*)$/.exec(item.quote || "");
-      if (!m) return null;
-      const want = normalise(m[1]).text;
-      const own = cards.filter((c) => String(c.text).split("\n").some((l) => /^#{1,6}\s/.test(l) && normalise(l.replace(/^#+\s*/, "")).text === want));
-      if (own.length !== 1) return null;
-      return locateAs({
-        ...item,
-        quote: m[1],
-        before: "",
-        after: "",
-        heading: true
-      }, own);
+      if (item.heading) return locateAs(item, cards);
+      const m = /^\s*\d+(?:\.\d+)*\.?\s+(\S[^\n]*)$/.exec(item.quote || "");
+      if (m) {
+        const want = normalise(m[1]).text;
+        const own = cards.filter((c) => String(c.text).split("\n").some((l) => /^#{1,6}\s/.test(l) && normalise(l.replace(/^#+\s*/, "")).text === want));
+        if (own.length === 1) {
+          return locateAs({
+            ...item,
+            quote: m[1],
+            before: "",
+            after: "",
+            heading: true
+          }, own);
+        }
+      }
+      return locateAs(item, cards);
     }
     function locateAs(item, cards) {
       if (item.card) {
@@ -3279,6 +3300,13 @@ var require_review = __commonJS({
       return md.slice(0, it.open.start) + md.slice(it.open.end, it.noteStart) + md.slice(it.end);
     }
     function applied(md, it) {
+      if (!String(it.passage || "").trim() && String(it.text || "").startsWith(NEW_PARAGRAPH.trim())) {
+        const r = applied(md, Object.assign({}, it, { text: "\n\n" + it.text.slice(NEW_PARAGRAPH.trim().length).trimStart() }));
+        const ws = /\s*$/.exec(r.out.slice(0, r.start))[0];
+        const s2 = r.start - ws.length;
+        const e = r.end - ws.length;
+        return { out: r.out.slice(0, s2) + r.out.slice(r.start, r.end) + ws + r.out.slice(r.end), start: s2, end: e };
+      }
       if (!it.open) {
         const out2 = md.slice(0, it.start) + it.text + md.slice(it.end);
         return tidySpan(out2, it.start, it.start + it.text.length);
@@ -3388,6 +3416,17 @@ var require_review = __commonJS({
     function stripReview(md) {
       return without(md, 0, md.length, scan(md).syntax);
     }
+    function everySuggestion(md, apply) {
+      let out = md;
+      const next = () => reviewItems(out).findIndex((x) => x.kind === "suggest");
+      for (let k = next(); k >= 0; k = next()) out = removeItem(out, k, apply);
+      return out;
+    }
+    function emptiedBy(md) {
+      const some = (t) => /[\p{L}\p{N}]/u.test(stripReview(t));
+      return some(md) && !some(everySuggestion(md, true));
+    }
+    var withoutSuggestions = (md) => everySuggestion(md, false);
     var MONTHS = [
       "Jan",
       "Feb",
@@ -3918,6 +3957,8 @@ var require_review = __commonJS({
       removeItem,
       applyKeeping,
       keptReplies,
+      emptiedBy,
+      withoutSuggestions,
       stripReview,
       renderMarkdown,
       decorate,
@@ -14826,6 +14867,12 @@ var DendriteView = class extends ItemView {
         if (item) await this.rememberDone(item, "apply", id);
       };
       const replies = item ? review.keptReplies(item) : [];
+      const stop = !review.emptiedBy(body) ? null : async () => {
+        const all = review.reviewItems(body).filter((x) => x.kind === "suggest");
+        await write(review.withoutSuggestions(body));
+        await this.setRole(id, "notes");
+        for (const x of all) await this.rememberDone(x, "dismiss", id);
+      };
       new SuggestModal(
         this,
         id,
@@ -14834,7 +14881,8 @@ var DendriteView = class extends ItemView {
         done(after),
         item && this.colourOf()(item.author || "Reviewer"),
         replies,
-        replies.length ? done(review.applyKeeping(body, n)) : null
+        replies.length ? done(review.applyKeeping(body, n)) : null,
+        stop
       ).open();
       return;
     }
@@ -18610,7 +18658,7 @@ var VersionModal = class _VersionModal extends Modal {
   }
 };
 var SuggestModal = class extends VersionModal {
-  constructor(view, id, now, after, apply, tint = null, replies = [], keep = null) {
+  constructor(view, id, now, after, apply, tint = null, replies = [], keep = null, stop = null) {
     super(view, id);
     this.now = now;
     this.after = after;
@@ -18618,6 +18666,7 @@ var SuggestModal = class extends VersionModal {
     this.tint = tint;
     this.replies = replies;
     this.keep = keep;
+    this.stop = stop;
     this.labels = ["the card now", "with the change"];
   }
   async onOpen() {
@@ -18642,9 +18691,21 @@ var SuggestModal = class extends VersionModal {
         list.createEl("li", { text: `${r.author}, ${review.shortDate(r.date)}: ${r.text}` });
       }
     }
+    if (this.stop) {
+      contentEl.createEl("p", { text: "The suggestions on this card, all applied, would leave this card with no text. Stop printing it instead to keep its text on the board, out of the export: its suggestions are taken out, none applied." });
+    }
     const row = contentEl.createDiv({ cls: "dendrite-version-choices" });
+    if (this.stop) {
+      row.createEl("button", {
+        cls: "mod-cta",
+        text: "Stop printing this card"
+      }).onclick = async () => {
+        this.close();
+        await this.stop();
+      };
+    }
     const yes = row.createEl("button", {
-      cls: "mod-cta",
+      cls: this.stop ? "" : "mod-cta",
       text: "Apply"
     });
     yes.onclick = async () => {

@@ -217,6 +217,10 @@ function readComments(xml) {
 
 const CONTEXT = 60;
 
+// A suggestion that adds a paragraph of its own starts with this: it is
+// applied after a blank line, as suggestion text holds no line breaks.
+const NEW_PARAGRAPH = '¶ ';
+
 /**
  * Everything a returned .docx says about its text, in reading order:
  * comments { kind: 'comment', author, date, text, quote, before, after }
@@ -283,7 +287,33 @@ function readReview(buf, zlib) {
     });
     items.sort((a, b) => a.at[0] - b.at[0] || a.at[1] - b.at[1]);
     linkGoogle(items, googleData(files));
-    return items;
+    return items.filter((it) => alone(it, paras));
+}
+
+/**
+ * Item `it` of a returned file, where its paragraph has no other text to
+ * place it by, given the end of the paragraph before as its context: a
+ * paragraph the reviewer added, written as one to add after that one,
+ * and a comment on it. False for a space taken out of an empty line,
+ * which is the template's spacing and in no card.
+ */
+function alone(it, paras) {
+    if ((it.before + it.quote + it.after).trim()) return true;
+    if (it.kind === 'change' && !it.insert) return false;
+    const p = it.at[0];
+    for (let k = p - 1; k >= 0; k--) {
+        const t = paras[k].text;
+        if (!t.trim()) continue;
+        // A heading the template styles by hand keeps the export's
+        // section number, which the card's heading does not have.
+        it.before = tail(t.length < 80 ? t.replace(SECTION_NUMBER, '') : t,
+                         CONTEXT);
+        break;
+    }
+    if (it.kind === 'change' && !paras[p].text.trim()) {
+        it.insert = NEW_PARAGRAPH + it.insert;
+    }
+    return true;
 }
 
 // ---- a Word file saved by Google Docs --------------------------------
@@ -779,21 +809,24 @@ const tail = (s, n) => s.slice(Math.max(0, s.length - n));
  * cards' headings, so it is not taken for the same words in a table.
  */
 function locate(item, cards) {
-    const at = locateAs(item, cards);
-    if (at || item.heading) return at;
+    if (item.heading) return locateAs(item, cards);
     // A heading as exported carries its section number, which the card's
-    // heading line does not: found by its words, only where they are a
-    // card's whole heading line and only one card's, as a short heading
-    // is likely in body text too.
-    const m = /^\s*\d+(?:\.\d+)*\.?\s+(\S[^]*)$/.exec(item.quote || '');
-    if (!m) return null;
-    const want = normalise(m[1]).text;
-    const own = cards.filter((c) => String(c.text).split('\n').some((l) =>
-        /^#{1,6}\s/.test(l) &&
-        normalise(l.replace(/^#+\s*/, '')).text === want));
-    if (own.length !== 1) return null;
-    return locateAs({ ...item, quote: m[1], before: '', after: '',
-                      heading: true }, own);
+    // heading line does not, and a template that styles its headings by
+    // hand leaves it unmarked as one: found by its words where they are
+    // a card's whole heading line, and only one card's, before anywhere
+    // else they appear, as a table of subsections or another's cells.
+    const m = /^\s*\d+(?:\.\d+)*\.?\s+(\S[^\n]*)$/.exec(item.quote || '');
+    if (m) {
+        const want = normalise(m[1]).text;
+        const own = cards.filter((c) => String(c.text).split('\n')
+            .some((l) => /^#{1,6}\s/.test(l) &&
+                  normalise(l.replace(/^#+\s*/, '')).text === want));
+        if (own.length === 1) {
+            return locateAs({ ...item, quote: m[1], before: '', after: '',
+                              heading: true }, own);
+        }
+    }
+    return locateAs(item, cards);
 }
 
 function locateAs(item, cards) {
@@ -2069,6 +2102,17 @@ function removeItem(md, n, apply = false) {
  * markers and notes that were inside its passage after it.
  */
 function applied(md, it) {
+    if (!String(it.passage || '').trim() &&
+        String(it.text || '').startsWith(NEW_PARAGRAPH.trim())) {
+        // After a blank line, the space before it moved to after it.
+        const r = applied(md, Object.assign({}, it, { text: '\n\n' +
+            it.text.slice(NEW_PARAGRAPH.trim().length).trimStart() }));
+        const ws = /\s*$/.exec(r.out.slice(0, r.start))[0];
+        const s = r.start - ws.length;
+        const e = r.end - ws.length;
+        return { out: r.out.slice(0, s) + r.out.slice(r.start, r.end) + ws +
+                      r.out.slice(r.end), start: s, end: e };
+    }
     if (!it.open) {
         const out = md.slice(0, it.start) + it.text + md.slice(it.end);
         return tidySpan(out, it.start, it.start + it.text.length);
@@ -2208,6 +2252,32 @@ function passagesLost(before, after) {
 function stripReview(md) {
     return without(md, 0, md.length, scan(md).syntax);
 }
+
+/**
+ * A card's markdown with each of its suggestions taken out: applied when
+ * `apply`, else left as they were.
+ */
+function everySuggestion(md, apply) {
+    let out = md;
+    const next = () => reviewItems(out).findIndex((x) =>
+        x.kind === 'suggest');
+    for (let k = next(); k >= 0; k = next()) out = removeItem(out, k, apply);
+    return out;
+}
+
+/**
+ * Whether the suggestions in a card's markdown, all applied, would leave
+ * it with no text to print, no letter or digit, where it has some now: a
+ * reviewer taking out a whole card's text, which is better kept and not
+ * printed than lost.
+ */
+function emptiedBy(md) {
+    const some = (t) => /[\p{L}\p{N}]/u.test(stripReview(t));
+    return some(md) && !some(everySuggestion(md, true));
+}
+
+/** A card's markdown with its suggestions taken out, none applied. */
+const withoutSuggestions = (md) => everySuggestion(md, false);
 
 // ---- Drawing them on a card -------------------------------------------
 
@@ -2850,5 +2920,6 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    firstOfComment, countComments,
                    itemText,
                    addItems, removeItem, applyKeeping, keptReplies,
+                   emptiedBy, withoutSuggestions,
                    stripReview, renderMarkdown, decorate,
                    shortDate };
