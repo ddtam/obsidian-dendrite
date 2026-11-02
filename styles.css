@@ -2553,6 +2553,23 @@ a.dendrite-card-ref:hover {
     display: flex;
     gap: 4px;
 }
+/* The names offered after an @ in a reply or comment. */
+.dendrite-mention-list {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background: var(--background-primary);
+    font-size: var(--font-ui-small);
+    padding: 2px;
+}
+.dendrite-mention {
+    padding: 2px 6px;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+}
+.dendrite-mention.is-picked,
+.dendrite-mention:hover {
+    background: var(--background-modifier-hover);
+}
 
 /* A colour's chip before its name in the reviewer colour menu. */
 .dendrite-colour-chip {

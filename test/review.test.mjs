@@ -2008,3 +2008,18 @@ test('a numbered heading a reviewer deleted is found on its card\'s ' +
     assert.equal(cards[2].text.slice(c.start, c.end), 'Cluster Selection');
     assert.equal(at('1.1 Research Goal').id, 'R');
 });
+
+test('a mention is read as the longest name known from the comments and ' +
+     'the reviewers, spaces and all, else as its first word', () => {
+    r.reviewItems('A ==b==%%[!review] Joshua Bridgers, 2026-11-02: Hm.%%');
+    r.reviewerColours(['[[Aly Karsan|Aly Karsan 2]]: green']);
+    const to = (text) => r.addressed({ text });
+    assert.deepEqual(to('@Joshua Bridgers can you check?'),
+                     { to: 'Joshua Bridgers', text: 'can you check?' });
+    assert.deepEqual(to('@aly karsan 2 a sentence?'),
+                     { to: 'Aly Karsan 2', text: 'a sentence?' });
+    assert.deepEqual(to('@Claude right?'), { to: 'Claude', text: 'right?' });
+    assert.deepEqual(to('@Joshua, right?'),
+                     { to: 'Joshua,', text: 'right?' }, 'unknown: one word');
+    assert.equal(to('No mention.').to, null);
+});

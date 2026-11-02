@@ -1073,7 +1073,7 @@ function readyToResolve(it) {
  */
 function reviewItems(md) {
     const { items, syntax } = scan(md);
-    return items.map((x) => {
+    const out = items.map((x) => {
         const h = HEAD.exec(x.body.replace(/^\s+/, ''));
         return { kind: x.kind,
                  passage: x.open ?
@@ -1086,6 +1086,9 @@ function reviewItems(md) {
                  start: x.start, end: x.end, noteStart: x.noteStart,
                  ...(x.open ? { id: x.id, open: x.open } : {}) };
     });
+    learnNames(out.flatMap((it) => [it.author,
+        ...it.replies.map((r) => r.author)]));
+    return out;
 }
 
 /**
@@ -1188,10 +1191,125 @@ function threadIds(items) {
 // does not go back to the reviewer.
 const TO = /^@(\S+)\s+([\s\S]*)$/;
 
-/** Whom a reply is addressed to, or null, and its text without that. */
+// The names a reply can be addressed to, learned as comments are read
+// and reviewers listed, so "@Joshua Bridgers" is read whole and not as
+// "@Joshua"; and the writer's own, which the list does not offer.
+const KNOWN = new Set(['Claude']);
+let knownByLength = null;
+let ownNames = new Set();
+
+/** Names `names` known as ones a reply can be addressed to. */
+function learnNames(names) {
+    for (const x of names) {
+        const n = clean(x);
+        if (n && !KNOWN.has(n)) {
+            KNOWN.add(n);
+            knownByLength = null;
+        }
+    }
+}
+
+/** The writer's own names, never offered to address. */
+function setOwnNames(names) {
+    ownNames = new Set(names);
+}
+
+/**
+ * Whom a reply is addressed to, or null, and its text without that: the
+ * longest known name after its @, matched without regard to case, else
+ * the word after it.
+ */
 function addressed(r) {
-    const m = TO.exec(r.text || '');
-    return m ? { to: m[1], text: m[2] } : { to: null, text: r.text || '' };
+    const t = r.text || '';
+    if (t[0] === '@') {
+        if (!knownByLength) {
+            knownByLength = [...KNOWN].sort((a, b) => b.length - a.length);
+        }
+        const low = t.slice(1).toLowerCase();
+        for (const n of knownByLength) {
+            const after = t.slice(1 + n.length);
+            if (low.startsWith(n.toLowerCase()) && /^\s/.test(after)) {
+                return { to: n, text: after.trimStart() };
+            }
+        }
+    }
+    const m = TO.exec(t);
+    return m ? { to: m[1], text: m[2] } : { to: null, text: t };
+}
+
+/**
+ * Typing @ in `box` offers the names a reply can go to, as far as typed:
+ * up and down to choose, Tab or Enter to put one in, Escape to close.
+ */
+function mentionList(box) {
+    const doc = box.ownerDocument;
+    const list = doc.createElement('div');
+    list.className = 'dendrite-mention-list';
+    let names = [];
+    let at = -1;
+    let pick = 0;
+    const close = () => {
+        names = [];
+        list.remove();
+    };
+    const draw = () => {
+        list.textContent = '';
+        names.forEach((n, k) => {
+            const el = list.appendChild(doc.createElement('div'));
+            el.className = 'dendrite-mention' + (k === pick ? ' is-picked' :
+                '');
+            el.textContent = n;
+            el.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                put(n);
+            });
+        });
+        if (!list.parentNode) box.after(list);
+    };
+    const put = (n) => {
+        const end = box.selectionStart;
+        const before = box.value.slice(0, at) + `@${n} `;
+        box.value = before + box.value.slice(end);
+        box.setSelectionRange(before.length, before.length);
+        close();
+        box.dispatchEvent(new (doc.defaultView.Event)('input'));
+    };
+    box.addEventListener('input', () => {
+        const upTo = box.value.slice(0, box.selectionStart);
+        const m = /(?:^|\s)@([^@\n]{0,40})$/.exec(upTo);
+        if (!m) {
+            close();
+            return;
+        }
+        at = upTo.length - m[1].length - 1;
+        const want = m[1].toLowerCase();
+        names = [...KNOWN].filter((n) => !ownNames.has(n) &&
+            n.toLowerCase().startsWith(want) && n.toLowerCase() !== want)
+            .sort((a, b) => a.localeCompare(b, undefined,
+                                            { sensitivity: 'base' }));
+        pick = 0;
+        if (names.length) draw();
+        else close();
+    });
+    // Before the box's own keys, so Enter puts a name in, not sends.
+    box.addEventListener('keydown', (e) => {
+        if (!names.length) return;
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            pick = (pick + (e.key === 'ArrowDown' ? 1 : -1) + names.length) %
+                names.length;
+            draw();
+        } else if (e.key === 'Tab' || (e.key === 'Enter' &&
+                   !e.ctrlKey && !e.metaKey)) {
+            put(names[pick]);
+        } else if (e.key === 'Escape') {
+            close();
+        } else {
+            return;
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+    }, true);
+    box.addEventListener('blur', close);
 }
 
 /**
@@ -1221,9 +1339,10 @@ function awaits(it, name, self) {
  * Claude was asked, with @Claude, and has not answered since, or
  * 'resolve' where the last reply suggests resolving it; `kind`,
  * 'comment' or 'suggest'; and `priority`, p1 to p3, or 'none' for those
- * with none.
+ * with none. `personOf(name)` is who a name is, so one person's names
+ * are one author.
  */
-function passesFilter(it, f, self) {
+function passesFilter(it, f, self, personOf = (x) => x) {
     if (!f) return true;
     const suggest = it.kind === 'suggest';
     if (f.priority === 'none' ? it.priority :
@@ -1231,7 +1350,9 @@ function passesFilter(it, f, self) {
     if (f.kind === 'comment' && suggest) return false;
     if (f.kind === 'suggest' && !suggest) return false;
     if (f.author === 'me' ? !self.has(it.author) :
-        f.author && it.author !== f.author) return false;
+        f.author && personOf(it.author) !== personOf(f.author)) {
+        return false;
+    }
     const rs = it.replies || [];
     if (f.waiting === 'me') {
         return !self.has(rs.length ? rs[rs.length - 1].author : it.author);
@@ -2498,6 +2619,7 @@ function reviewerColours(list) {
     for (const [name, , c] of colourEntries(list)) {
         if (REVIEWER_COLOURS.includes(c)) out.set(name, c);
     }
+    learnNames(out.keys());
     return out;
 }
 
@@ -2648,6 +2770,7 @@ function replyBox(parent, send, typing = null, start = '', key = null,
     box.rows = 2;
     box.placeholder = 'Reply';
     box.value = key && drafts.has(key) ? drafts.get(key) : start;
+    mentionList(box);
     if (key) {
         box.addEventListener('input', () => drafts.set(key, box.value));
         box.addEventListener('focus', () => { typingIn = key; });
@@ -2929,5 +3052,6 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    itemText,
                    addItems, removeItem, applyKeeping, keptReplies,
                    emptiedBy, withoutSuggestions, keepsText,
+                   mentionList, setOwnNames, learnNames,
                    stripReview, renderMarkdown, decorate,
                    shortDate };

@@ -2593,7 +2593,7 @@ var require_review = __commonJS({
     }
     function reviewItems(md) {
       const { items, syntax } = scan(md);
-      return items.map((x) => {
+      const out = items.map((x) => {
         const h = HEAD.exec(x.body.replace(/^\s+/, ""));
         return {
           kind: x.kind,
@@ -2609,6 +2609,11 @@ var require_review = __commonJS({
           ...x.open ? { id: x.id, open: x.open } : {}
         };
       });
+      learnNames(out.flatMap((it) => [
+        it.author,
+        ...it.replies.map((r) => r.author)
+      ]));
+      return out;
     }
     function mendSplitTags(md) {
       const lines = md.split("\n");
@@ -2672,9 +2677,104 @@ var require_review = __commonJS({
       });
     }
     var TO = /^@(\S+)\s+([\s\S]*)$/;
+    var KNOWN = /* @__PURE__ */ new Set(["Claude"]);
+    var knownByLength = null;
+    var ownNames = /* @__PURE__ */ new Set();
+    function learnNames(names) {
+      for (const x of names) {
+        const n = clean(x);
+        if (n && !KNOWN.has(n)) {
+          KNOWN.add(n);
+          knownByLength = null;
+        }
+      }
+    }
+    function setOwnNames(names) {
+      ownNames = new Set(names);
+    }
     function addressed(r) {
-      const m = TO.exec(r.text || "");
-      return m ? { to: m[1], text: m[2] } : { to: null, text: r.text || "" };
+      const t = r.text || "";
+      if (t[0] === "@") {
+        if (!knownByLength) {
+          knownByLength = [...KNOWN].sort((a, b) => b.length - a.length);
+        }
+        const low = t.slice(1).toLowerCase();
+        for (const n of knownByLength) {
+          const after = t.slice(1 + n.length);
+          if (low.startsWith(n.toLowerCase()) && /^\s/.test(after)) {
+            return { to: n, text: after.trimStart() };
+          }
+        }
+      }
+      const m = TO.exec(t);
+      return m ? { to: m[1], text: m[2] } : { to: null, text: t };
+    }
+    function mentionList(box) {
+      const doc = box.ownerDocument;
+      const list = doc.createElement("div");
+      list.className = "dendrite-mention-list";
+      let names = [];
+      let at = -1;
+      let pick = 0;
+      const close = () => {
+        names = [];
+        list.remove();
+      };
+      const draw = () => {
+        list.textContent = "";
+        names.forEach((n, k) => {
+          const el = list.appendChild(doc.createElement("div"));
+          el.className = "dendrite-mention" + (k === pick ? " is-picked" : "");
+          el.textContent = n;
+          el.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+            put(n);
+          });
+        });
+        if (!list.parentNode) box.after(list);
+      };
+      const put = (n) => {
+        const end = box.selectionStart;
+        const before = box.value.slice(0, at) + `@${n} `;
+        box.value = before + box.value.slice(end);
+        box.setSelectionRange(before.length, before.length);
+        close();
+        box.dispatchEvent(new doc.defaultView.Event("input"));
+      };
+      box.addEventListener("input", () => {
+        const upTo = box.value.slice(0, box.selectionStart);
+        const m = /(?:^|\s)@([^@\n]{0,40})$/.exec(upTo);
+        if (!m) {
+          close();
+          return;
+        }
+        at = upTo.length - m[1].length - 1;
+        const want = m[1].toLowerCase();
+        names = [...KNOWN].filter((n) => !ownNames.has(n) && n.toLowerCase().startsWith(want) && n.toLowerCase() !== want).sort((a, b) => a.localeCompare(
+          b,
+          void 0,
+          { sensitivity: "base" }
+        ));
+        pick = 0;
+        if (names.length) draw();
+        else close();
+      });
+      box.addEventListener("keydown", (e) => {
+        if (!names.length) return;
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          pick = (pick + (e.key === "ArrowDown" ? 1 : -1) + names.length) % names.length;
+          draw();
+        } else if (e.key === "Tab" || e.key === "Enter" && !e.ctrlKey && !e.metaKey) {
+          put(names[pick]);
+        } else if (e.key === "Escape") {
+          close();
+        } else {
+          return;
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }, true);
+      box.addEventListener("blur", close);
     }
     function awaits(it, name, self) {
       const rs = it.replies || [];
@@ -2687,13 +2787,15 @@ var require_review = __commonJS({
       if (j < 0 && it.author !== name) return true;
       return rs.slice(j + 1).some((r) => asked || !self.has(r.author) || to(r));
     }
-    function passesFilter(it, f, self) {
+    function passesFilter(it, f, self, personOf = (x) => x) {
       if (!f) return true;
       const suggest = it.kind === "suggest";
       if (f.priority === "none" ? it.priority : f.priority && it.priority !== f.priority) return false;
       if (f.kind === "comment" && suggest) return false;
       if (f.kind === "suggest" && !suggest) return false;
-      if (f.author === "me" ? !self.has(it.author) : f.author && it.author !== f.author) return false;
+      if (f.author === "me" ? !self.has(it.author) : f.author && personOf(it.author) !== personOf(f.author)) {
+        return false;
+      }
       const rs = it.replies || [];
       if (f.waiting === "me") {
         return !self.has(rs.length ? rs[rs.length - 1].author : it.author);
@@ -3574,6 +3676,7 @@ var require_review = __commonJS({
       for (const [name, , c] of colourEntries(list)) {
         if (REVIEWER_COLOURS.includes(c)) out.set(name, c);
       }
+      learnNames(out.keys());
       return out;
     }
     function colourEntries(list) {
@@ -3659,6 +3762,7 @@ var require_review = __commonJS({
       box.rows = 2;
       box.placeholder = "Reply";
       box.value = key && drafts.has(key) ? drafts.get(key) : start;
+      mentionList(box);
       if (key) {
         box.addEventListener("input", () => drafts.set(key, box.value));
         box.addEventListener("focus", () => {
@@ -3963,6 +4067,9 @@ var require_review = __commonJS({
       emptiedBy,
       withoutSuggestions,
       keepsText,
+      mentionList,
+      setOwnNames,
+      learnNames,
       stripReview,
       renderMarkdown,
       decorate,
@@ -16849,7 +16956,12 @@ var DendritePreview = class extends ItemView {
     const keepOf = (body) => {
       if (!filter) return null;
       const items = review.reviewItems(body);
-      return (k) => review.passesFilter(items[k], filter, self);
+      return (k) => review.passesFilter(
+        items[k],
+        filter,
+        self,
+        (who) => this.names.get(who) || who
+      );
     };
     const segs = core.gatherFootnotes(
       core.renumberFootnotes(
@@ -18043,15 +18155,15 @@ var DendriteComments = class extends ItemView {
     const f = this.plugin.commentFilterState;
     const self = this.plugin.selfNames();
     const nameOf = (who) => this.names.get(who) || who;
-    const authors = [...new Set(this.threads.map((t) => t.it.author).filter((a) => a && !self.has(a)))].sort();
-    if (f.author && f.author !== "me" && !authors.includes(f.author)) {
-      authors.push(f.author);
+    const authors = [...new Set(this.threads.map((t) => t.it.author).filter((a) => a && !self.has(a)).map(nameOf))].sort();
+    if (f.author && f.author !== "me" && !authors.includes(nameOf(f.author))) {
+      authors.push(nameOf(f.author));
     }
     const facets = [
       ["author", "Author", "Who wrote it", [
         ["", "Anyone"],
         ["me", "Me", "By me"],
-        ...authors.map((a) => [a, nameOf(a)])
+        ...authors.map((a) => [a, a])
       ]],
       ["waiting", "Waiting", "Whose answer it waits for", [
         ["", "Anyone"],
@@ -18080,7 +18192,8 @@ var DendriteComments = class extends ItemView {
     const bar = this.filterEl;
     bar.empty();
     for (const [key, name, tip, choices] of facets) {
-      const now = choices.find((c) => c[0] === (f[key] || ""));
+      const want = key === "author" && f[key] && f[key] !== "me" ? nameOf(f[key]) : f[key] || "";
+      const now = choices.find((c) => c[0] === want);
       const set = !!(f[key] && now);
       const b = bar.createEl("button", { cls: "dendrite-cfilter" + (set ? " is-on" : "") });
       b.dataset.filter = key;
@@ -18126,7 +18239,12 @@ var DendriteComments = class extends ItemView {
       const k = review.PRIORITIES.indexOf(t.it.priority);
       return k < 0 ? review.PRIORITIES.length : k;
     };
-    const shown = this.threads.map((t, k) => ({ t, k })).filter(({ t }) => review.passesFilter(t.it, f, self)).sort((a, b) => a.k - b.k).map(({ t }) => t);
+    const shown = this.threads.map((t, k) => ({ t, k })).filter(({ t }) => review.passesFilter(
+      t.it,
+      f,
+      self,
+      (who) => this.names.get(who) || who
+    )).sort((a, b) => a.k - b.k).map(({ t }) => t);
     const groups = [];
     for (const t of shown) {
       const g = groups[groups.length - 1];
@@ -19369,6 +19487,7 @@ var CommentModal = class extends Modal {
     );
     box.rows = 3;
     box.placeholder = "Comment";
+    review.mentionList(box);
     const row = this.contentEl.createDiv(
       { cls: "dendrite-version-choices" }
     );
@@ -19959,6 +20078,7 @@ module.exports = class DendritePlugin extends Plugin {
   }
   async onload() {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+    review.setOwnNames(this.selfNames());
     review.setFoldUntilClicked(this.settings.foldComments);
     timing.setOn(this.settings.recordTimings && Platform.isDesktopApp);
     this.registerInterval(window.setInterval(
@@ -20203,6 +20323,7 @@ module.exports = class DendritePlugin extends Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    review.setOwnNames(this.selfNames());
   }
   // ---- reviews submitted by programs ---------------------------------
   /**

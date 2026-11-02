@@ -7906,3 +7906,89 @@ test('a heading its suggestions would empty, over cards that print, is ' +
         .querySelectorAll('button')].map((x) => x.textContent);
     assert.ok(labels.includes('Stop printing this card'));
 });
+
+test('typing @ in a reply box offers the names a reply can go to, ' +
+     'Tab putting one in, spaces and all; your own are not offered',
+     async () => {
+    const review = require('../src/review.js');
+    review.reviewItems('A ==b==%%[!review] joshbridgers@live.com, ' +
+        '2026-11-02: Hm.%%%%[!reply] Derek Tam, 2026-11-02: Yes.%%');
+    review.reviewerColours(['[[Joshua Bridgers]]: blue']);
+    review.setOwnNames(['Derek Tam', 'Me']);
+    const doc = h.window.document;
+    const parent = doc.body.appendChild(doc.createElement('div'));
+    const sent = [];
+    review.replyBox(parent, (t) => sent.push(t));
+    const box = parent.querySelector('textarea');
+    const type = (v) => {
+        box.value = v;
+        box.setSelectionRange(v.length, v.length);
+        box.dispatchEvent(new h.window.Event('input'));
+    };
+    const key = (k) => box.dispatchEvent(new h.window.KeyboardEvent(
+        'keydown', { key: k, bubbles: true, cancelable: true }));
+    const offered = () => [...parent.querySelectorAll('.dendrite-mention')]
+        .map((x) => x.textContent);
+    type('@');
+    assert.ok(offered().includes('Claude'));
+    assert.ok(!offered().includes('Derek Tam'), 'not your own name');
+    // Names learned from every manuscript read are offered, in order.
+    type('@jo');
+    const names = offered();
+    assert.ok(names.indexOf('joshbridgers@live.com') <
+              names.indexOf('Joshua Bridgers'));
+    type('@joshua b');
+    assert.deepEqual(offered(), ['Joshua Bridgers']);
+    key('ArrowDown');
+    key('Tab');
+    assert.equal(box.value, '@Joshua Bridgers ');
+    assert.deepEqual(offered(), [], 'closed once one is put in');
+    assert.deepEqual(review.addressed({ text: box.value + 'which?' }),
+                     { to: 'Joshua Bridgers', text: 'which?' });
+    // Enter with the list open puts the name in, and sends nothing.
+    type('Thanks @cl');
+    key('Enter');
+    assert.equal(box.value, 'Thanks @Claude ');
+    assert.deepEqual(sent, []);
+    type('@zz');
+    assert.deepEqual(offered(), [], 'nothing known: no list');
+    parent.remove();
+});
+
+test('the author filter lists each person once, however many names they ' +
+     'reviewed under, and choosing them keeps all their comments',
+     async () => {
+    const { DendriteComments } = require('../src/main.js');
+    const app = h.makeApp();
+    app.vault.folders.add('W/Grant/cards');
+    await app.vault.create(INDEX, '---\ndendrite_prefix: G\n' +
+        'dendrite_reviewer_colours:\n' +
+        '  - "[[Joshua Bridgers|joshbridgers@live.com]]: blue"\n' +
+        '  - "[[Joshua Bridgers]]: blue"\n  - "Aly: green"\n---\n' +
+        '- [[G-aaaaa|A]]\n');
+    await app.vault.create(cardPath('G-aaaaa'), 'One ==a==%%[!review] ' +
+        'joshbridgers@live.com, 2026-11-02: First.%% two ==b==%%[!review] ' +
+        'Joshua Bridgers, 2026-10-23: Second.%% three ==c==%%[!review] ' +
+        'Aly, 2026-10-23: Third.%%');
+    app.workspace.getLeavesOfType = () => [];
+    const plugin = { settings: { headingTop: 1 },
+        commentFilterState: { author: '', waiting: '', kind: '' },
+        selfNames: () => new Set(['Me']), previewLeaf: () => null };
+    plugin.commentFilter = () => plugin.commentFilterState;
+    const list = new DendriteComments({ app }, plugin);
+    await list.onOpen();
+    await list.show(app.vault.getAbstractFileByPath(INDEX));
+    plugin.setCommentFilter = (change) => {
+        Object.assign(plugin.commentFilterState, change);
+        list.showFilter();
+        list.draw();
+    };
+    list.contentEl.querySelector('.dendrite-cfilter[data-filter="author"]')
+        .click();
+    assert.deepEqual(h.obsidian.lastMenu.items.map((i) => i.title),
+                     ['Anyone', 'Me', 'Aly', 'Joshua Bridgers']);
+    await menuItem(h.obsidian.lastMenu, 'Joshua Bridgers').click();
+    assert.deepEqual([...list.contentEl.querySelectorAll(
+        '.dendrite-cthread-text')].map((el) => el.textContent),
+        ['First.', 'Second.']);
+});

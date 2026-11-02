@@ -9276,7 +9276,8 @@ class DendritePreview extends ItemView {
         const keepOf = (body) => {
             if (!filter) return null;
             const items = review.reviewItems(body);
-            return (k) => review.passesFilter(items[k], filter, self);
+            return (k) => review.passesFilter(items[k], filter, self,
+                (who) => this.names.get(who) || who);
         };
         // Footnotes numbered across the whole document, as export does;
         // shown under each card, each top-level section, or at the end.
@@ -10587,18 +10588,20 @@ class DendriteComments extends ItemView {
         if (!this.filterEl) return;
         const f = this.plugin.commentFilterState;
         const self = this.plugin.selfNames();
+        // One person however many names they reviewed under.
         const nameOf = (who) => this.names.get(who) || who;
         const authors = [...new Set(this.threads.map((t) => t.it.author)
-            .filter((a) => a && !self.has(a)))].sort();
-        if (f.author && f.author !== 'me' && !authors.includes(f.author)) {
-            authors.push(f.author);
+            .filter((a) => a && !self.has(a)).map(nameOf))].sort();
+        if (f.author && f.author !== 'me' &&
+            !authors.includes(nameOf(f.author))) {
+            authors.push(nameOf(f.author));
         }
         // Each: its name, its choices as [value, in the menu, on the
         // button once chosen], the first meaning any.
         const facets = [
             ['author', 'Author', 'Who wrote it', [['', 'Anyone'],
                 ['me', 'Me', 'By me'],
-                ...authors.map((a) => [a, nameOf(a)])]],
+                ...authors.map((a) => [a, a])]],
             ['waiting', 'Waiting', 'Whose answer it waits for', [
                 ['', 'Anyone'], ['me', 'Me', 'On me'],
                 ['Claude', 'Claude', 'On Claude'],
@@ -10612,7 +10615,9 @@ class DendriteComments extends ItemView {
         const bar = this.filterEl;
         bar.empty();
         for (const [key, name, tip, choices] of facets) {
-            const now = choices.find((c) => c[0] === (f[key] || ''));
+            const want = key === 'author' && f[key] && f[key] !== 'me' ?
+                nameOf(f[key]) : f[key] || '';
+            const now = choices.find((c) => c[0] === want);
             const set = !!(f[key] && now);
             const b = bar.createEl('button', { cls: 'dendrite-cfilter' +
                 (set ? ' is-on' : '') });
@@ -10661,7 +10666,8 @@ class DendriteComments extends ItemView {
             return k < 0 ? review.PRIORITIES.length : k;
         };
         const shown = this.threads.map((t, k) => ({ t, k }))
-            .filter(({ t }) => review.passesFilter(t.it, f, self))
+            .filter(({ t }) => review.passesFilter(t.it, f, self,
+                (who) => this.names.get(who) || who))
             .sort((a, b) => a.k - b.k)
             .map(({ t }) => t);
         const groups = [];
@@ -12080,6 +12086,7 @@ class CommentModal extends Modal {
             { cls: 'dendrite-review-reply-box' });
         box.rows = 3;
         box.placeholder = 'Comment';
+        review.mentionList(box);
         const row = this.contentEl.createDiv(
             { cls: 'dendrite-version-choices' });
         const go = row.createEl('button', { text: 'Comment',
@@ -12877,6 +12884,8 @@ module.exports = class DendritePlugin extends Plugin {
 
     async onload() {
         this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+        // Your names, never offered after an @.
+        review.setOwnNames(this.selfNames());
         review.setFoldUntilClicked(this.settings.foldComments);
         timing.setOn(this.settings.recordTimings && Platform.isDesktopApp);
         this.registerInterval(window.setInterval(() => this.writeTimings(),
@@ -13089,6 +13098,7 @@ module.exports = class DendritePlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+        review.setOwnNames(this.selfNames());
     }
 
     // ---- reviews submitted by programs ---------------------------------
