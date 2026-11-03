@@ -2,7 +2,7 @@
 // A reply in the reviewer's own Word file: the file they sent back, with
 // the writer's replies under their comments, the comments dealt with
 // marked resolved, and the text brought up to date with the cards, each
-// change tracked under the writer's name or made straight. Everything
+// change tracked under the writer's name or written directly. Everything
 // else in the file stays as the reviewer's Word wrote it: styles, table
 // widths, spacing, their own edits. Nothing here touches Obsidian; the
 // files arrive as Buffers.
@@ -229,7 +229,19 @@ function edits(was, now) {
         i = k + 1;
         j = j2 + 1;
     }
-    return out;
+    // Two edits with only a space between are one, as a reader takes
+    // "data." becoming "data (#)." to be.
+    const merged = [];
+    for (const x of out) {
+        const last = merged[merged.length - 1];
+        if (last && /^\s*$/.test(was.slice(last.e, x.s))) {
+            last.insert += was.slice(last.e, x.s) + x.insert;
+            last.e = x.e;
+        } else {
+            merged.push({ ...x });
+        }
+    }
+    return merged;
 }
 
 const key = (t) => t.replace(/\s+/g, ' ').trim();
@@ -319,6 +331,138 @@ function pairParagraphs(was, now) {
     return out;
 }
 
+/**
+ * Of `pairs` (pairParagraphs), those that are one paragraph of `now`
+ * split in two or more in `was`, as a line break saved as a new
+ * paragraph, with the same words: the pairs' places, to be left.
+ */
+function splitPairs(pairs, was, now) {
+    const squash = (t) => t.replace(/\s+/g, '');
+    const same = new Set();
+    pairs.forEach((pr, k) => {
+        if (pr.was === null || pr.now === null) return;
+        let text = was[pr.was].text;
+        for (let b = k + 1; b < pairs.length && pairs[b].now === null &&
+             pairs[b].was !== null; b++) {
+            text += was[pairs[b].was].text;
+            if (squash(text) === squash(now[pr.now].text)) {
+                for (let c = k; c <= b; c++) same.add(c);
+                break;
+            }
+        }
+    });
+    return same;
+}
+
+// ---- Edits made without tracking --------------------------------------
+
+/**
+ * Word's document `xml` as one reader of it sees it: tracked changes by
+ * an author in `accept` taken as made, and everyone else's as not.
+ */
+function viewOf(xml, accept) {
+    const by = (attrs) => accept.has(attr(attrs, 'w:author'));
+    return xml
+        .replace(/<w:(ins|moveTo)\b([^>]*?)(?<!\/)>([\s\S]*?)<\/w:\1>/g,
+                 (m, tag, attrs, inner) => (by(attrs) ? inner : ''))
+        .replace(/<w:(del|moveFrom)\b([^>]*?)(?<!\/)>([\s\S]*?)<\/w:\1>/g,
+                 (m, tag, attrs, inner) => (by(attrs) ? '' : inner
+                     .replace(/<w:delText\b/g, '<w:t')
+                     .replace(/<\/w:delText>/g, '</w:t>')));
+}
+
+/**
+ * What was sent in the Word file `buf`, to compare a returned one with:
+ * { authors, paras: [{ t, c }] }, each paragraph with text, its text and
+ * whether it is in a table, tracked changes by `authors` taken as made.
+ */
+function sentText(buf, authors, zlib) {
+    const doc = docx.readZip(buf, zlib)
+        .find((f) => f.name === 'word/document.xml');
+    if (!doc) throw new Error('not a Word document');
+    const paras = paragraphs(viewOf(doc.data.toString('utf8'),
+                                    new Set(authors)))
+        .filter((p) => key(p.text))
+        .map((p) => (p.cell ? { t: p.text, c: true } : { t: p.text }));
+    return { authors: [...authors], paras };
+}
+
+/** How much two sent texts share: the paragraphs found in both. */
+function overlap(a, b) {
+    const have = new Set(a.paras.map((p) => key(p.t)));
+    return b.paras.filter((p) => have.has(key(p.t))).length;
+}
+
+// A suggestion that adds a paragraph of its own starts with this, as an
+// import writes one (review.js).
+const NEW_PARAGRAPH = '¶ ';
+const CONTEXT = 60;
+
+/**
+ * The edits made in the returned Word file `buf` without tracking, as
+ * review items: what differs from `sent` (sentText) once the tracked
+ * changes are set aside, those of `sent.authors` taken as made and the
+ * reviewer's as not, since the import reads theirs already. Each is
+ * { kind: 'change', author, date, quote, insert, before, after,
+ * untracked: true }, by whoever last saved the file, `quote` and its
+ * context as sent, so it is found in the cards as a tracked one is.
+ */
+function untrackedItems(buf, sent, zlib) {
+    const files = new Map(docx.readZip(buf, zlib)
+        .map((f) => [f.name, f.data.toString('utf8')]));
+    const back = sentText(buf, sent.authors, zlib).paras;
+    const core = files.get('docProps/core.xml') || '';
+    const author = decode((/<cp:lastModifiedBy>([^<]*)</.exec(core) ||
+        [])[1] || '') || 'Reviewer';
+    const date = ((/<dcterms:modified[^>]*>([^<]*)</.exec(core) || [])[1] ||
+        '').slice(0, 10);
+    const was = sent.paras.map((p) => ({ text: p.t, cell: !!p.c }));
+    const now = back.map((p) => ({ text: p.t, cell: !!p.c }));
+    // Lined up as a reply lines the reviewer's file with the cards, the
+    // returned file first, so a paragraph it split is seen the same way.
+    const pairs = pairParagraphs(now, was).map((x) => ({ was: x.now,
+                                                         now: x.was }));
+    const same = splitPairs(pairs.map((x) => ({ was: x.now, now: x.was })),
+                            now, was);
+    // The text around a place in sent paragraph `i`, running on through
+    // the cells beside it, as the import gives a cell its context.
+    const around = (i, s, e) => {
+        let before = was[i].text.slice(0, s);
+        let after = was[i].text.slice(e);
+        for (let k = i - 1; was[i].cell && k >= 0 && was[k].cell &&
+             before.length < CONTEXT; k--) before = `${was[k].text} ${before}`;
+        for (let k = i + 1; was[i].cell && k < was.length && was[k].cell &&
+             after.length < CONTEXT; k++) after = `${after} ${was[k].text}`;
+        return { before: before.slice(-CONTEXT),
+                 after: after.slice(0, CONTEXT) };
+    };
+    const items = [];
+    const item = (quote, insert, ctx) => items.push({ kind: 'change',
+        author, date, quote, insert, ...ctx, untracked: true });
+    let last = -1;
+    pairs.forEach((pr, k) => {
+        if (same.has(k)) {
+            if (pr.was !== null) last = pr.was;
+            return;
+        }
+        if (pr.was !== null && pr.now !== null) {
+            last = pr.was;
+            const a = was[pr.was].text;
+            for (const x of edits(a, now[pr.now].text)) {
+                item(a.slice(x.s, x.e), x.insert, around(pr.was, x.s, x.e));
+            }
+        } else if (pr.was !== null) {
+            last = pr.was;
+            item(was[pr.was].text, '', around(pr.was, 0,
+                                              was[pr.was].text.length));
+        } else if (!now[pr.now].cell) {
+            item('', NEW_PARAGRAPH + now[pr.now].text, { before: last >= 0 ?
+                was[last].text.slice(-CONTEXT) : '', after: '' });
+        }
+    });
+    return items;
+}
+
 // ---- Writing changes ---------------------------------------------------
 
 /**
@@ -377,7 +521,7 @@ function itemsXml(items, deleted) {
 
 /**
  * Paragraph `p`'s XML, from `xml`, with `changes` made: edits on its
- * text (edits()), tracked as `rev` marks them, or made straight where
+ * text (edits()), tracked as `rev` marks them, or written directly where
  * `rev` is null. Null where a change falls in text that cannot be
  * rewritten: a field's, a note number's, a tracked change's.
  */
@@ -746,9 +890,11 @@ function writeAnswers(files, answers) {
  * The reviewer's file `theirs` (Buffer), answered: `answers` as
  * writeAnswers takes them, and its text brought to that of `fresh`, a
  * new export of the cards, each change tracked under `author` when
- * `tracked`, else made straight. Returns { buf, report }, the report
- * { replies, resolved, changed, added, removed, left: [{ text, why }] }
- * where `left` is what could not be carried and is said.
+ * `tracked`, else written directly. Returns { buf, report }, the report
+ * { replies, resolved, changed, added, removed, left: [{ text, why }],
+ * changes: [{ kind, was, now, edits }] }, where `left` is what could
+ * not be carried and is said, and `changes` each paragraph changed,
+ * added or taken out, in the reviewer's order, with its edits().
  */
 function replyDocx(theirs, fresh, answers, opts, zlib) {
     const read = (b) => new Map(docx.readZip(b, zlib)
@@ -758,7 +904,7 @@ function replyDocx(theirs, fresh, answers, opts, zlib) {
         throw new Error('not a Word document');
     }
     const report = { replies: 0, resolved: 0, changed: 0, added: 0,
-                     removed: 0, left: [] };
+                     removed: 0, left: [], changes: [] };
     Object.assign(report, writeAnswers(files, answers || new Map()));
     if (fresh) carryText(files, read(fresh), opts, report);
     const out = docx.readZip(theirs, zlib).map((f) => ({ name: f.name,
@@ -814,22 +960,7 @@ function carryText(files, nfiles, opts, report) {
     // Each replacement as [s, e, xml, order] in the reviewer's document.
     const swaps = [];
     const pairs = pairParagraphs(was, now);
-    // A paragraph the reviewer's file has split in two or more, as a
-    // line break saved as a new paragraph, with the same words: left.
-    const squash = (t) => t.replace(/\s+/g, '');
-    const same = new Set();
-    pairs.forEach((pr, k) => {
-        if (pr.was === null || pr.now === null) return;
-        let text = was[pr.was].text;
-        for (let b = k + 1; b < pairs.length && pairs[b].now === null &&
-             pairs[b].was !== null; b++) {
-            text += was[pairs[b].was].text;
-            if (squash(text) === squash(now[pr.now].text)) {
-                for (let c = k; c <= b; c++) same.add(c);
-                break;
-            }
-        }
-    });
+    const same = splitPairs(pairs, was, now);
     pairs.forEach((pr, k) => {
         if (same.has(k)) return;
         const p = pr.was !== null ? was[pr.was] : null;
@@ -845,6 +976,8 @@ function carryText(files, nfiles, opts, report) {
             }
             swaps.push([p.s, p.e, px, k]);
             report.changed++;
+            report.changes.push({ kind: 'changed', was: p.text, now: n.text,
+                                  edits: edits(p.text, n.text) });
         } else if (p) {
             const px = deleteParagraph(doc, p, rev);
             if (px === null) {
@@ -855,6 +988,9 @@ function carryText(files, nfiles, opts, report) {
             }
             swaps.push([p.s, p.e, px, k]);
             report.removed++;
+            report.changes.push({ kind: 'removed', was: p.text, now: '',
+                                  edits: [{ s: 0, e: p.text.length,
+                                            insert: '' }] });
         } else {
             // Added after the reviewer's paragraph before it, or before
             // the next, set as that one is.
@@ -882,6 +1018,8 @@ function carryText(files, nfiles, opts, report) {
             const at = prev ? prev.e : next.s;
             swaps.push([at, at, px, k]);
             report.added++;
+            report.changes.push({ kind: 'added', was: '', now: n.text,
+                                  edits: [{ s: 0, e: 0, insert: n.text }] });
         }
     });
     // From the end, so each place is still where it was found; two
@@ -892,6 +1030,7 @@ function carryText(files, nfiles, opts, report) {
     files.set(relsName, rels);
 }
 
-module.exports = { paragraphs, edits, pairParagraphs, editParagraph,
+module.exports = { sentText, untrackedItems, overlap, viewOf,
+                   paragraphs, edits, pairParagraphs, editParagraph,
                    deleteParagraph, newParagraph, comments, writeAnswers,
                    replyDocx, likeness };

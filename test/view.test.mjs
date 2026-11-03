@@ -4006,8 +4006,7 @@ test('a manuscript linked to a Google Doc pulls its comments and ' +
     assert.deepEqual(h.obsidian.lastMenu.items.map((i) => i.title), [
         'Pull from Google Docs', 'Open the linked doc',
         'Change the linked doc…', 'Import a Word or JSON file…',
-        'Reply in a returned Word file…', 'Reviewers…',
-        'Mark as sent for review…']);
+        'Reviewers…', 'Mark as sent for review…']);
     const m = await view.pullGdoc();
     assert.equal(asked, view.gdocUrl());
     assert.match(m.titleEl.textContent, /RAC draft \(Google Docs\)/);
@@ -4211,8 +4210,8 @@ test('the Review menu offers linking a doc when none is, and holds only ' +
     view.reviewMenu({ preventDefault() {} });
     const titles = h.obsidian.lastMenu.items.map((i) => i.title);
     assert.deepEqual(titles, ['Link a Google Doc…',
-        'Import a Word or JSON file…', 'Reply in a returned Word file…',
-        'Reviewers…', 'Mark as sent for review…']);
+        'Import a Word or JSON file…', 'Reviewers…',
+        'Mark as sent for review…']);
     assert.equal(opened, null);
 });
 
@@ -8020,4 +8019,129 @@ test('the review import dialog lists the layout a returned file changed ' +
     assert.deepEqual([...m.contentEl.querySelectorAll(
         '.dendrite-review-layout li')].map((x) => x.textContent),
         ['Table “Data”: its width changed']);
+});
+
+test('a reply in a Word file is shown before it is written: counts, ' +
+     'comments, each change with its card, what is not carried',
+     async () => {
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n', {
+        'G-aaaaa': 'The research objectives are therefore three-fold ' +
+            'and stated plainly.',
+        'G-bbbbb': 'Storage will be managed by Joshua Bridgers, who will ' +
+            'transfer the data.' });
+    const report = (n) => ({ replies: 0, resolved: 1, changed: 1, added: 0,
+        removed: 0, left: [{ text: 'CAD $200,000', why: 'new text in a ' +
+            'table, whose rows and cells are left as they are' }],
+        changes: [{ kind: 'changed',
+            was: 'Storage will be managed designated data guardian, ' +
+                'Joshua Bridgers, who will transfer the data.',
+            now: 'Storage will be managed by Joshua Bridgers, who will ' +
+                'transfer the data.',
+            edits: [{ s: 24, e: 50, insert: 'by ' }] }], n });
+    view.prepareWordReply = async () => ({ tracked: { buf: 'T',
+        report: report(1) }, direct: { buf: 'D', report: report(2) },
+        sent: 'DRAC.docx, 2026-11-02', theirs: [{ kind: 'change',
+            quote: 'by ', insert: 'designated data guardian, ' }] });
+    const written = [];
+    view.writeWordReply = async (name, made, tracked) =>
+        written.push([name, made.buf, tracked]);
+    const comments = [{ id: '1', author: 'Josh Bridgers', text: 'Correct?' },
+                      { id: '2', author: 'Josh Bridgers', text: 'Other.' }];
+    const answers = new Map([['1', { done: true, replies: [
+        { author: 'Derek Tam', date: '2026-11-03', text: 'Yes.' }] }]]);
+    h.obsidian.settingsLog = [];
+    const { ReplyWordModal } = require('../src/main.js');
+    const m = new ReplyWordModal(view, 'jb r3.docx', Buffer.from(''),
+                                      { answers, comments });
+    m.open();
+    await tick(30);
+    const cells = (sel) => [...m.contentEl.querySelectorAll(sel)]
+        .map((x) => x.textContent);
+    const counts = Object.fromEntries(cells('.dendrite-reply-counts th')
+        .map((k, i) => [k, cells('.dendrite-reply-counts td')[i]]));
+    assert.deepEqual(counts, { 'Comments': '2', 'Replies': '1',
+        'Resolved': '1', 'Not in the cards': '1',
+        'Paragraphs changed': '1', 'Added': '0', 'Taken out': '0',
+        'Undo their edits': '1', 'Not carried': '1' });
+    assert.match(m.contentEl.querySelector('.dendrite-reply-sent')
+        .textContent, /against DRAC\.docx, 2026-11-02/);
+    assert.equal(m.contentEl.querySelector('.dendrite-reply-undoes')
+        .textContent, 'Undoes their edit');
+    const tables = m.contentEl.querySelectorAll('.dendrite-reply-table');
+    const rows = (t) => [...t.querySelectorAll('tr')].slice(1)
+        .map((tr) => [...tr.querySelectorAll('td')]
+            .map((td) => td.textContent));
+    assert.deepEqual(rows(tables[0]), [
+        ['Josh Bridgers: Correct?', 'Derek Tam: Yes.', 'Resolved'],
+        ['Josh Bridgers: Other.', '', 'Not in the cards']]);
+    const change = tables[1].querySelectorAll('tr')[1];
+    assert.equal(change.querySelector('del').textContent,
+                 'designated data guardian, ');
+    assert.equal(change.querySelector('ins').textContent, 'by ');
+    const link = change.querySelector('.dendrite-reply-card a');
+    assert.equal(link.textContent, 'bbbbb');
+    link.click();
+    await tick(10);
+    assert.equal(view.active, 'G-bbbbb');
+    assert.deepEqual(rows(tables[2]), [['CAD $200,000', 'new text in a ' +
+        'table, whose rows and cells are left as they are']]);
+    const set = h.obsidian.settingsLog.find((x) =>
+        x.name === 'Changes to the text');
+    const [mode, write] = set.controls;
+    await mode._onChange('direct');
+    await write._onClick();
+    assert.deepEqual(written, [['jb r3.docx', 'D', false]]);
+});
+
+test('a Word file sent keeps its text, and edits made in it without ' +
+     'tracking come back as suggestions against it', async () => {
+    const d = require('../src/docx.js');
+    const zlib = require('zlib');
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/' +
+        'wordprocessingml/2006/main"';
+    const word = (text, extra = []) => d.writeZip([
+        { name: 'word/document.xml', data: Buffer.from(
+            `<w:document ${W}><w:body><w:p><w:r><w:t>${text}</w:t>` +
+            '</w:r></w:p><w:p><w:r><w:t>Unchanged.</w:t></w:r></w:p>' +
+            '</w:body></w:document>') }, ...extra], zlib);
+    const { view } = await open('---\ndendrite_prefix: G\n---\n' +
+        '- [[G-aaaaa|a]]\n', { 'G-aaaaa': 'Storage will be managed by ' +
+            'Joshua Bridgers, who will transfer the data.\n\nUnchanged.' });
+    // A vault adapter of files in memory, and the export's file on disk.
+    const disk = new Map();
+    view.app.vault.adapter = {
+        exists: async (p) => disk.has(p) ||
+            [...disk.keys()].some((k) => k.startsWith(`${p}/`)),
+        mkdir: async () => {},
+        write: async (p, t) => { disk.set(p, t); },
+        read: async (p) => disk.get(p),
+        list: async (p) => ({ files: [...disk.keys()].filter((k) =>
+            k.startsWith(`${p}/`)), folders: [] }),
+    };
+    const sent = word('Storage will be managed by Joshua Bridgers, who ' +
+                      'will transfer the data.');
+    view.plugin.pandocDeps = () => ({ zlib, readFile: async () => sent });
+    await view.saveSent('/vault/exports/x.docx', 'DRAC.docx');
+    const kept = [...disk.keys()];
+    assert.equal(kept.length, 1);
+    assert.match(kept[0], /^W\/Grant\/_dendrite\/sent\/[0-9a-f]+\.json$/);
+    await view.saveSent('/vault/exports/x.docx', 'DRAC.docx');
+    assert.equal(disk.size, 1, 'the same text is kept once');
+    const back = word('Storage will be managed designated data guardian, ' +
+        'Joshua Bridgers, who will transfer the data.', [{
+            name: 'docProps/core.xml', data: Buffer.from(
+                '<cp:lastModifiedBy>Josh Bridgers</cp:lastModifiedBy>' +
+                '<dcterms:modified>2026-11-03T20:25:00Z</dcterms:modified>')
+        }]);
+    await view.reviewFrom('jb r3.docx', back);
+    const m = h.obsidian.lastModal;
+    assert.match(m.contentEl.querySelector('.dendrite-review-sent')
+        .textContent, /compared with DRAC\.docx, \d{4}-\d\d-\d\d/);
+    assert.deepEqual(m.rows.map((r) => [r.item.quote, r.item.insert,
+                                        r.at && r.at.id, r.use]),
+                     [['by ', 'designated data guardian, ', 'G-aaaaa',
+                       true]]);
+    assert.match(m.contentEl.querySelector('.dendrite-review-meta')
+        .textContent, /Josh Bridgers · .* · edited without tracking/);
 });

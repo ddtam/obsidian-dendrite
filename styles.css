@@ -3021,3 +3021,72 @@ button.dendrite-prio:disabled {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* A reply in a reviewer's Word file, before it is written: its counts,
+   then a table each for comments, changes and what is not carried. */
+.dendrite-reply-counts {
+    border-collapse: collapse;
+    margin-bottom: 12px;
+    font-size: var(--font-ui-small);
+}
+.dendrite-reply-counts th {
+    font-weight: normal;
+    color: var(--text-muted);
+    padding: 0 12px 2px 0;
+    text-align: left;
+}
+.dendrite-reply-counts td {
+    font-size: var(--font-ui-large);
+    padding: 0 12px 0 0;
+}
+.dendrite-reply-counts td.is-zero {
+    color: var(--text-faint);
+}
+.dendrite-reply-head {
+    margin: 14px 0 6px;
+}
+.dendrite-reply-scroll {
+    max-height: 30vh;
+    overflow-y: auto;
+}
+.dendrite-reply-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-ui-small);
+}
+.dendrite-reply-table th {
+    text-align: left;
+    color: var(--text-muted);
+    font-weight: normal;
+    position: sticky;
+    top: 0;
+    background: var(--background-primary);
+}
+.dendrite-reply-table td,
+.dendrite-reply-table th {
+    padding: 4px 8px 4px 0;
+    vertical-align: top;
+    border-bottom: 1px solid var(--background-modifier-border);
+    white-space: pre-wrap;
+}
+.dendrite-reply-card {
+    white-space: nowrap;
+}
+.dendrite-reply-del {
+    color: var(--text-error);
+    text-decoration: line-through;
+}
+.dendrite-reply-ins {
+    color: var(--text-success);
+    text-decoration: underline;
+}
+.dendrite-reply-undoes {
+    color: var(--text-warning);
+    white-space: nowrap;
+}
+.dendrite-reply-sent,
+.dendrite-review-sent {
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+    margin-bottom: 8px;
+}

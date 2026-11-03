@@ -8501,7 +8501,17 @@ var require_wordreply = __commonJS({
         i = k + 1;
         j = j2 + 1;
       }
-      return out;
+      const merged = [];
+      for (const x of out) {
+        const last = merged[merged.length - 1];
+        if (last && /^\s*$/.test(was.slice(last.e, x.s))) {
+          last.insert += was.slice(last.e, x.s) + x.insert;
+          last.e = x.e;
+        } else {
+          merged.push({ ...x });
+        }
+      }
+      return merged;
     }
     var key = (t) => t.replace(/\s+/g, " ").trim();
     function likeness(x, y) {
@@ -8572,6 +8582,109 @@ var require_wordreply = __commonJS({
         if (nowFrom[y] < 0) out.push({ was: null, now: y });
       }
       return out;
+    }
+    function splitPairs(pairs, was, now) {
+      const squash = (t) => t.replace(/\s+/g, "");
+      const same = /* @__PURE__ */ new Set();
+      pairs.forEach((pr, k) => {
+        if (pr.was === null || pr.now === null) return;
+        let text = was[pr.was].text;
+        for (let b = k + 1; b < pairs.length && pairs[b].now === null && pairs[b].was !== null; b++) {
+          text += was[pairs[b].was].text;
+          if (squash(text) === squash(now[pr.now].text)) {
+            for (let c = k; c <= b; c++) same.add(c);
+            break;
+          }
+        }
+      });
+      return same;
+    }
+    function viewOf(xml, accept) {
+      const by = (attrs) => accept.has(attr(attrs, "w:author"));
+      return xml.replace(
+        /<w:(ins|moveTo)\b([^>]*?)(?<!\/)>([\s\S]*?)<\/w:\1>/g,
+        (m, tag, attrs, inner) => by(attrs) ? inner : ""
+      ).replace(
+        /<w:(del|moveFrom)\b([^>]*?)(?<!\/)>([\s\S]*?)<\/w:\1>/g,
+        (m, tag, attrs, inner) => by(attrs) ? "" : inner.replace(/<w:delText\b/g, "<w:t").replace(/<\/w:delText>/g, "</w:t>")
+      );
+    }
+    function sentText(buf, authors, zlib) {
+      const doc = docx.readZip(buf, zlib).find((f) => f.name === "word/document.xml");
+      if (!doc) throw new Error("not a Word document");
+      const paras = paragraphs(viewOf(
+        doc.data.toString("utf8"),
+        new Set(authors)
+      )).filter((p) => key(p.text)).map((p) => p.cell ? { t: p.text, c: true } : { t: p.text });
+      return { authors: [...authors], paras };
+    }
+    function overlap(a, b) {
+      const have = new Set(a.paras.map((p) => key(p.t)));
+      return b.paras.filter((p) => have.has(key(p.t))).length;
+    }
+    var NEW_PARAGRAPH = "\xB6 ";
+    var CONTEXT = 60;
+    function untrackedItems(buf, sent, zlib) {
+      const files = new Map(docx.readZip(buf, zlib).map((f) => [f.name, f.data.toString("utf8")]));
+      const back = sentText(buf, sent.authors, zlib).paras;
+      const core2 = files.get("docProps/core.xml") || "";
+      const author = decode((/<cp:lastModifiedBy>([^<]*)</.exec(core2) || [])[1] || "") || "Reviewer";
+      const date = ((/<dcterms:modified[^>]*>([^<]*)</.exec(core2) || [])[1] || "").slice(0, 10);
+      const was = sent.paras.map((p) => ({ text: p.t, cell: !!p.c }));
+      const now = back.map((p) => ({ text: p.t, cell: !!p.c }));
+      const pairs = pairParagraphs(now, was).map((x) => ({
+        was: x.now,
+        now: x.was
+      }));
+      const same = splitPairs(
+        pairs.map((x) => ({ was: x.now, now: x.was })),
+        now,
+        was
+      );
+      const around = (i, s, e) => {
+        let before = was[i].text.slice(0, s);
+        let after = was[i].text.slice(e);
+        for (let k = i - 1; was[i].cell && k >= 0 && was[k].cell && before.length < CONTEXT; k--) before = `${was[k].text} ${before}`;
+        for (let k = i + 1; was[i].cell && k < was.length && was[k].cell && after.length < CONTEXT; k++) after = `${after} ${was[k].text}`;
+        return {
+          before: before.slice(-CONTEXT),
+          after: after.slice(0, CONTEXT)
+        };
+      };
+      const items = [];
+      const item = (quote, insert, ctx) => items.push({
+        kind: "change",
+        author,
+        date,
+        quote,
+        insert,
+        ...ctx,
+        untracked: true
+      });
+      let last = -1;
+      pairs.forEach((pr, k) => {
+        if (same.has(k)) {
+          if (pr.was !== null) last = pr.was;
+          return;
+        }
+        if (pr.was !== null && pr.now !== null) {
+          last = pr.was;
+          const a = was[pr.was].text;
+          for (const x of edits(a, now[pr.now].text)) {
+            item(a.slice(x.s, x.e), x.insert, around(pr.was, x.s, x.e));
+          }
+        } else if (pr.was !== null) {
+          last = pr.was;
+          item(was[pr.was].text, "", around(
+            pr.was,
+            0,
+            was[pr.was].text.length
+          ));
+        } else if (!now[pr.now].cell) {
+          item("", NEW_PARAGRAPH + now[pr.now].text, { before: last >= 0 ? was[last].text.slice(-CONTEXT) : "", after: "" });
+        }
+      });
+      return items;
     }
     function reviser(firstId, author, date) {
       let id = firstId;
@@ -8907,7 +9020,8 @@ var require_wordreply = __commonJS({
         changed: 0,
         added: 0,
         removed: 0,
-        left: []
+        left: [],
+        changes: []
       };
       Object.assign(report, writeAnswers(files, answers || /* @__PURE__ */ new Map()));
       if (fresh) carryText(files, read(fresh), opts, report);
@@ -8954,19 +9068,7 @@ var require_wordreply = __commonJS({
       };
       const swaps = [];
       const pairs = pairParagraphs(was, now);
-      const squash = (t) => t.replace(/\s+/g, "");
-      const same = /* @__PURE__ */ new Set();
-      pairs.forEach((pr, k) => {
-        if (pr.was === null || pr.now === null) return;
-        let text = was[pr.was].text;
-        for (let b = k + 1; b < pairs.length && pairs[b].now === null && pairs[b].was !== null; b++) {
-          text += was[pairs[b].was].text;
-          if (squash(text) === squash(now[pr.now].text)) {
-            for (let c = k; c <= b; c++) same.add(c);
-            break;
-          }
-        }
-      });
+      const same = splitPairs(pairs, was, now);
       pairs.forEach((pr, k) => {
         if (same.has(k)) return;
         const p = pr.was !== null ? was[pr.was] : null;
@@ -8980,6 +9082,12 @@ var require_wordreply = __commonJS({
           }
           swaps.push([p.s, p.e, px, k]);
           report.changed++;
+          report.changes.push({
+            kind: "changed",
+            was: p.text,
+            now: n.text,
+            edits: edits(p.text, n.text)
+          });
         } else if (p) {
           const px = deleteParagraph(doc, p, rev);
           if (px === null) {
@@ -8988,6 +9096,16 @@ var require_wordreply = __commonJS({
           }
           swaps.push([p.s, p.e, px, k]);
           report.removed++;
+          report.changes.push({
+            kind: "removed",
+            was: p.text,
+            now: "",
+            edits: [{
+              s: 0,
+              e: p.text.length,
+              insert: ""
+            }]
+          });
         } else {
           let prev = null;
           for (let b = k - 1; b >= 0 && !prev; b--) {
@@ -9013,6 +9131,12 @@ var require_wordreply = __commonJS({
           const at = prev ? prev.e : next.s;
           swaps.push([at, at, px, k]);
           report.added++;
+          report.changes.push({
+            kind: "added",
+            was: "",
+            now: n.text,
+            edits: [{ s: 0, e: 0, insert: n.text }]
+          });
         }
       });
       swaps.sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[3] - a[3]);
@@ -9021,6 +9145,10 @@ var require_wordreply = __commonJS({
       files.set(relsName, rels);
     }
     module2.exports = {
+      sentText,
+      untrackedItems,
+      overlap,
+      viewOf,
       paragraphs,
       edits,
       pairParagraphs,
@@ -15082,7 +15210,8 @@ var DendriteView = class extends ItemView {
   /**
    * Ask for a reviewer's returned Word file, then write it back
    * answered: the replies under their comments, those dealt with
-   * resolved, and its text brought to the cards', tracked or straight.
+   * resolved, and its text brought to the cards', tracked or written
+   * directly.
    * Written as a new file beside the exports; theirs is not changed.
    */
   replyInWord() {
@@ -15107,6 +15236,74 @@ var DendriteView = class extends ItemView {
     input.click();
   }
   /**
+   * The reply to the reviewer's file `buf` with `answers`, made but not
+   * written: a fresh export of the cards to compare against, then the
+   * reply in both forms. { fresh, tracked, direct, sent, theirs }, the
+   * reply forms each { buf, report }, `sent` the name of the kept copy
+   * of what was sent and `theirs` the reviewer's edits made without
+   * tracking against it; or { error }.
+   */
+  async prepareWordReply(buf, answers) {
+    const deps = this.plugin.pandocDeps();
+    const tmp = deps.join(
+      deps.tmpdir(),
+      `dendrite-${Date.now()}-reply.docx`
+    );
+    let fresh = null;
+    try {
+      const err = await this.freshDocx(tmp);
+      if (err) return { error: err };
+      fresh = await deps.readFile(tmp);
+    } finally {
+      deps.remove(tmp);
+    }
+    const author = this.myName();
+    const make = (tracked) => wordreply.replyDocx(
+      buf,
+      fresh,
+      answers,
+      { tracked, author },
+      deps.zlib
+    );
+    const sent = await this.closestSent(buf);
+    const theirs = sent ? wordreply.untrackedItems(
+      buf,
+      sent.text,
+      deps.zlib
+    ) : [];
+    return {
+      fresh,
+      tracked: make(true),
+      direct: make(false),
+      sent: sent ? sent.name : null,
+      theirs
+    };
+  }
+  /**
+   * The card that prints paragraph text `text`, or null: the first run
+   * of six words found in one card only, so a paragraph whose citations
+   * print differently from how its card holds them is still found.
+   */
+  async cardOfText(text) {
+    if (!this.printedNorm) {
+      this.printedNorm = (await this.reviewCards()).map((c) => ({
+        id: c.id,
+        text: review.normalise(
+          review.plainMap(c.text).text
+        ).text
+      }));
+    }
+    const words = review.normalise(text).text.split(" ").filter(Boolean);
+    const cards = this.printedNorm;
+    const size = Math.min(6, words.length);
+    for (let k = 0; k + size <= words.length; k += 3) {
+      const bit = words.slice(k, k + size).join(" ");
+      const has = cards.filter((c) => c.text.includes(bit));
+      if (has.length === 1) return has[0].id;
+    }
+    return null;
+  }
+  /**
    * What to write under each comment of a reviewer's Word file `buf`:
    * { answers, comments }, `answers` a Map of a comment's id to
    * { replies, done } as wordreply.writeAnswers takes it, from the
@@ -15129,12 +15326,11 @@ var DendriteView = class extends ItemView {
       this.app,
       this.file
     ));
-    const me = this.plugin.settings.presentName || this.plugin.settings.replyName || "Me";
     const answers = wordWriteAnswers(
       comments,
       open,
       log,
-      me,
+      this.myName(),
       this.selfNames()
     );
     return { answers, comments };
@@ -15211,11 +15407,11 @@ var DendriteView = class extends ItemView {
     return result.error || null;
   }
   /**
-   * Write the reply to `name`, the reviewer's file `buf`, with
-   * `answers`, tracked when `tracked`: beside the exports, as
-   * "<name> reply.docx", then said and shown.
+   * Write `made`, a reply prepareWordReply made to the reviewer's file
+   * `name`: beside the exports, as "<name> reply.docx", then said and
+   * shown.
    */
-  async writeWordReply(name, buf, answers, tracked) {
+  async writeWordReply(name, made, tracked) {
     const deps = this.plugin.pandocDeps();
     const nodePath = require("path");
     const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
@@ -15223,42 +15419,14 @@ var DendriteView = class extends ItemView {
     if (!this.app.vault.getAbstractFileByPath(dir)) {
       await this.app.vault.createFolder(dir);
     }
-    const notice = new Notice("Dendrite: exporting the cards to compare\u2026", 0);
-    const tmp = deps.join(
-      deps.tmpdir(),
-      `dendrite-${Date.now()}-reply.docx`
-    );
-    let fresh = null;
-    try {
-      const err = await this.freshDocx(tmp);
-      if (err) {
-        notice.hide();
-        new Notice(`Dendrite: ${err}`, 12e3);
-        return null;
-      }
-      fresh = await deps.readFile(tmp);
-    } finally {
-      deps.remove(tmp);
-    }
-    const me = this.plugin.settings.presentName || this.plugin.settings.replyName || "Me";
-    const out = wordreply.replyDocx(
-      buf,
-      fresh,
-      answers,
-      { tracked, author: me },
-      deps.zlib
-    );
     const stem = safeName(name.replace(/\.docx$/i, "")) + " reply";
     const rel = normalizePath(`${dir}/${stem}.docx`);
     const output = nodePath.join(base, rel);
-    await deps.writeFile(output, out.buf);
-    notice.hide();
-    new Notice(
-      wordReplyNotice(rel, out.report, tracked),
-      out.report.left.length ? 0 : 2e4
-    );
+    await deps.writeFile(output, made.buf);
+    await this.saveSent(output, `${stem}.docx`);
+    new Notice(wordReplyNotice(rel, made.report, tracked), 15e3);
     await this.plugin.showExport(rel, output, "docx");
-    return out.report;
+    return rel;
   }
   /** The Google Doc this manuscript is linked to, or null. */
   gdocUrl() {
@@ -15368,9 +15536,6 @@ var DendriteView = class extends ItemView {
     }
     m.addSeparator();
     m.addItem((i) => i.setTitle("Import a Word or JSON file\u2026").onClick(() => this.importReview()));
-    if (Platform.isDesktopApp) {
-      m.addItem((i) => i.setTitle("Reply in a returned Word file\u2026").onClick(() => this.replyInWord()));
-    }
     m.addItem((i) => i.setTitle("Reviewers\u2026").onClick(() => new ReviewersModal(this).open()));
     m.addItem((i) => i.setTitle("Mark as sent for review\u2026").onClick(() => new RoundModal(this).open()));
     if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
@@ -15517,11 +15682,12 @@ var DendriteView = class extends ItemView {
     this.refreshInbox();
   }
   /** Show the review in a file, `data` its bytes, to choose from. */
-  async reviewFrom(name, data) {
+  async reviewFrom(name, data, against = null) {
     const buf = require("buffer").Buffer.from(data);
     const json = /\.json$/i.test(name);
     let items;
     let layout = [];
+    let sent = null;
     try {
       items = json ? review.readReviewJson(buf.toString("utf8")) : review.readReview(buf, require("zlib"));
       if (!json) layout = review.layoutChanges(buf, require("zlib"));
@@ -15529,20 +15695,116 @@ var DendriteView = class extends ItemView {
       new Notice(`Dendrite: ${name} could not be read as ${json ? "a review list" : "a Word file"} (${err.message}).`);
       return null;
     }
+    if (!json) {
+      try {
+        sent = against ? {
+          name: against.name,
+          text: wordreply.sentText(require("buffer").Buffer.from(
+            against.data
+          ), [this.myName()], require("zlib"))
+        } : await this.closestSent(buf);
+        if (sent) {
+          items = items.concat(wordreply.untrackedItems(
+            buf,
+            sent.text,
+            require("zlib")
+          ));
+        }
+      } catch (err) {
+        new Notice(`Dendrite: edits made in ${name} without tracking could not be found (${err.message}).`);
+      }
+    }
     if (!items.length) {
       new Notice(
-        `Dendrite: ${name} has no comments${json ? "" : " or tracked changes"}` + (layout.length ? ` to bring in; its layout changes are not: ${layout.join("; ")}` : "") + ".",
+        `Dendrite: ${name} has no comments${json ? "" : " or changes"}` + (sent ? `, compared with ${sent.name}` : "") + (layout.length ? ` to bring in; its layout changes are not: ${layout.join("; ")}` : "") + ".",
         layout.length ? 15e3 : void 0
       );
       return null;
     }
-    return this.reviewModal(name, items, null, layout);
+    return this.reviewModal(name, items, null, layout, json ? null : {
+      name: sent ? sent.name : null,
+      again: (other) => this.reviewFrom(name, data, other)
+    });
+  }
+  /** The name your replies and tracked changes are written under. */
+  myName() {
+    return this.plugin.settings.presentName || this.plugin.settings.replyName || "Me";
+  }
+  /** The folder beside the index where what was sent is kept. */
+  sentDir() {
+    return normalizePath((this.file.parent.path === "/" ? "" : this.file.parent.path + "/") + "_dendrite/sent");
+  }
+  /**
+   * Keep the text of the Word file at `output`, a path on disk, as
+   * sent, named `name`, so edits made in it without tracking can be
+   * found when it comes back. Once per text; never stops an export.
+   */
+  async saveSent(output, name) {
+    try {
+      const deps = this.plugin.pandocDeps();
+      const text = wordreply.sentText(
+        await deps.readFile(output),
+        [this.myName()],
+        deps.zlib
+      );
+      const hash = docxLib.crc32(docxLib.utf8(
+        JSON.stringify(text.paras)
+      )).toString(16);
+      const dir = this.sentDir();
+      const path = `${dir}/${hash}.json`;
+      const fs = this.app.vault.adapter;
+      if (await fs.exists(path)) return;
+      if (!await fs.exists(dir)) await fs.mkdir(dir);
+      await fs.write(path, JSON.stringify(Object.assign(
+        { name, at: (/* @__PURE__ */ new Date()).toISOString() },
+        text
+      )));
+    } catch (err) {
+      console.warn("Dendrite: what was sent not kept", err);
+    }
+  }
+  /**
+   * The kept copy of what was sent closest to the returned Word file
+   * `buf`: { name, text }, `name` the file's with its date, or null
+   * when none shares at least half its paragraphs.
+   */
+  async closestSent(buf) {
+    const fs = this.app.vault.adapter;
+    const dir = this.sentDir();
+    if (!fs || !fs.exists || !await fs.exists(dir)) return null;
+    const back = wordreply.sentText(
+      buf,
+      [this.myName()],
+      require("zlib")
+    );
+    let best = null;
+    let most = 0;
+    for (const f of (await fs.list(dir)).files) {
+      if (!/\.json$/.test(f)) continue;
+      let e;
+      try {
+        e = JSON.parse(await fs.read(f));
+      } catch (err) {
+        continue;
+      }
+      if (!e || !Array.isArray(e.paras)) continue;
+      const n = wordreply.overlap(e, back);
+      if (n > most || n === most && best && String(e.at) > String(best.at)) {
+        most = n;
+        best = e;
+      }
+    }
+    if (!best || most * 2 < back.paras.length) return null;
+    return {
+      name: `${best.name}, ${String(best.at).slice(0, 10)}`,
+      text: best
+    };
   }
   /**
    * Show review items, each with where in the cards it was found, to
    * choose which to add; `inbox`, the submitted review they came from.
    */
-  async reviewModal(name, items, inbox = null, layout = []) {
+  async reviewModal(name, items, inbox = null, layout = [], sent = null) {
     const cards = await this.reviewCards();
     const old = await this.oldVersionCards();
     const doneKeys = new Set(await this.reviewDone());
@@ -15593,7 +15855,8 @@ var DendriteView = class extends ItemView {
       name,
       rows,
       inbox,
-      layout
+      layout,
+      sent
     );
     modal.open();
     return modal;
@@ -17230,6 +17493,10 @@ var DendriteView = class extends ItemView {
         m.addItem((i) => i.setTitle("Word, from template").onClick(() => this.exportTo(null, "tdocx")));
         m.addItem((i) => i.setTitle("PDF, from template").onClick(() => this.exportTo(null, "tpdf")));
       }
+      if (!node) {
+        m.addSeparator();
+        m.addItem((i) => i.setTitle("Reply in a returned Word file\u2026").onClick(() => this.replyInWord()));
+      }
     }
     if (event) m.showAtMouseEvent(event);
   }
@@ -17465,6 +17732,7 @@ var DendriteView = class extends ItemView {
       said.push(`No heading in the template for ${report.unplaced.join(", ")}: each follows the section before it.`);
     }
     if (!pdf) {
+      await this.saveSent(output, `${name}.docx`);
       notice.hide();
       new Notice(`Dendrite: filled the template: ${rel}. ` + said.join(" "), 15e3);
       await this.plugin.showExport(rel, output, "docx");
@@ -17545,6 +17813,7 @@ var DendriteView = class extends ItemView {
     if (refsFile) {
       lines.push(`Over the limit with them, so the reference list is in ${refsFile}.`);
     }
+    await this.saveSent(output, `${name}.docx`);
     notice.hide();
     new Notice(`Dendrite: filled the template: ${pdfRel}. ` + [...lines, ...said].join(" "), 3e4);
     await this.plugin.showExport(
@@ -17737,6 +18006,7 @@ var DendriteView = class extends ItemView {
       return;
     }
     const cites = result.keys.length ? ` with ${result.keys.length} citation(s)` : "";
+    if (format === "docx") await this.saveSent(output, `${name}.docx`);
     new Notice(`Dendrite: exported to ${rel}${cites}.`);
     if (whole) this.offerRound();
     const bodies = whole ? await this.loadBodies() : null;
@@ -20225,11 +20495,47 @@ function wordWriteAnswers(comments, open, log, me, selfNames) {
 }
 function wordReplyNotice(rel, r, tracked) {
   const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
-  const lines = [`Dendrite: wrote ${rel}: ${n(r.replies, "reply", "replies")}, ${n(r.resolved, "comment", "comments")} resolved; ${n(r.changed, "paragraph", "paragraphs")} changed, ${r.added} added, ${r.removed} taken out` + (r.changed + r.added + r.removed ? tracked ? ", as tracked changes." : ", made straight." : ".")];
+  const lines = [`Dendrite: wrote ${rel}: ${n(r.replies, "reply", "replies")}, ${n(r.resolved, "comment", "comments")} resolved; ${n(r.changed, "paragraph", "paragraphs")} changed, ${r.added} added, ${r.removed} taken out` + (r.changed + r.added + r.removed ? tracked ? ", as tracked changes." : ", written directly." : ".")];
   if (r.left.length) {
     lines.push(`Not carried, to make by hand: ` + r.left.map((x) => `\u201C${x.text}\u201D (${x.why})`).join("; ") + ".");
   }
   return lines.join(" ");
+}
+function drawEdits(el, was, edits) {
+  const KEEP = 40;
+  const plain = (t, first, last) => {
+    if (t.length <= KEEP * 2 + 1) return t;
+    if (first) return "\u2026" + t.slice(-KEEP);
+    if (last) return t.slice(0, KEEP) + "\u2026";
+    return t.slice(0, KEEP) + " \u2026 " + t.slice(-KEEP);
+  };
+  let at = 0;
+  edits.forEach((x, k) => {
+    if (x.s > at) {
+      el.appendText(plain(was.slice(at, x.s), k === 0, false));
+    }
+    if (x.e > x.s) {
+      el.createEl("del", {
+        cls: "dendrite-reply-del",
+        text: was.slice(x.s, x.e)
+      });
+    }
+    if (x.insert) {
+      el.createEl("ins", { cls: "dendrite-reply-ins", text: x.insert });
+    }
+    at = x.e;
+  });
+  if (at < was.length) el.appendText(plain(was.slice(at), false, true));
+}
+function undoesTheirs(ch, theirs) {
+  const flat = (t) => String(t || "").replace(/^¶ /, "").replace(/\s+/g, " ").trim();
+  const out = ch.edits.map((x) => flat(ch.was.slice(x.s, x.e)));
+  const put = ch.edits.map((x) => flat(x.insert));
+  return theirs.some((it) => {
+    const added = flat(it.insert);
+    const taken = flat(it.quote);
+    return added && out.some((t) => t.includes(added)) || taken && put.some((t) => t.includes(taken));
+  });
 }
 var ReplyWordModal = class extends Modal {
   constructor(view, name, buf, found) {
@@ -20239,40 +20545,152 @@ var ReplyWordModal = class extends Modal {
     this.buf = buf;
     this.answers = found.answers;
     this.comments = found.comments;
+    this.made = null;
   }
   onOpen() {
-    const { contentEl, view } = this;
-    const s = view.plugin.settings;
+    this.modalEl.addClass("dendrite-wide");
     this.titleEl.setText(`Reply in ${this.name}`);
-    const answered = [...this.answers.values()];
-    const replies = answered.reduce((k, a) => k + a.replies.length, 0);
-    const done = answered.filter((a) => a.done).length;
-    const unknown = this.comments.length - this.answers.size;
-    contentEl.createEl("p", { text: `${this.comments.length} comment${this.comments.length === 1 ? "" : "s"} in the file; ${replies} repl${replies === 1 ? "y" : "ies"} to write under them, ${done} resolved` + (unknown ? `, ${unknown} not found in the cards or the review log, left as they are` : "") + ". The text is brought to what the cards print now, in the reviewer's own file, so their formatting and layout stay. Replies addressed to someone else, and Claude's, are not sent. Written as a new file beside the exports." });
-    const rows = contentEl.createDiv({ cls: "dendrite-review-rows" });
-    for (const c of this.comments) {
-      const a = this.answers.get(c.id);
-      const row = rows.createDiv({ cls: "dendrite-reply-word-row" });
-      row.createEl("b", { text: `${c.author}: ` });
-      row.createSpan({ text: c.text });
-      row.createDiv({ cls: "dendrite-reply-word-what", text: !a ? "Not found in the cards: left as it is." : (a.replies.length ? a.replies.map((r) => `${r.author}: ${r.text}`).join(" \xB7 ") : "No reply.") + (a.done ? " Resolved." : "") });
+    this.contentEl.createDiv({
+      cls: "dendrite-reply-wait",
+      text: "Exporting the cards to compare\u2026"
+    });
+    this.view.printedNorm = null;
+    this.view.prepareWordReply(this.buf, this.answers).then((made) => {
+      this.made = made;
+      this.draw();
+    });
+  }
+  draw() {
+    const { contentEl, view, made } = this;
+    contentEl.empty();
+    if (made.error) {
+      contentEl.createEl("p", { text: made.error });
+      return;
     }
+    const r = made.tracked.report;
+    const replies = [...this.answers.values()].reduce((k, a) => k + a.replies.length, 0);
+    const counts = [
+      ["Comments", this.comments.length],
+      ["Replies", replies],
+      ["Resolved", [...this.answers.values()].filter((a) => a.done).length],
+      ["Not in the cards", this.comments.length - this.answers.size],
+      ["Paragraphs changed", r.changed],
+      ["Added", r.added],
+      ["Taken out", r.removed],
+      ["Undo their edits", r.changes.filter((ch) => undoesTheirs(ch, made.theirs || [])).length],
+      ["Not carried", r.left.length]
+    ];
+    const sum = contentEl.createEl(
+      "table",
+      { cls: "dendrite-reply-counts" }
+    );
+    const head = sum.createEl("tr");
+    const vals = sum.createEl("tr");
+    for (const [label, n] of counts) {
+      head.createEl("th", { text: label });
+      vals.createEl("td", {
+        text: String(n),
+        cls: n ? "" : "is-zero"
+      });
+    }
+    const line = contentEl.createDiv({
+      cls: "dendrite-reply-sent",
+      text: made.sent ? `Their edits made without tracking: against ${made.sent}. ` : "Their edits made without tracking: no copy of what was sent is kept for this file, so none is marked. "
+    });
+    line.createEl("button", { text: "Compare with a file\u2026" }).onclick = () => {
+      const input = view.pageDoc().createElement("input");
+      input.type = "file";
+      input.accept = ".docx";
+      input.onchange = async () => {
+        const f = input.files && input.files[0];
+        if (!f) return;
+        const zlib = require("zlib");
+        const sent = wordreply.sentText(
+          require("buffer").Buffer.from(await f.arrayBuffer()),
+          [view.myName()],
+          zlib
+        );
+        made.theirs = wordreply.untrackedItems(
+          this.buf,
+          sent,
+          zlib
+        );
+        made.sent = f.name;
+        this.draw();
+      };
+      input.click();
+    };
+    const section = (title) => contentEl.createEl("h4", {
+      text: title,
+      cls: "dendrite-reply-head"
+    });
+    const table = (cols) => {
+      const t = contentEl.createDiv({ cls: "dendrite-reply-scroll" }).createEl("table", { cls: "dendrite-reply-table" });
+      const tr = t.createEl("tr");
+      for (const c of cols) tr.createEl("th", { text: c });
+      return t;
+    };
+    if (this.comments.length) {
+      section("Comments");
+      const t = table(["Comment", "Goes back with", "State"]);
+      for (const c of this.comments) {
+        const a = this.answers.get(c.id);
+        const tr = t.createEl("tr");
+        const who = tr.createEl("td");
+        who.createEl("b", { text: `${c.author}: ` });
+        who.appendText(c.text);
+        tr.createEl("td", { text: a && a.replies.length ? a.replies.map((x) => `${x.author}: ${x.text}`).join("\n") : "" });
+        tr.createEl("td", { text: !a ? "Not in the cards" : a.done ? "Resolved" : "Open" });
+      }
+    }
+    if (r.changes.length) {
+      section("Changes to the text");
+      const t = table(["Card", "Change", ""]);
+      for (const ch of r.changes) {
+        const tr = t.createEl("tr");
+        const card = tr.createEl("td", { cls: "dendrite-reply-card" });
+        const what = tr.createEl("td");
+        drawEdits(what, ch.was, ch.edits);
+        tr.createEl("td", {
+          cls: "dendrite-reply-undoes",
+          text: undoesTheirs(ch, made.theirs || []) ? "Undoes their edit" : ""
+        });
+        view.cardOfText(ch.now || ch.was).then((id) => {
+          if (!id) {
+            card.setText(ch.kind === "removed" ? "Gone" : "");
+            return;
+          }
+          const a = card.createEl("a", {
+            text: core.shortId(id),
+            href: "#"
+          });
+          a.addEventListener("click", (e) => {
+            e.preventDefault();
+            view.select(id);
+          });
+        });
+      }
+    }
+    if (r.left.length) {
+      section("Not carried, to make by hand");
+      const t = table(["Text", "Why"]);
+      for (const x of r.left) {
+        const tr = t.createEl("tr");
+        tr.createEl("td", { text: x.text });
+        tr.createEl("td", { text: x.why });
+      }
+    }
+    const s = view.plugin.settings;
     let tracked = s.replyTracked !== false;
-    new Setting(contentEl).setName("Changes to the text").setDesc("Tracked, for the reviewer to accept or reject, or made straight.").addDropdown((d) => d.addOption("tracked", "As tracked changes").addOption("straight", "Made straight").setValue(tracked ? "tracked" : "straight").onChange(async (v) => {
+    new Setting(contentEl).setName("Changes to the text").addDropdown((d) => d.addOption("tracked", "As tracked changes").addOption("direct", "Written directly").setValue(tracked ? "tracked" : "direct").onChange(async (v) => {
       tracked = v === "tracked";
       s.replyTracked = tracked;
       if (view.plugin.saveSettings) {
         await view.plugin.saveSettings();
       }
-    }));
-    new Setting(contentEl).addButton((b) => b.setButtonText("Write reply").setCta().onClick(async () => {
+    })).addButton((b) => b.setButtonText("Write reply").setCta().onClick(async () => {
       this.close();
-      await view.writeWordReply(
-        this.name,
-        this.buf,
-        this.answers,
-        tracked
-      );
+      await view.writeWordReply(this.name, tracked ? made.tracked : made.direct, tracked);
     }));
   }
   onClose() {
@@ -20280,13 +20698,14 @@ var ReplyWordModal = class extends Modal {
   }
 };
 var ReviewImportModal = class extends Modal {
-  constructor(view, name, rows, inbox = null, layout = []) {
+  constructor(view, name, rows, inbox = null, layout = [], sent = null) {
     super(view.app);
     this.view = view;
     this.name = name;
     this.rows = rows;
     this.inbox = inbox;
     this.layout = layout;
+    this.sent = sent;
   }
   onOpen() {
     const { contentEl, view, rows } = this;
@@ -20300,6 +20719,26 @@ var ReviewImportModal = class extends Modal {
     // comments has a link, which those kept inside a Word file,
     // not in Drive's own comments, do not.
     (this.name && /\(Google Docs\)$/.test(this.name) && rows.some((x) => x.item.kind === "comment") && !rows.some((x) => x.item.link) ? "None has a Google Docs link: its comments are kept inside the Word file, not in Google Docs' own comments, so Google gives them no link to their thread. " : "") + "Each goes after its passage in the card, which is set to revise. A change still made on the text as it was sent can be applied from its card later; one whose passage has changed since comes in as a comment. Nothing is written until you add them, and Ctrl+Z on the board undoes it." });
+    if (this.sent) {
+      const line = contentEl.createDiv({ cls: "dendrite-review-sent" });
+      line.createSpan({ text: this.sent.name ? `Edits made without tracking: compared with ${this.sent.name}. ` : "Edits made without tracking: no copy of what was sent is kept for this file. " });
+      const b = line.createEl("button", { text: "Compare with a file\u2026" });
+      b.onclick = () => {
+        const input = view.pageDoc().createElement("input");
+        input.type = "file";
+        input.accept = ".docx";
+        input.onchange = async () => {
+          const f = input.files && input.files[0];
+          if (!f) return;
+          this.close();
+          await this.sent.again({
+            name: f.name,
+            data: await f.arrayBuffer()
+          });
+        };
+        input.click();
+      };
+    }
     if (this.layout.length) {
       const box = contentEl.createDiv({ cls: "dendrite-review-layout" });
       box.createEl("p", { text: "Tracked changes in the file not brought in, since no card holds them, listed so none goes unseen; the export sets layout, and the rest can be made by hand:" });
@@ -20330,7 +20769,7 @@ var ReviewImportModal = class extends Modal {
         it.author || "Reviewer",
         view.nameOf()
       );
-      meta.appendText(` \xB7 ${review.shortDate(it.date)} \xB7 ` + (it.kind === "change" ? "suggested change" : "comment"));
+      meta.appendText(` \xB7 ${review.shortDate(it.date)} \xB7 ` + (it.kind !== "change" ? "comment" : it.untracked ? "edited without tracking" : "suggested change"));
       if (it.quote) {
         main.createDiv({
           cls: "dendrite-review-quote",
@@ -23452,6 +23891,8 @@ module.exports.tidyKept = tidyKept;
 module.exports.readReviewLog = readReviewLog;
 module.exports.wordWriteAnswers = wordWriteAnswers;
 module.exports.wordReplyNotice = wordReplyNotice;
+module.exports.ReplyWordModal = ReplyWordModal;
+module.exports.undoesTheirs = undoesTheirs;
 module.exports.floatInventory = floatInventory;
 module.exports.paneWidths = paneWidths;
 module.exports.DendriteSettings = DendriteSettings;

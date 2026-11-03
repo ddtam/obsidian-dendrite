@@ -1,6 +1,6 @@
 // A reply in the reviewer's own Word file: replies under their comments,
 // those dealt with resolved, and the text brought to the cards', tracked
-// or straight, the rest of their file left as it was.
+// or written directly, the rest of their file left as it was.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -77,6 +77,8 @@ test('a changed paragraph is tracked in its own runs, formatting kept',
               run(' Joshua Bridgers.'))],
         [para(run('Storage will be managed by Joshua Bridgers.'))]);
     assert.equal(report.changed, 1);
+    assert.deepEqual(report.changes.map((c) => [c.kind, c.edits]),
+                     [['changed', [{ s: 24, e: 49, insert: 'by' }]]]);
     has(xml, ' w:author="Derek Tam" w:date="2026-11-03T00:00:00Z">',
         '<w:r><w:rPr><w:b/></w:rPr><w:delText xml:space="preserve">',
         'designated data guardian,</w:delText>');
@@ -87,7 +89,7 @@ test('a changed paragraph is tracked in its own runs, formatting kept',
                      ['Storage will be managed by Joshua Bridgers.']);
 });
 
-test('made straight, the text is changed with no marks', () => {
+test('written directly, the text is changed with no marks', () => {
     const { xml } = replied(
         [para(run('Storage will be managed '),
               run('designated data guardian,', '<w:b/>'),
@@ -159,6 +161,9 @@ test('a paragraph gone from the cards is taken out, its mark too', () => {
          para(run('Also keep.'))],
         [para(run('Keep.')), para(run('Also keep.'))]);
     assert.equal(report.removed, 1);
+    assert.deepEqual(report.changes, [{ kind: 'removed',
+        was: 'Drop this one.', now: '',
+        edits: [{ s: 0, e: 14, insert: '' }] }]);
     has(xml, '<w:delText xml:space="preserve">Drop this one.</w:delText>');
     assert.match(xml, /<w:pPr><w:rPr><w:del [^>]*\/><\/w:rPr><\/w:pPr>/);
     assert.deepEqual(accepted(xml), ['Keep.', 'Also keep.']);
@@ -270,4 +275,41 @@ test('replies for the reviewer: not Claude\'s, nor addressed elsewhere',
     assert.deepEqual(a.get('2'), { done: true, replies: [
         { author: 'Derek Tam', date: 'd', text: 'Updated.' }] });
     assert.equal(a.has('3'), false);
+});
+
+// Who last saved a file, as Word records it.
+const CORE = '<cp:coreProperties><cp:lastModifiedBy>Josh Bridgers' +
+    '</cp:lastModifiedBy><dcterms:modified>2026-11-03T20:25:00Z' +
+    '</dcterms:modified></cp:coreProperties>';
+
+test('edits made without tracking are found against what was sent, ' +
+     'the reviewer\'s tracked ones and the writer\'s own set aside', () => {
+    const sent = file({ 'word/document.xml': doc(
+        para(run('Storage will be managed by Joshua Bridgers.')),
+        para(run('Two perturbation screens and our data.')),
+        para(run('Kept '), '<w:ins w:id="1" w:author="Derek Tam">',
+             run('as I wrote it.'), '</w:ins>'),
+        table([cell(para(run('CPU (core-years)')))])) });
+    const back = file({ 'docProps/core.xml': CORE,
+        'word/document.xml': doc(
+            para(run('Storage will be managed designated data guardian, ' +
+                     'Joshua Bridgers.')),
+            para(run('Two perturbation screens '),
+                 '<w:ins w:id="2" w:author="Josh Bridgers">',
+                 run('(tracked) '), '</w:ins>', run('and our data.')),
+            para(run('Kept '), '<w:ins w:id="1" w:author="Derek Tam">',
+                 run('as I wrote it.'), '</w:ins>'),
+            table([cell(para(run('CPU ')), para(run('(core-years)')))]),
+            para(run('A paragraph of his own.'))) });
+    const was = wr.sentText(sent, ['Derek Tam'], zlib);
+    const items = wr.untrackedItems(back, was, zlib);
+    assert.deepEqual(items.map((x) => [x.author, x.date, x.quote, x.insert,
+                                       x.before, x.untracked]), [
+        ['Josh Bridgers', '2026-11-03', 'by ',
+         'designated data guardian, ', 'Storage will be managed ', true],
+        ['Josh Bridgers', '2026-11-03', '', '¶ A paragraph of his own.',
+         'CPU (core-years)', true]]);
+    // Read as sent, the two share the paragraphs left as they were.
+    assert.equal(wr.overlap(was, wr.sentText(back, ['Derek Tam'], zlib)),
+                 2);
 });
