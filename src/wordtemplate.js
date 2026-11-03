@@ -72,11 +72,22 @@ const isTable = (x) => x.startsWith('<w:tbl');
  * earlier properties gone, deletions gone, insertions kept as text.
  */
 function settled(xml) {
+    // A paragraph whose mark was deleted and with nothing left in it was
+    // deleted outright, as a heading taken out; it goes whole.
+    const markGone = new RegExp('<w:pPr>(?:(?!</w:pPr>)[^])*<w:rPr>' +
+                                '(?:(?!</w:rPr>)[^])*<w:del\\b[^>]*/>');
     return xml
         .replace(/<w:(\w+Change)\b[^>]*\/>/g, '')
         .replace(/<w:(\w+Change)\b[^>]*>[^]*?<\/w:\1>/g, '')
-        .replace(/<w:del\b[^>]*>[^]*?<\/w:del>/g, '')
-        .replace(/<w:ins\b[^>]*>|<\/w:ins>/g, '');
+        // Deleted and moved-away text, in an element of its own; not a
+        // mark, <w:del .../>, on a paragraph's end.
+        .replace(/<w:(del|moveFrom)\b[^>]*(?<!\/)>[^]*?<\/w:\1>/g, '')
+        .replace(/<w:p\b[^>]*>[^]*?<\/w:p>/g, (para) =>
+            (markGone.test(para) && !textOf(para).trim() &&
+             !/<w:drawing|<w:pict|<w:sectPr/.test(para) ? '' : para))
+        .replace(/<w:(ins|del|moveFrom|moveTo)\b[^>]*\/>/g, '')
+        .replace(/<w:(?:move(?:From|To)Range(?:Start|End))\b[^>]*\/>/g, '')
+        .replace(/<w:(?:ins|moveTo)\b[^>]*(?<!\/)>|<\/w:(?:ins|moveTo)>/g, '');
 }
 
 /** Whether a run is set in italic. */
@@ -202,8 +213,11 @@ function templateItems(blocks, { startAt = null } = {}) {
             // once; one left blank by its instructions going is not.
             if (emptyPara(b) && !/<w:sectPr/.test(b)) {
                 const last = items[items.length - 1];
+                // Kept with the next only where the filler sets it, not
+                // as a returned export had it.
                 if (last && last.kind !== 'gap') {
-                    items.push({ kind: 'gap', xml: b });
+                    const xml = b.replace(/<w:keepNext\b[^>]*\/>/g, '');
+                    items.push({ kind: 'gap', xml });
                 }
                 continue;
             }
@@ -476,7 +490,9 @@ function keepTogether(tbl) {
     return tbl.replace(/<w:tr\b[^>]*>[^]*?<\/w:tr>/g, (tr) => {
         const i = k++;
         const flags = '<w:cantSplit/>' + (i === 0 ? '<w:tblHeader/>' : '');
-        let out = tr.replace(/<w:(?:cantSplit|tblHeader)\b[^>]*\/>/g, '');
+        // Kept with the next only as set here, not as a template had it.
+        let out = tr.replace(/<w:(?:cantSplit|tblHeader|keepNext)\b[^>]*\/>/g,
+                             '');
         if (/<w:trPr>/.test(out)) {
             out = out.replace(/<w:trPr>[^]*?<\/w:trPr>/, (pr) => {
                 const at = pr.search(

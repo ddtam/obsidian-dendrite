@@ -4006,7 +4006,8 @@ test('a manuscript linked to a Google Doc pulls its comments and ' +
     assert.deepEqual(h.obsidian.lastMenu.items.map((i) => i.title), [
         'Pull from Google Docs', 'Open the linked doc',
         'Change the linked doc…', 'Import a Word or JSON file…',
-        'Reviewers…', 'Mark as sent for review…']);
+        'Reply in a returned Word file…', 'Reviewers…',
+        'Mark as sent for review…']);
     const m = await view.pullGdoc();
     assert.equal(asked, view.gdocUrl());
     assert.match(m.titleEl.textContent, /RAC draft \(Google Docs\)/);
@@ -4210,8 +4211,8 @@ test('the Review menu offers linking a doc when none is, and holds only ' +
     view.reviewMenu({ preventDefault() {} });
     const titles = h.obsidian.lastMenu.items.map((i) => i.title);
     assert.deepEqual(titles, ['Link a Google Doc…',
-        'Import a Word or JSON file…', 'Reviewers…',
-        'Mark as sent for review…']);
+        'Import a Word or JSON file…', 'Reply in a returned Word file…',
+        'Reviewers…', 'Mark as sent for review…']);
     assert.equal(opened, null);
 });
 
@@ -7991,4 +7992,32 @@ test('the author filter lists each person once, however many names they ' +
     assert.deepEqual([...list.contentEl.querySelectorAll(
         '.dendrite-cthread-text')].map((el) => el.textContent),
         ['First.', 'Second.']);
+});
+
+test('the review import dialog lists the layout a returned file changed ' +
+     'that no card holds', async () => {
+    const d = require('../src/docx.js');
+    const zlib = require('zlib');
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/' +
+        'wordprocessingml/2006/main"';
+    const by = 'w:id="1" w:author="Josh" w:date="2026-11-02T10:00:00Z"';
+    const body = '<w:tbl><w:tblPr><w:tblW w:w="7980" w:type="dxa"/>' +
+        `<w:tblPrChange ${by}><w:tblPr/></w:tblPrChange></w:tblPr><w:tr>` +
+        '<w:tc><w:p><w:r><w:t>Data</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' +
+        '<w:p><w:r><w:t>First </w:t></w:r><w:commentRangeStart w:id="0"/>' +
+        '<w:r><w:t>one</w:t></w:r><w:commentRangeEnd w:id="0"/>' +
+        '<w:r><w:commentReference w:id="0"/></w:r></w:p>';
+    const comments = `<w:comments ${W}><w:comment w:id="0" ${by}><w:p>` +
+        '<w:r><w:t>Why?</w:t></w:r></w:p></w:comment></w:comments>';
+    const buf = d.writeZip([
+        { name: 'word/document.xml', data: Buffer.from(
+            `<w:document ${W}><w:body>${body}</w:body></w:document>`) },
+        { name: 'word/comments.xml', data: Buffer.from(comments) }], zlib);
+    const { view } = await open(REVIEWED_INDEX, REVIEWED);
+    await view.reviewFrom('jb.docx', buf);
+    const m = h.obsidian.lastModal;
+    assert.match(m.contentEl.textContent, /not brought in/);
+    assert.deepEqual([...m.contentEl.querySelectorAll(
+        '.dendrite-review-layout li')].map((x) => x.textContent),
+        ['Table “Data”: its width changed']);
 });

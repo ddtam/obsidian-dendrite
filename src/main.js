@@ -39,6 +39,7 @@ const timing = require('./timing.js');
 const { History, idbStore, hash: versionHash } = require('./history.js');
 const { Ledger, makeFolders, moveDone } = require('./ledger.js');
 const wordtemplate = require('./wordtemplate.js');
+const wordreply = require('./wordreply.js');
 const docxLib = require('./docx.js');
 const zotero = require('./zotero.js');
 const reviewlog = require('./reviewlog.js');
@@ -125,6 +126,8 @@ const DEFAULTS = {
     reviewApiKey: '',
     // The name a reply to a review comment is signed with.
     replyName: '',
+    // A reply in a reviewer's Word file makes its changes tracked.
+    replyTracked: true,
     // How a diff is shown: unified until side by side is picked.
     diffMode: 'unified',
     // How you are shown where your replies are, and in what is sent out.
@@ -6406,6 +6409,172 @@ class DendriteView extends ItemView {
         input.click();
     }
 
+    /**
+     * Ask for a reviewer's returned Word file, then write it back
+     * answered: the replies under their comments, those dealt with
+     * resolved, and its text brought to the cards', tracked or straight.
+     * Written as a new file beside the exports; theirs is not changed.
+     */
+    replyInWord() {
+        const input = this.pageDoc().createElement('input');
+        input.type = 'file';
+        input.accept = '.docx,application/vnd.openxmlformats-' +
+            'officedocument.wordprocessingml.document';
+        input.onchange = async () => {
+            const file = input.files && input.files[0];
+            if (!file) return;
+            const buf = require('buffer').Buffer.from(
+                await file.arrayBuffer());
+            let found;
+            try {
+                found = await this.answersFor(buf);
+            } catch (err) {
+                new Notice(`Dendrite: ${file.name} could not be read as a ` +
+                           `Word file (${err.message}).`);
+                return;
+            }
+            new ReplyWordModal(this, file.name, buf, found).open();
+        };
+        input.click();
+    }
+
+    /**
+     * What to write under each comment of a reviewer's Word file `buf`:
+     * { answers, comments }, `answers` a Map of a comment's id to
+     * { replies, done } as wordreply.writeAnswers takes it, from the
+     * cards where the comment is open and the review log where it was
+     * dealt with; `comments` the file's own comments, threads' first.
+     */
+    async answersFor(buf) {
+        const zlib = require('zlib');
+        const files = new Map(docxLib.readZip(buf, zlib)
+            .map((f) => [f.name, f.data.toString('utf8')]));
+        if (!files.get('word/document.xml')) {
+            throw new Error('no document in it');
+        }
+        const comments = wordreply.comments(files)
+            .filter((c) => !c.parent);
+        const bodies = await this.loadBodies();
+        const open = [];
+        for (const body of bodies.values()) {
+            open.push(...review.reviewItems(body)
+                .filter((it) => it.kind === 'review'));
+        }
+        const log = reviewlog.settled(await readReviewLog(this.app,
+                                                          this.file));
+        const me = this.plugin.settings.presentName ||
+            this.plugin.settings.replyName || 'Me';
+        const answers = wordWriteAnswers(comments, open, log, me,
+                                         this.selfNames());
+        return { answers, comments };
+    }
+
+    /**
+     * A fresh Word export of the whole manuscript to `output`, a path on
+     * disk, as Export to Word or into the template writes it, the tables
+     * not floated, since the reviewer's file keeps its own layout.
+     * Returns null, or what went wrong.
+     */
+    async freshDocx(output) {
+        await this.flush();
+        const ids = core.allNodes(this.root);
+        const bodies = new Map();
+        for (const n of ids) {
+            const f = this.cardFile(n.id);
+            if (f) {
+                bodies.set(n.id, core.splitFrontmatter(
+                    await this.app.vault.cachedRead(f)).body);
+            }
+        }
+        const ms = this.manuscript();
+        let text = core.exportMarkdown(this.root.children,
+                                       (id) => bodies.get(id), ms.headingTop,
+                                       this.numbers(),
+                                       (id) => this.printRoleOf(id),
+                                       this.floatOpts(true));
+        const s = this.plugin.settings;
+        const deps = this.plugin.pandocDeps();
+        const nodePath = require('path');
+        const base = this.app.vault.adapter.getBasePath ?
+            this.app.vault.adapter.getBasePath() : '';
+        const inVault = (p) => (p ? nodePath.join(base, p) : null);
+        const common = {
+            format: 'docx', output,
+            csl: ms.csl ? nodePath.join(base, ms.csl) : null,
+            port: s.zoteroPort, fallbackBib: s.fallbackBib || null,
+            pandoc: s.pandocPath || 'pandoc', resourcePath: base,
+            resolve: (link) => this.linkPath(link),
+        };
+        let result;
+        if (ms.style.template) {
+            const tpl = await this.templateSetup(ms);
+            if (!tpl) return 'no template';
+            text = wordtemplate.plainMath(text).md;
+            result = await pandoc.exportDocument(Object.assign(common, {
+                md: text,
+                style: Object.assign({}, ms.style, {
+                    referenceDocx: tpl.templatePath,
+                    defaults: inVault(ms.style.defaults) }),
+                transform: async (buf) => wordtemplate.fillDocx(buf,
+                    tpl.tplBuf, tpl.opts(true), deps.zlib).buf,
+            }), deps);
+        } else {
+            result = await pandoc.exportDocument(Object.assign(common, {
+                md: text,
+                style: Object.assign({}, ms.style, {
+                    defaults: inVault(ms.style.defaults),
+                    referenceDocx: inVault(ms.style.referenceDocx) }),
+            }), deps);
+        }
+        return result.error || null;
+    }
+
+    /**
+     * Write the reply to `name`, the reviewer's file `buf`, with
+     * `answers`, tracked when `tracked`: beside the exports, as
+     * "<name> reply.docx", then said and shown.
+     */
+    async writeWordReply(name, buf, answers, tracked) {
+        const deps = this.plugin.pandocDeps();
+        const nodePath = require('path');
+        const base = this.app.vault.adapter.getBasePath ?
+            this.app.vault.adapter.getBasePath() : '';
+        const dir = normalizePath((this.file.parent.path === '/' ? '' :
+            this.file.parent.path + '/') + 'exports');
+        if (!this.app.vault.getAbstractFileByPath(dir)) {
+            await this.app.vault.createFolder(dir);
+        }
+        const notice = new Notice('Dendrite: exporting the cards to ' +
+                                  'compare…', 0);
+        const tmp = deps.join(deps.tmpdir(),
+                              `dendrite-${Date.now()}-reply.docx`);
+        let fresh = null;
+        try {
+            const err = await this.freshDocx(tmp);
+            if (err) {
+                notice.hide();
+                new Notice(`Dendrite: ${err}`, 12000);
+                return null;
+            }
+            fresh = await deps.readFile(tmp);
+        } finally {
+            deps.remove(tmp);
+        }
+        const me = this.plugin.settings.presentName ||
+            this.plugin.settings.replyName || 'Me';
+        const out = wordreply.replyDocx(buf, fresh, answers,
+                                        { tracked, author: me }, deps.zlib);
+        const stem = safeName(name.replace(/\.docx$/i, '')) + ' reply';
+        const rel = normalizePath(`${dir}/${stem}.docx`);
+        const output = nodePath.join(base, rel);
+        await deps.writeFile(output, out.buf);
+        notice.hide();
+        new Notice(wordReplyNotice(rel, out.report, tracked),
+                   out.report.left.length ? 0 : 20000);
+        await this.plugin.showExport(rel, output, 'docx');
+        return out.report;
+    }
+
     /** The Google Doc this manuscript is linked to, or null. */
     gdocUrl() {
         const fm = this.file &&
@@ -6525,6 +6694,10 @@ class DendriteView extends ItemView {
         m.addSeparator();
         m.addItem((i) => i.setTitle('Import a Word or JSON file…')
             .onClick(() => this.importReview()));
+        if (Platform.isDesktopApp) {
+            m.addItem((i) => i.setTitle('Reply in a returned Word file…')
+                .onClick(() => this.replyInWord()));
+        }
         m.addItem((i) => i.setTitle('Reviewers…')
             .onClick(() => new ReviewersModal(this).open()));
         m.addItem((i) => i.setTitle('Mark as sent for review…')
@@ -6674,9 +6847,11 @@ class DendriteView extends ItemView {
         const buf = require('buffer').Buffer.from(data);
         const json = /\.json$/i.test(name);
         let items;
+        let layout = [];
         try {
             items = json ? review.readReviewJson(buf.toString('utf8')) :
                 review.readReview(buf, require('zlib'));
+            if (!json) layout = review.layoutChanges(buf, require('zlib'));
         } catch (err) {
             new Notice(`Dendrite: ${name} could not be read as ` +
                        `${json ? 'a review list' : 'a Word file'} ` +
@@ -6685,17 +6860,20 @@ class DendriteView extends ItemView {
         }
         if (!items.length) {
             new Notice(`Dendrite: ${name} has no comments` +
-                       `${json ? '' : ' or tracked changes'}.`);
+                       `${json ? '' : ' or tracked changes'}` +
+                       (layout.length ? ` to bring in; its layout changes ` +
+                        `are not: ${layout.join('; ')}` : '') + '.',
+                       layout.length ? 15000 : undefined);
             return null;
         }
-        return this.reviewModal(name, items);
+        return this.reviewModal(name, items, null, layout);
     }
 
     /**
      * Show review items, each with where in the cards it was found, to
      * choose which to add; `inbox`, the submitted review they came from.
      */
-    async reviewModal(name, items, inbox = null) {
+    async reviewModal(name, items, inbox = null, layout = []) {
         const cards = await this.reviewCards();
         const old = await this.oldVersionCards();
         const doneKeys = new Set(await this.reviewDone());
@@ -6741,7 +6919,8 @@ class DendriteView extends ItemView {
             rows.push({ item, at, dup, done, relink: !!relink,
                         relinkId: relink, use: !!at && !dup && !done });
         }
-        const modal = new ReviewImportModal(this, name, rows, inbox);
+        const modal = new ReviewImportModal(this, name, rows, inbox,
+                                            layout);
         modal.open();
         return modal;
     }
@@ -8500,6 +8679,59 @@ class DendriteView extends ItemView {
         const nodePath = require('path');
         const base = this.app.vault.adapter.getBasePath ?
             this.app.vault.adapter.getBasePath() : '';
+        const tpl = await this.templateSetup(ms);
+        if (!tpl) return;
+        const { templatePath, tplBuf, opts } = tpl;
+        const rel = normalizePath(`${dir}/${name}.docx`);
+        const output = nodePath.join(base, rel);
+        const inVault = (p) => (p ? nodePath.join(base, p) : null);
+        // Simple math as text, in the template's font; the rest said.
+        const math = wordtemplate.plainMath(text);
+        text = math.md;
+        let raw = null;
+        let report = null;
+        const notice = new Notice('Dendrite: filling the template…', 0);
+        const result = await pandoc.exportDocument({
+            md: text, format: 'docx', output,
+            csl: ms.csl ? nodePath.join(base, ms.csl) : null,
+            style: Object.assign({}, st, { referenceDocx: templatePath,
+                                           defaults: inVault(st.defaults) }),
+            port: s.zoteroPort, fallbackBib: s.fallbackBib || null,
+            pandoc: s.pandocPath || 'pandoc', resourcePath: base,
+            resolve: (link) => this.linkPath(link),
+            transform: async (buf) => {
+                raw = buf;
+                const r = wordtemplate.fillDocx(buf, tplBuf, opts(true),
+                                                deps.zlib);
+                report = r.report;
+                return r.buf;
+            },
+        }, deps);
+        return this.afterTemplate({ result, notice, math, report, raw,
+                                    tplBuf, opts, pdf, dir, name, rel,
+                                    output, ms });
+    }
+
+    /** Where a link in a card leads, as a path on disk, or null. */
+    linkPath(link) {
+        const base = this.app.vault.adapter.getBasePath ?
+            this.app.vault.adapter.getBasePath() : '';
+        const f = this.app.metadataCache.getFirstLinkpathDest(link,
+                                                              this.file.path);
+        return f ? require('path').join(base, f.path) : null;
+    }
+
+    /**
+     * The manuscript's Word template, ready to fill: { templatePath,
+     * tplBuf, opts(refs) }, or null, said, where there is none.
+     */
+    async templateSetup(ms) {
+        const s = this.plugin.settings;
+        const st = ms.style;
+        const deps = this.plugin.pandocDeps();
+        const nodePath = require('path');
+        const base = this.app.vault.adapter.getBasePath ?
+            this.app.vault.adapter.getBasePath() : '';
         const home = this.file.parent && this.file.parent.path !== '/' ?
             this.file.parent.path + '/' : '';
         const tf = this.app.vault.getAbstractFileByPath(
@@ -8508,7 +8740,7 @@ class DendriteView extends ItemView {
         if (!(tf instanceof TFile)) {
             new Notice(`Dendrite: no template at ${st.template}, from the ` +
                        'index\'s folder or the vault root.', 10000);
-            return;
+            return null;
         }
         const templatePath = nodePath.join(base, tf.path);
         const tplBuf = await deps.readFile(templatePath);
@@ -8533,35 +8765,22 @@ class DendriteView extends ItemView {
             fontSize: st.fontSize, defaultStyles,
             references: refs ? 'inline' : 'none',
             referencesTitle: st.referencesTitle || 'References' });
-        const rel = normalizePath(`${dir}/${name}.docx`);
-        const output = nodePath.join(base, rel);
-        const inVault = (p) => (p ? nodePath.join(base, p) : null);
-        // Simple math as text, in the template's font; the rest said.
-        const math = wordtemplate.plainMath(text);
-        text = math.md;
-        let raw = null;
-        let report = null;
-        const notice = new Notice('Dendrite: filling the template…', 0);
-        const result = await pandoc.exportDocument({
-            md: text, format: 'docx', output,
-            csl: ms.csl ? nodePath.join(base, ms.csl) : null,
-            style: Object.assign({}, st, { referenceDocx: templatePath,
-                                           defaults: inVault(st.defaults) }),
-            port: s.zoteroPort, fallbackBib: s.fallbackBib || null,
-            pandoc: pandocPath, resourcePath: base,
-            resolve: (link) => {
-                const f = this.app.metadataCache.getFirstLinkpathDest(
-                    link, this.file.path);
-                return f ? nodePath.join(base, f.path) : null;
-            },
-            transform: async (buf) => {
-                raw = buf;
-                const r = wordtemplate.fillDocx(buf, tplBuf, opts(true),
-                                                deps.zlib);
-                report = r.report;
-                return r.buf;
-            },
-        }, deps);
+        return { templatePath, tplBuf, opts };
+    }
+
+    /**
+     * A filled template written, `args` what exportTemplate made: said,
+     * and as a PDF when asked, floated and measured.
+     */
+    async afterTemplate(args) {
+        const { result, notice, math, report, raw, tplBuf, opts, pdf, dir,
+                name, rel, output, ms } = args;
+        const st = ms.style;
+        const deps = this.plugin.pandocDeps();
+        const nodePath = require('path');
+        const base = this.app.vault.adapter.getBasePath ?
+            this.app.vault.adapter.getBasePath() : '';
+        let pages = null;
         if (result.error) {
             notice.hide();
             new Notice(`Dendrite: ${result.error}`, 12000);
@@ -8585,7 +8804,7 @@ class DendriteView extends ItemView {
             return;
         }
         const pdfRel = normalizePath(`${dir}/${name}.pdf`);
-        let pages = await this.pdfOf(output, nodePath.join(base, dir), deps);
+        pages = await this.pdfOf(output, nodePath.join(base, dir), deps);
         if (!pages) {
             notice.hide();
             new Notice('Dendrite: wrote the Word file, but LibreOffice ' +
@@ -11545,13 +11764,138 @@ class ReviseModal extends Modal {
     onClose() { this.contentEl.empty(); }
 }
 
+/**
+ * What goes under each of a Word file's comments `comments`: a Map of
+ * its id to { replies, done }. `open` the comments in the cards, `log`
+ * those dealt with, as the review log keeps them; a comment is found in
+ * either by its keys. A reply goes to the reviewer unless it is
+ * Claude's, or addressed to someone else; one signed with one of
+ * `selfNames` is signed `me`.
+ */
+function wordWriteAnswers(comments, open, log, me, selfNames) {
+    const out = new Map();
+    const keysOf = (c) => new Set(review.reviewKeys({ kind: 'comment',
+        author: c.author, text: c.text }));
+    const pick = (c, replies) => (replies || []).filter((r) =>
+        String(r.author || '').toLowerCase() !== 'claude')
+        .map((r) => {
+            const a = review.addressed(r);
+            if (a.to && a.to.toLowerCase() !==
+                String(c.author || '').toLowerCase()) return null;
+            return { author: selfNames.has(r.author) ? me : r.author,
+                     date: r.date, text: a.to ? a.text : r.text };
+        }).filter((r) => r && r.text.trim());
+    for (const c of comments) {
+        const keys = keysOf(c);
+        const has = (ks) => (ks || []).some((k) => keys.has(k));
+        const now = open.find((it) => has(review.reviewKeys(it)));
+        if (now) {
+            out.set(c.id, { replies: pick(c, now.replies), done: false });
+            continue;
+        }
+        const was = log.find((e) => has(e.keys));
+        if (was) out.set(c.id, { replies: pick(c, was.replies), done: true });
+    }
+    return out;
+}
+
+/** What a reply in a Word file did, said. */
+function wordReplyNotice(rel, r, tracked) {
+    const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+    const lines = [`Dendrite: wrote ${rel}: ` +
+        `${n(r.replies, 'reply', 'replies')}, ` +
+        `${n(r.resolved, 'comment', 'comments')} resolved; ` +
+        `${n(r.changed, 'paragraph', 'paragraphs')} changed, ` +
+        `${r.added} added, ${r.removed} taken out` +
+        (r.changed + r.added + r.removed ?
+            (tracked ? ', as tracked changes.' : ', made straight.') : '.')];
+    if (r.left.length) {
+        lines.push(`Not carried, to make by hand: ` + r.left.map((x) =>
+            `“${x.text}” (${x.why})`).join('; ') + '.');
+    }
+    return lines.join(' ');
+}
+
+/**
+ * Before a reply is written in a reviewer's Word file: what it will
+ * hold, and whether the text's changes go in tracked or straight.
+ */
+class ReplyWordModal extends Modal {
+    constructor(view, name, buf, found) {
+        super(view.app);
+        this.view = view;
+        this.name = name;
+        this.buf = buf;
+        this.answers = found.answers;
+        this.comments = found.comments;
+    }
+
+    onOpen() {
+        const { contentEl, view } = this;
+        const s = view.plugin.settings;
+        this.titleEl.setText(`Reply in ${this.name}`);
+        const answered = [...this.answers.values()];
+        const replies = answered.reduce((k, a) => k + a.replies.length, 0);
+        const done = answered.filter((a) => a.done).length;
+        const unknown = this.comments.length - this.answers.size;
+        contentEl.createEl('p', { text: `${this.comments.length} comment` +
+            `${this.comments.length === 1 ? '' : 's'} in the file; ` +
+            `${replies} repl${replies === 1 ? 'y' : 'ies'} to write under ` +
+            `them, ${done} resolved` +
+            (unknown ? `, ${unknown} not found in the cards or the ` +
+                'review log, left as they are' : '') + '. ' +
+            'The text is brought to what the cards print now, in the ' +
+            'reviewer\'s own file, so their formatting and layout stay. ' +
+            'Replies addressed to someone else, and Claude\'s, are not ' +
+            'sent. Written as a new file beside the exports.' });
+        const rows = contentEl.createDiv({ cls: 'dendrite-review-rows' });
+        for (const c of this.comments) {
+            const a = this.answers.get(c.id);
+            const row = rows.createDiv({ cls: 'dendrite-reply-word-row' });
+            row.createEl('b', { text: `${c.author}: ` });
+            row.createSpan({ text: c.text });
+            row.createDiv({ cls: 'dendrite-reply-word-what', text: !a ?
+                'Not found in the cards: left as it is.' :
+                (a.replies.length ? a.replies.map((r) =>
+                    `${r.author}: ${r.text}`).join(' · ') : 'No reply.') +
+                (a.done ? ' Resolved.' : '') });
+        }
+        let tracked = s.replyTracked !== false;
+        new Setting(contentEl).setName('Changes to the text')
+            .setDesc('Tracked, for the reviewer to accept or reject, or ' +
+                     'made straight.')
+            .addDropdown((d) => d
+                .addOption('tracked', 'As tracked changes')
+                .addOption('straight', 'Made straight')
+                .setValue(tracked ? 'tracked' : 'straight')
+                .onChange(async (v) => {
+                    tracked = v === 'tracked';
+                    s.replyTracked = tracked;
+                    if (view.plugin.saveSettings) {
+                        await view.plugin.saveSettings();
+                    }
+                }));
+        new Setting(contentEl).addButton((b) => b.setButtonText('Write reply')
+            .setCta().onClick(async () => {
+                this.close();
+                await view.writeWordReply(this.name, this.buf, this.answers,
+                                          tracked);
+            }));
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+}
+
 class ReviewImportModal extends Modal {
-    constructor(view, name, rows, inbox = null) {
+    constructor(view, name, rows, inbox = null, layout = []) {
         super(view.app);
         this.view = view;
         this.name = name;
         this.rows = rows;
         this.inbox = inbox;
+        this.layout = layout;
     }
 
     onOpen() {
@@ -11584,6 +11928,17 @@ class ReviewImportModal extends Modal {
             'be applied from its card later; one whose passage has ' +
             'changed since comes in as a comment. Nothing is written ' +
             'until you add them, and Ctrl+Z on the board undoes it.' });
+        // Layout changed in the file, which no card holds: said, so it is
+        // not lost without a word.
+        if (this.layout.length) {
+            const box = contentEl.createDiv({ cls: 'dendrite-review-layout' });
+            box.createEl('p', { text: 'Tracked changes in the file not ' +
+                'brought in, since no card holds them, listed so none goes ' +
+                'unseen; the export sets layout, and the rest can be ' +
+                'made by hand:' });
+            const ul = box.createEl('ul');
+            for (const x of this.layout) ul.createEl('li', { text: x });
+        }
         const list = contentEl.createDiv({ cls: 'dendrite-review-rows' });
         const active = view.active && view.byId.get(view.active);
         const count = () => rows.filter((x) => x.use).length;
@@ -13043,6 +13398,8 @@ module.exports = class DendritePlugin extends Plugin {
             (v) => v.nextFlagged(1, (i) => i.prints && i.own === 'draft'));
         viewCommand('toggle-printed', 'Show only the cards that print, ' +
             'or every card', false, (v) => v.togglePrintOnly());
+        viewCommand('reply-in-word', 'Reply in a returned Word file', false,
+            (v) => v.replyInWord());
         viewCommand('import-review', 'Import review comments from a ' +
             'returned Word file or a JSON list', false,
             (v) => v.importReview());
@@ -14946,6 +15303,8 @@ module.exports.DendriteComments = DendriteComments;
 module.exports.DendriteFloats = DendriteFloats;
 module.exports.tidyKept = tidyKept;
 module.exports.readReviewLog = readReviewLog;
+module.exports.wordWriteAnswers = wordWriteAnswers;
+module.exports.wordReplyNotice = wordReplyNotice;
 module.exports.floatInventory = floatInventory;
 module.exports.paneWidths = paneWidths;
 module.exports.DendriteSettings = DendriteSettings;

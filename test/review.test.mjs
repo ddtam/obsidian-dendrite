@@ -2023,3 +2023,129 @@ test('a mention is read as the longest name known from the comments and ' +
                      { to: 'Joshua,', text: 'right?' }, 'unknown: one word');
     assert.equal(to('No mention.').to, null);
 });
+
+test('code, bold and italic a reviewer set come in as markdown: on text ' +
+     'that was there, as a change to it; in text they added, in it',
+     () => {
+    const by = 'w:id="1" w:author="Josh" w:date="2026-11-02T10:00:00Z"';
+    const mono = '<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/>';
+    const body =
+        '<w:p>' + run('Data held on ') +
+        `<w:r><w:rPr>${mono}<w:rPrChange ${by}><w:rPr/></w:rPrChange>` +
+        '</w:rPr><w:t>/pro</w:t></w:r>' +
+        `<w:r><w:rPr>${mono}<w:rPrChange ${by}><w:rPr/></w:rPrChange>` +
+        '</w:rPr><w:t>ject</w:t></w:r>' +
+        run(' is ') +
+        `<w:r><w:rPr><w:b/><w:rPrChange ${by}><w:rPr/></w:rPrChange>` +
+        '</w:rPr><w:t>kept</w:t></w:r>' + run('.') +
+        `<w:ins ${by}>` + run(' Use ') +
+        `<w:r><w:rPr>${mono}</w:rPr><w:t>/scratch</w:t></w:r>` +
+        run(' too.') + '</w:ins></w:p>' +
+        '<w:p><w:pPr><w:pStyle w:val="TableCaption"/></w:pPr>' +
+        `<w:r><w:rPr><w:b/><w:rPrChange ${by}><w:rPr/></w:rPrChange>` +
+        '</w:rPr><w:t>Table 2.</w:t></w:r>' + run(' Sizes.') + '</w:p>';
+    const buf = d.writeZip([{ name: 'word/document.xml',
+        data: Buffer.from(`<w:document ${W}><w:body>${body}` +
+                          '</w:body></w:document>') }], zlib);
+    const items = r.readReview(buf, zlib);
+    assert.deepEqual(items.map((x) => [x.quote, x.insert]), [
+        ['/project', '`/project`'],
+        ['kept', '**kept**'],
+        ['', ' Use `/scratch` too.']], 'a caption\'s label left alone');
+    const cards = [{ id: 'A', text: 'Data held on /project is kept.' }];
+    assert.equal(r.locate(items[0], cards).how, 'exact');
+});
+
+test('layout a reviewer changed, which no card holds, is listed: each ' +
+     'table by its header, and paragraphs and other formatting counted',
+     () => {
+    const by = 'w:id="1" w:author="Josh" w:date="2026-11-02T10:00:00Z"';
+    const cell = (t) => '<w:tc><w:tcPr><w:tcW w:w="900" w:type="dxa"/>' +
+        `<w:tcPrChange ${by}><w:tcPr><w:tcW w:w="1200" w:type="dxa"/>` +
+        '</w:tcPr></w:tcPrChange></w:tcPr><w:p><w:pPr><w:spacing ' +
+        `w:before="0"/><w:pPrChange ${by}><w:pPr><w:spacing ` +
+        'w:before="30"/></w:pPr></w:pPrChange></w:pPr>' + run(t) +
+        '</w:p></w:tc>';
+    const body = '<w:tbl><w:tblPr><w:tblW w:w="7980" w:type="dxa"/>' +
+        `<w:tblPrChange ${by}><w:tblPr><w:tblW w:w="5000" w:type="pct"/>` +
+        '</w:tblPr></w:tblPrChange></w:tblPr>' +
+        `<w:tr>${cell('Data')}${cell('Patients')}</w:tr>` +
+        `<w:tr>${cell('WGS')}${cell('175')}</w:tr></w:tbl>` +
+        `<w:p><w:pPr><w:ind w:firstLine="720"/><w:pPrChange ${by}><w:pPr>` +
+        '<w:ind w:left="720"/></w:pPr></w:pPrChange></w:pPr>' +
+        run('Storage Details') + '</w:p>' +
+        '<w:p><w:r><w:rPr><w:sz w:val="20"/>' +
+        `<w:rPrChange ${by}><w:rPr/></w:rPrChange></w:rPr>` +
+        '<w:t>small</w:t></w:r></w:p>';
+    const buf = d.writeZip([{ name: 'word/document.xml',
+        data: Buffer.from(`<w:document ${W}><w:body>${body}` +
+                          '</w:body></w:document>') }], zlib);
+    assert.deepEqual(r.layoutChanges(buf, zlib), [
+        'Table “Data | Patients”: its width, column widths and cell ' +
+            'spacing changed',
+        'Spacing, indent, style or numbering changed on 1 paragraph ' +
+            'outside tables',
+        'Other text formatting, such as size or colour, changed on 1 run']);
+});
+
+test('every tracked change the import does not bring in is listed: ' +
+     'breaks, page setup, numbering, cells, other parts, spaces, unknown',
+     () => {
+    const by = 'w:id="1" w:author="Josh" w:date="2026-11-02T10:00:00Z"';
+    const body =
+        // A paragraph split, its new break the only change.
+        `<w:p><w:pPr><w:rPr><w:ins ${by}/></w:rPr></w:pPr>` +
+        run('First half') + '</w:p><w:p>' + run('second half.') + '</w:p>' +
+        // A space taken out of an empty line.
+        `<w:p><w:del ${by}><w:r><w:delText xml:space="preserve"> ` +
+        '</w:delText></w:r></w:del></w:p>' +
+        // Numbering changed.
+        `<w:p><w:pPr><w:numPr><w:numId w:val="2"/></w:numPr><w:pPrChange ` +
+        `${by}><w:pPr/></w:pPrChange></w:pPr>` + run('Item') + '</w:p>' +
+        // A cell merged.
+        '<w:tbl><w:tr><w:tc><w:tcPr><w:cellMerge w:id="2" w:author="J" ' +
+        'w:vMerge="cont"/></w:tcPr><w:p>' + run('A') + '</w:p></w:tc>' +
+        '</w:tr></w:tbl>' +
+        // A kind Dendrite does not read.
+        `<w:p><w:customXmlInsRangeStart ${by}/>` + run('X') + '</w:p>' +
+        `<w:sectPr><w:pgMar w:top="1000"/><w:sectPrChange ${by}>` +
+        '<w:sectPr/></w:sectPrChange></w:sectPr>';
+    const foot = `<w:footnotes ${W}><w:footnote w:id="1"><w:p>` +
+        `<w:ins ${by}>` + run('see also') + '</w:ins></w:p></w:footnote>' +
+        '</w:footnotes>';
+    const buf = d.writeZip([
+        { name: 'word/document.xml', data: Buffer.from(
+            `<w:document ${W}><w:body>${body}</w:body></w:document>`) },
+        { name: 'word/footnotes.xml', data: Buffer.from(foot) }], zlib);
+    assert.deepEqual(r.layoutChanges(buf, zlib), [
+        'Table “A”: cells inserted, deleted or merged',
+        'Spacing, indent, style or numbering changed on 1 paragraph ' +
+            'outside tables',
+        '1 paragraph break added or removed with no text changed beside ' +
+            'it: a blank line, or a paragraph split or joined',
+        'Page setup changed: margins, page size, columns or orientation',
+        '1 space taken out of an empty line, the template\'s spacing',
+        '1 tracked change in the footnotes, endnotes, headers or footers',
+        '1 tracked change of a kind Dendrite does not read ' +
+            '(customXmlInsRangeStart)']);
+});
+
+test('a comment anchored outside the body, as on a footnote, is listed ' +
+     'as not brought in', () => {
+    const by = 'w:author="Josh" w:date="2026-11-02T10:00:00Z"';
+    const comments = `<w:comments ${W}><w:comment w:id="7" ${by}><w:p>` +
+        run('Cite the 2021 paper.') + '</w:p></w:comment></w:comments>';
+    const foot = `<w:footnotes ${W}><w:footnote w:id="1"><w:p>` +
+        '<w:commentRangeStart w:id="7"/>' + run('Smith 2020') +
+        '<w:commentRangeEnd w:id="7"/><w:r><w:commentReference w:id="7"/>' +
+        '</w:r></w:p></w:footnote></w:footnotes>';
+    const buf = d.writeZip([
+        { name: 'word/document.xml', data: Buffer.from(`<w:document ${W}>` +
+            '<w:body><w:p>' + run('Text.') + '</w:p></w:body></w:document>') },
+        { name: 'word/comments.xml', data: Buffer.from(comments) },
+        { name: 'word/footnotes.xml', data: Buffer.from(foot) }], zlib);
+    assert.deepEqual(r.readReview(buf, zlib), []);
+    assert.deepEqual(r.layoutChanges(buf, zlib), ['1 comment on the ' +
+        'footnotes, endnotes, headers or footers, by Josh: “Cite the 2021 ' +
+        'paper.”']);
+});

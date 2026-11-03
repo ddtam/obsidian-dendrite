@@ -1741,6 +1741,18 @@ var require_review = __commonJS({
     }
     var day = (iso) => iso ? iso.slice(0, 10) : "";
     var SECTION_NUMBER = /^\s*\d+(?:\.\d+)*\.?\s+/;
+    var MONO = /courier|consolas|mono|menlo|monaco|source code/i;
+    function marked(t, f) {
+      const lead = /^\s*/.exec(t)[0];
+      const trail = /\s*$/.exec(t.slice(lead.length))[0];
+      let core2 = t.slice(lead.length, t.length - trail.length);
+      if (!core2) return t;
+      if (f.mono) core2 = `\`${core2}\``;
+      if (f.b) core2 = `**${core2}**`;
+      if (f.i) core2 = `*${core2}*`;
+      return lead + core2 + trail;
+    }
+    var joined = (t) => t.replace(/``|\*\*\*\*/g, "");
     function readBody(xml) {
       const paras = [];
       const ranges = /* @__PURE__ */ new Map();
@@ -1749,19 +1761,24 @@ var require_review = __commonJS({
       let del = null;
       let inText = false;
       let cells = 0;
+      let run = null;
+      let rPrDepth = 0;
+      let inOld = false;
       const pos = () => ({ p: paras.length, o: para ? para.text.length : 0 });
+      const plain = () => para && (para.heading || para.caption);
       const addText = (t) => {
         if (!para) return;
         if (ins) {
           const last = para.changes[para.changes.length - 1];
           const at = para.text.length;
+          const added = run && !plain() ? marked(t, run.now) : t;
           if (last && last.author === ins.author && last.end === at) {
-            last.insert += t;
+            last.insert = joined(last.insert + added);
           } else {
             para.changes.push({
               start: at,
               end: at,
-              insert: t,
+              insert: added,
               author: ins.author,
               date: ins.date
             });
@@ -1769,6 +1786,29 @@ var require_review = __commonJS({
           return;
         }
         const start = para.text.length;
+        if (run && run.was && !plain()) {
+          const f = {
+            mono: run.now.mono && !run.was.mono,
+            b: run.now.b && !run.was.b,
+            i: run.now.i && !run.was.i
+          };
+          if (f.mono || f.b || f.i) {
+            const key = `${+!!f.mono}${+!!f.b}${+!!f.i}`;
+            const last = para.formats[para.formats.length - 1];
+            if (last && last.key === key && last.end === start && last.author === run.author) {
+              last.end = start + t.length;
+            } else {
+              para.formats.push({
+                start,
+                end: start + t.length,
+                key,
+                f,
+                author: run.author,
+                date: run.date
+              });
+            }
+          }
+        }
         para.text += t;
         if (del) {
           const last = para.changes[para.changes.length - 1];
@@ -1809,11 +1849,53 @@ var require_review = __commonJS({
         const { name, close, empty, attrs } = tk;
         if (name === "w:p") {
           if (close) {
+            if (para) {
+              for (const x of para.formats) {
+                para.changes.push({
+                  start: x.start,
+                  end: x.end,
+                  insert: marked(
+                    para.text.slice(x.start, x.end),
+                    x.f
+                  ),
+                  author: x.author,
+                  date: x.date
+                });
+              }
+              para.changes.sort((a, b) => a.start - b.start);
+              delete para.formats;
+            }
             if (para && para.heading) unnumber(para, paras.length);
             if (para) paras.push(para);
             para = null;
           } else if (!empty) {
-            para = { text: "", changes: [], ...cells ? { cell: true } : {} };
+            para = {
+              text: "",
+              changes: [],
+              formats: [],
+              ...cells ? { cell: true } : {}
+            };
+          }
+        } else if (name === "w:r" && !empty) {
+          run = close ? null : { now: {}, was: null };
+          rPrDepth = 0;
+          inOld = false;
+        } else if (name === "w:rPr" && run && !empty) {
+          rPrDepth += close ? -1 : 1;
+        } else if (name === "w:rPrChange" && run && !empty) {
+          inOld = !close;
+          if (!close) {
+            run.was = {};
+            run.author = attr(attrs, "w:author");
+            run.date = day(attr(attrs, "w:date"));
+          }
+        } else if (run && rPrDepth > 0 && !close && (name === "w:rFonts" || name === "w:b" || name === "w:i")) {
+          const to = inOld ? run.was : run.now;
+          const on = !/^(0|false|off)$/.test(attr(attrs, "w:val") || "");
+          if (name === "w:rFonts") {
+            if (MONO.test(attr(attrs, "w:ascii") || "") || MONO.test(attr(attrs, "w:hAnsi") || "")) to.mono = true;
+          } else if (on) {
+            to[name === "w:b" ? "b" : "i"] = true;
           }
         } else if (name === "w:tc" && !empty) {
           cells += close ? -1 : 1;
@@ -1821,6 +1903,7 @@ var require_review = __commonJS({
           if (/^(heading\s*\d|title)$/i.test(attr(attrs, "w:val"))) {
             para.heading = true;
           }
+          if (/caption/i.test(attr(attrs, "w:val"))) para.caption = true;
         } else if (name === "w:ins" || name === "w:moveTo") {
           if (!empty) {
             ins = close ? null : {
@@ -1988,6 +2071,118 @@ var require_review = __commonJS({
         it.insert = NEW_PARAGRAPH + it.insert;
       }
       return true;
+    }
+    var TRACKED = /* @__PURE__ */ new Set([
+      "ins",
+      "del",
+      "moveFrom",
+      "moveTo",
+      "moveFromRangeStart",
+      "moveFromRangeEnd",
+      "moveToRangeStart",
+      "moveToRangeEnd",
+      "rPrChange",
+      "pPrChange",
+      "tblPrChange",
+      "tblPrExChange",
+      "tblGridChange",
+      "trPrChange",
+      "tcPrChange",
+      "sectPrChange",
+      "numberingChange",
+      "cellIns",
+      "cellDel",
+      "cellMerge"
+    ]);
+    var TRACKED_LIKE = new RegExp("^(?:ins|del)$|(?:Ins|Del|Change|Merge)(?:Range(?:Start|End))?$");
+    function layoutChanges(buf, zlib) {
+      const files = new Map(docx.readZip(buf, zlib).map((f) => [f.name, f.data.toString("utf8")]));
+      const body = files.get("word/document.xml") || "";
+      const out = [];
+      const textIn = (x) => [...x.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map((m) => decode(m[1])).join("");
+      const tables = body.match(/<w:tbl>[^]*?<\/w:tbl>/g) || [];
+      for (const t of tables) {
+        const parts = [];
+        if (/<w:tblPrChange\b/.test(t)) parts.push("its width");
+        if (/<w:(?:tblGridChange|tcPrChange)\b/.test(t)) {
+          parts.push("column widths");
+        }
+        if (/<w:trPrChange\b/.test(t)) parts.push("row settings");
+        if (/<w:pPrChange\b/.test(t)) parts.push("cell spacing");
+        if (/<w:(?:cellIns|cellDel|cellMerge)\b/.test(t)) {
+          parts.push("cells inserted, deleted or merged");
+        }
+        if (!parts.length) continue;
+        const first = (/<w:tr\b[^>]*>[^]*?<\/w:tr>/.exec(t) || [""])[0];
+        const head = (first.match(/<w:tc>[^]*?<\/w:tc>/g) || []).map((c) => textIn(c).trim()).filter(Boolean);
+        const name = head.slice(0, 3).join(" | ") + (head.length > 3 ? " \u2026" : "");
+        const list = parts.length > 1 ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1] : parts[0];
+        out.push(`Table \u201C${name}\u201D: ${list}` + (/ merged$/.test(list) ? "" : " changed"));
+      }
+      const rest = body.replace(/<w:tbl>[^]*?<\/w:tbl>/g, "");
+      const n = (rest.match(/<w:pPrChange\b/g) || []).length;
+      const s = (k, one) => k === 1 ? one : one + "s";
+      if (n) {
+        out.push(`Spacing, indent, style or numbering changed on ${n} ${s(n, "paragraph")} outside tables`);
+      }
+      let breaks = 0;
+      for (const p of body.match(/<w:p\b[^>]*>[^]*?<\/w:p>/g) || []) {
+        const pPr = (/<w:pPr>[^]*?<\/w:pPr>/.exec(p) || [""])[0];
+        if (/<w:(?:ins|del)\b[^>]*\/>/.test(pPr) && !/<w:(?:ins|del|moveFrom|moveTo)\b[^>]*(?<!\/)>/.test(
+          p.slice(pPr.length)
+        )) breaks++;
+      }
+      if (breaks) {
+        out.push(`${breaks} paragraph ${s(breaks, "break")} added or removed with no text changed beside ${breaks === 1 ? "it" : "them"}: a blank line, or a paragraph split or joined`);
+      }
+      if (/<w:sectPrChange\b/.test(body)) {
+        out.push("Page setup changed: margins, page size, columns or orientation");
+      }
+      let other = 0;
+      const changed = new RegExp("<w:r\\b[^>]*><w:rPr>((?:(?!</w:rPr>)[^])*?)<w:rPrChange\\b[^>]*>([^]*?)</w:rPrChange>", "g");
+      for (const m of body.matchAll(changed)) {
+        const flags = (x) => ({
+          mono: MONO.test(x),
+          b: /<w:b\s*\/>/.test(x),
+          i: /<w:i\s*\/>/.test(x)
+        });
+        const now = flags(m[1]);
+        const was = flags(m[2]);
+        if (!(now.mono && !was.mono) && !(now.b && !was.b) && !(now.i && !was.i)) other++;
+      }
+      if (other) {
+        out.push(`Other text formatting, such as size or colour, changed on ${other} ${s(other, "run")}`);
+      }
+      const spaces = readBody(body).paras.reduce((k, p) => k + (p.text.trim() ? 0 : p.changes.filter((c) => !c.insert).length), 0);
+      if (spaces) {
+        out.push(`${spaces} ${s(spaces, "space")} taken out of ${spaces === 1 ? "an empty line" : "empty lines"}, the template's spacing`);
+      }
+      let elsewhere = 0;
+      for (const [name, xml] of files) {
+        if (!/^word\/(?:footnotes|endnotes|header\d*|footer\d*)\.xml$/.test(name)) continue;
+        elsewhere += (xml.match(new RegExp("<w:(?:ins|del|moveFrom|moveTo)\\b[^>]*(?<!/)>|<w:\\w+PrChange\\b", "g")) || []).length;
+      }
+      if (elsewhere) {
+        out.push(`${elsewhere} tracked ${s(elsewhere, "change")} in the footnotes, endnotes, headers or footers`);
+      }
+      const anchored = new Set([...body.matchAll(
+        /<w:comment(?:RangeStart|Reference)\b[^>]*w:id="([^"]+)"/g
+      )].map((m) => m[1]));
+      const off = [...readComments(files.get("word/comments.xml"))].filter(([id]) => !anchored.has(id));
+      if (off.length) {
+        out.push(`${off.length} ${s(off.length, "comment")} on the footnotes, endnotes, headers or footers, ` + off.map(([, c]) => `by ${c.author}: \u201C${c.text}\u201D`).join("; "));
+      }
+      const unknown = /* @__PURE__ */ new Map();
+      for (const m of body.matchAll(/<w:([A-Za-z]+)\b/g)) {
+        if (TRACKED_LIKE.test(m[1]) && !TRACKED.has(m[1])) {
+          unknown.set(m[1], (unknown.get(m[1]) || 0) + 1);
+        }
+      }
+      if (unknown.size) {
+        const k = [...unknown.values()].reduce((a, b) => a + b, 0);
+        out.push(`${k} tracked ${s(k, "change")} of a kind Dendrite does not read (${[...unknown.keys()].join(", ")})`);
+      }
+      return out;
     }
     function protoFields(buf) {
       const out = [];
@@ -3586,8 +3781,8 @@ var require_review = __commonJS({
           return `<span class="dendrite-review-from dendrite-rid-${openId}${it.kind === "suggest" ? " is-suggest" : ""}${tintOf(it.body)}"></span>`;
         }
         item++;
-        const marked = id !== void 0 && byId.has(id);
-        if (!kept(item)) return marked ? "" : passage || "";
+        const marked2 = id !== void 0 && byId.has(id);
+        if (!kept(item)) return marked2 ? "" : passage || "";
         const g = kind === "review" ? googleOf({ kind, text: (HEAD.exec(body.replace(/^\s+/, "")) || [])[3] || body }) : null;
         let num;
         if (g && numbers.has(g)) num = numbers.get(g);
@@ -3598,18 +3793,18 @@ var require_review = __commonJS({
         const h = HEAD.exec(body.replace(/^\s+/, ""));
         const text = h ? h[3] : body.trim();
         const tint = tintOf(body);
-        const rid = marked ? ` dendrite-rid-${id}` : "";
+        const rid = marked2 ? ` dendrite-rid-${id}` : "";
         const cls = (kind === "suggest" ? " is-suggest" : "") + tint;
         const sup = `<sup class="dendrite-review-n${cls}${rid} dendrite-item-${item}">${num}</sup>`;
-        const upto = marked ? `<span class="dendrite-review-upto${rid}"></span>` : "";
-        if (kind === "suggest" && (marked || !passage)) {
-          if (marked && !text) return upto + sup;
-          if (!marked && ROW.test(text)) return sup;
+        const upto = marked2 ? `<span class="dendrite-review-upto${rid}"></span>` : "";
+        if (kind === "suggest" && (marked2 || !passage)) {
+          if (marked2 && !text) return upto + sup;
+          if (!marked2 && ROW.test(text)) return sup;
           const lead = /^\s*/.exec(text)[0];
-          const gap = lead && marked ? `<span class="dendrite-review-lead">${lead}</span>` : lead;
+          const gap = lead && marked2 ? `<span class="dendrite-review-lead">${lead}</span>` : lead;
           return `${upto}${gap}<span class="dendrite-review-new${tint}${rid}">${text.slice(lead.length)}</span>${sup}`;
         }
-        if (marked) return upto + sup;
+        if (marked2) return upto + sup;
         if (!passage) return sup;
         if (kind === "suggest") {
           const added = text ? `<span class="dendrite-review-new${tint}">${text}</span>` : "";
@@ -4070,6 +4265,7 @@ var require_review = __commonJS({
       mentionList,
       setOwnNames,
       learnNames,
+      layoutChanges,
       stripReview,
       renderMarkdown,
       decorate,
@@ -6957,7 +7153,8 @@ var require_wordtemplate = __commonJS({
     var isPara = (x) => x.startsWith("<w:p>") || x.startsWith("<w:p ");
     var isTable = (x) => x.startsWith("<w:tbl");
     function settled(xml) {
-      return xml.replace(/<w:(\w+Change)\b[^>]*\/>/g, "").replace(/<w:(\w+Change)\b[^>]*>[^]*?<\/w:\1>/g, "").replace(/<w:del\b[^>]*>[^]*?<\/w:del>/g, "").replace(/<w:ins\b[^>]*>|<\/w:ins>/g, "");
+      const markGone = new RegExp("<w:pPr>(?:(?!</w:pPr>)[^])*<w:rPr>(?:(?!</w:rPr>)[^])*<w:del\\b[^>]*/>");
+      return xml.replace(/<w:(\w+Change)\b[^>]*\/>/g, "").replace(/<w:(\w+Change)\b[^>]*>[^]*?<\/w:\1>/g, "").replace(/<w:(del|moveFrom)\b[^>]*(?<!\/)>[^]*?<\/w:\1>/g, "").replace(/<w:p\b[^>]*>[^]*?<\/w:p>/g, (para) => markGone.test(para) && !textOf(para).trim() && !/<w:drawing|<w:pict|<w:sectPr/.test(para) ? "" : para).replace(/<w:(ins|del|moveFrom|moveTo)\b[^>]*\/>/g, "").replace(/<w:(?:move(?:From|To)Range(?:Start|End))\b[^>]*\/>/g, "").replace(/<w:(?:ins|moveTo)\b[^>]*(?<!\/)>|<\/w:(?:ins|moveTo)>/g, "");
     }
     function italicRun(r) {
       const p = /<w:rPr>([^]*?)<\/w:rPr>/.exec(r);
@@ -7047,7 +7244,8 @@ var require_wordtemplate = __commonJS({
           if (emptyPara(b) && !/<w:sectPr/.test(b)) {
             const last = items[items.length - 1];
             if (last && last.kind !== "gap") {
-              items.push({ kind: "gap", xml: b });
+              const xml = b.replace(/<w:keepNext\b[^>]*\/>/g, "");
+              items.push({ kind: "gap", xml });
             }
             continue;
           }
@@ -7288,7 +7486,10 @@ var require_wordtemplate = __commonJS({
       return tbl.replace(/<w:tr\b[^>]*>[^]*?<\/w:tr>/g, (tr) => {
         const i = k++;
         const flags = "<w:cantSplit/>" + (i === 0 ? "<w:tblHeader/>" : "");
-        let out = tr.replace(/<w:(?:cantSplit|tblHeader)\b[^>]*\/>/g, "");
+        let out = tr.replace(
+          /<w:(?:cantSplit|tblHeader|keepNext)\b[^>]*\/>/g,
+          ""
+        );
         if (/<w:trPr>/.test(out)) {
           out = out.replace(/<w:trPr>[^]*?<\/w:trPr>/, (pr) => {
             const at = pr.search(
@@ -8094,6 +8295,746 @@ var require_wordtemplate = __commonJS({
   }
 });
 
+// src/wordreply.js
+var require_wordreply = __commonJS({
+  "src/wordreply.js"(exports2, module2) {
+    "use strict";
+    var docx = require_docx();
+    var ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+    function decode(s) {
+      return s.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (m, e) => {
+        if (e[0] === "#") {
+          const n = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+          return String.fromCodePoint(n);
+        }
+        return ENTITIES[e] !== void 0 ? ENTITIES[e] : m;
+      });
+    }
+    var esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    function attr(attrs, name) {
+      const m = new RegExp(`\\b${name}="([^"]*)"`).exec(attrs);
+      return m ? decode(m[1]) : null;
+    }
+    function* tokens(xml) {
+      const re = /<(\/?)([\w:]+)([^>]*?)(\/?)>|([^<]+)/g;
+      let m;
+      while (m = re.exec(xml)) {
+        const at = { s: m.index, e: re.lastIndex };
+        if (m[5] !== void 0) yield { ...at, text: m[5] };
+        else {
+          yield {
+            ...at,
+            close: !!m[1],
+            name: m[2],
+            attrs: m[3],
+            empty: !!m[4]
+          };
+        }
+      }
+    }
+    var PLAIN = /* @__PURE__ */ new Set([
+      "w:rPr",
+      "w:t",
+      "w:tab",
+      "w:br",
+      "w:cr",
+      "w:lastRenderedPageBreak"
+    ]);
+    var TRACKED = /^w:(ins|del|moveFrom|moveTo)$/;
+    function paragraphs(xml) {
+      const out = [];
+      let para = null;
+      let run = null;
+      let depth = 0;
+      let cells = 0;
+      let inText = false;
+      let rPrAt = -1;
+      let pPrAt = -1;
+      let inPPr = false;
+      for (const tk of tokens(xml)) {
+        if (tk.text !== void 0) {
+          if (run && inText) {
+            for (const ch of decode(tk.text).split("")) {
+              run.items.push({ ch, xml: null });
+            }
+          }
+          continue;
+        }
+        const { name, close, empty } = tk;
+        if (name === "w:tc" && !empty) {
+          cells += close ? -1 : 1;
+          continue;
+        }
+        if (name === "w:p") {
+          if (empty) continue;
+          if (!close) {
+            depth++;
+            if (depth === 1) {
+              para = {
+                s: tk.s,
+                e: -1,
+                runs: [],
+                pPr: "",
+                cell: cells > 0,
+                tracked: false,
+                nested: false
+              };
+            } else if (para) {
+              para.nested = true;
+            }
+          } else {
+            depth--;
+            if (depth === 0 && para) {
+              para.e = tk.e;
+              para.text = para.runs.map((r) => r.items.map((x) => x.ch).join("")).join("");
+              out.push(para);
+              para = null;
+            }
+          }
+          continue;
+        }
+        if (!para || depth !== 1) continue;
+        if (name === "w:pPr" && !run) {
+          if (empty) para.pPr = xml.slice(tk.s, tk.e);
+          else if (!close) {
+            pPrAt = tk.s;
+            inPPr = true;
+          } else {
+            para.pPr = xml.slice(pPrAt, tk.e);
+            inPPr = false;
+          }
+          continue;
+        }
+        if (inPPr) {
+          if (TRACKED.test(name)) para.tracked = true;
+          continue;
+        }
+        if (TRACKED.test(name)) {
+          para.tracked = true;
+          continue;
+        }
+        if (name === "w:r") {
+          if (empty) continue;
+          if (!close) {
+            run = { s: tk.s, e: -1, rPr: "", items: [], plain: true };
+          } else if (run) {
+            run.e = tk.e;
+            para.runs.push(run);
+            run = null;
+          }
+          continue;
+        }
+        if (!run) continue;
+        if (name === "w:rPr") {
+          if (empty) run.rPr = xml.slice(tk.s, tk.e);
+          else if (!close) rPrAt = tk.s;
+          else {
+            run.rPr = xml.slice(rPrAt, tk.e);
+            rPrAt = -1;
+          }
+          continue;
+        }
+        if (rPrAt >= 0) continue;
+        if (name === "w:t") {
+          inText = !close && !empty;
+        } else if (name === "w:tab" && !close) {
+          run.items.push({ ch: "	", xml: "<w:tab/>" });
+        } else if ((name === "w:br" || name === "w:cr") && !close) {
+          run.items.push({ ch: "\n", xml: xml.slice(tk.s, tk.e) });
+        } else if (!PLAIN.has(name) && !close) {
+          run.plain = false;
+        }
+      }
+      return out;
+    }
+    function pieces(s) {
+      const out = [];
+      const re = /\S+|\s+/gu;
+      let m;
+      while (m = re.exec(s)) out.push({ t: m[0], at: m.index });
+      return out;
+    }
+    function lcs(a, b, same = (x, y) => x === y) {
+      const n = a.length;
+      const m = b.length;
+      const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+      for (let i2 = n - 1; i2 >= 0; i2--) {
+        for (let j2 = m - 1; j2 >= 0; j2--) {
+          dp[i2][j2] = same(a[i2], b[j2]) ? dp[i2 + 1][j2 + 1] + 1 : Math.max(dp[i2 + 1][j2], dp[i2][j2 + 1]);
+        }
+      }
+      const match = new Array(n).fill(-1);
+      let i = 0;
+      let j = 0;
+      while (i < n && j < m) {
+        if (same(a[i], b[j])) {
+          match[i] = j;
+          i++;
+          j++;
+        } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+          i++;
+        } else {
+          j++;
+        }
+      }
+      return match;
+    }
+    function edits(was, now) {
+      const a = pieces(was);
+      const b = pieces(now);
+      const match = lcs(a.map((x) => x.t), b.map((x) => x.t));
+      const out = [];
+      let i = 0;
+      let j = 0;
+      const flush = (i2, j2) => {
+        if (i2 === i && j2 === j) return;
+        const s = i < a.length ? a[i].at : was.length;
+        const e = i2 < a.length ? a[i2].at : was.length;
+        const bs = j < b.length ? b[j].at : now.length;
+        const be = j2 < b.length ? b[j2].at : now.length;
+        out.push({ s, e, insert: now.slice(bs, be) });
+      };
+      for (let k = 0; k <= a.length; k++) {
+        if (k < a.length && match[k] < 0) continue;
+        const j2 = k < a.length ? match[k] : b.length;
+        flush(k, j2);
+        i = k + 1;
+        j = j2 + 1;
+      }
+      return out;
+    }
+    var key = (t) => t.replace(/\s+/g, " ").trim();
+    function likeness(x, y) {
+      const w = (t) => t.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+      const a = w(x);
+      const b = w(y);
+      if (!a.length || !b.length) return 0;
+      const m = lcs(a, b).filter((k) => k >= 0).length;
+      return 2 * m / (a.length + b.length);
+    }
+    var ALIKE = 0.5;
+    function pairParagraphs(was, now) {
+      const kw = was.map((p) => key(p.text));
+      const kn = now.map((p) => key(p.text));
+      const match = lcs(kw, kn);
+      const wasTo = match.slice();
+      const nowFrom = new Array(now.length).fill(-1);
+      match.forEach((j2, i2) => {
+        if (j2 >= 0) nowFrom[j2] = i2;
+      });
+      let i = 0;
+      let j = 0;
+      while (i <= was.length && j <= now.length) {
+        let i2 = i;
+        while (i2 < was.length && wasTo[i2] < 0) i2++;
+        const j2 = i2 < was.length ? wasTo[i2] : now.length;
+        let from = j;
+        for (let x = i; x < i2; x++) {
+          let best = -1;
+          let score = ALIKE;
+          for (let y2 = from; y2 < j2; y2++) {
+            if (nowFrom[y2] >= 0) continue;
+            const l = likeness(kw[x], kn[y2]);
+            if (best < 0 ? l >= score : l > score) {
+              score = l;
+              best = y2;
+            }
+          }
+          if (best >= 0) {
+            wasTo[x] = best;
+            nowFrom[best] = x;
+            from = best + 1;
+          }
+        }
+        i = i2 + 1;
+        j = j2 + 1;
+      }
+      for (let x = 0; x < was.length; x++) {
+        if (wasTo[x] >= 0 || !kw[x]) continue;
+        const y2 = kn.findIndex((t, k) => nowFrom[k] < 0 && t === kw[x]);
+        if (y2 >= 0) {
+          wasTo[x] = y2;
+          nowFrom[y2] = x;
+        }
+      }
+      const out = [];
+      let y = 0;
+      for (let x = 0; x < was.length; x++) {
+        if (wasTo[x] >= 0 && wasTo[x] >= y) {
+          for (; y < wasTo[x]; y++) {
+            if (nowFrom[y] < 0) out.push({ was: null, now: y });
+          }
+          y = wasTo[x] + 1;
+        }
+        out.push({ was: x, now: wasTo[x] >= 0 ? wasTo[x] : null });
+      }
+      for (; y < now.length; y++) {
+        if (nowFrom[y] < 0) out.push({ was: null, now: y });
+      }
+      return out;
+    }
+    function reviser(firstId, author, date) {
+      let id = firstId;
+      const next = () => id++;
+      const mark = (tag, empty = false) => `<w:${tag} w:id="${next()}" w:author="${esc(author)}" w:date="${date}"${empty ? "/" : ""}>`;
+      return { next, mark };
+    }
+    var textXml = (s) => {
+      let out = "";
+      let buf = "";
+      const flush = () => {
+        if (buf) out += `<w:t xml:space="preserve">${esc(buf)}</w:t>`;
+        buf = "";
+      };
+      for (const ch of s) {
+        if (ch === "	") {
+          flush();
+          out += "<w:tab/>";
+        } else if (ch === "\n") {
+          flush();
+          out += "<w:br/>";
+        } else {
+          buf += ch;
+        }
+      }
+      flush();
+      return out;
+    };
+    function itemsXml(items, deleted) {
+      let out = "";
+      let buf = "";
+      const tag = deleted ? "w:delText" : "w:t";
+      const flush = () => {
+        if (buf) out += `<${tag} xml:space="preserve">${esc(buf)}</${tag}>`;
+        buf = "";
+      };
+      for (const it of items) {
+        if (it.xml === null) buf += it.ch;
+        else {
+          flush();
+          out += it.xml;
+        }
+      }
+      flush();
+      return out;
+    }
+    function editParagraph(xml, p, changes, rev) {
+      if (p.tracked || p.nested) return null;
+      const at = [];
+      p.runs.forEach((r, ri) => r.items.forEach((x, k) => at.push([ri, k])));
+      const state = at.map(() => "keep");
+      const adds = /* @__PURE__ */ new Map();
+      for (const c of changes) {
+        for (let k = c.s; k < c.e; k++) {
+          if (!p.runs[at[k][0]].plain) return null;
+          state[k] = "del";
+        }
+        if (!c.insert) continue;
+        let anchor = c.e > 0 ? { k: c.e - 1, after: true } : { k: 0, after: false };
+        if (at.length && !p.runs[at[anchor.k][0]].plain) {
+          const other = anchor.after ? { k: c.e, after: false } : null;
+          if (other && other.k < at.length && p.runs[at[other.k][0]].plain) anchor = other;
+          else return null;
+        }
+        const id = at.length ? `${anchor.k}${anchor.after ? ">" : "<"}` : "empty";
+        adds.set(id, (adds.get(id) || "") + c.insert);
+      }
+      const insRun = (rPr, text) => {
+        const r = `<w:r>${rPr}${textXml(text)}</w:r>`;
+        return rev ? `${rev.mark("ins")}${r}</w:ins>` : r;
+      };
+      if (!at.length) {
+        const text = adds.get("empty");
+        if (!text) return xml.slice(p.s, p.e);
+        const close = xml.lastIndexOf("</w:p>", p.e);
+        return xml.slice(p.s, close) + insRun("", text) + "</w:p>";
+      }
+      let out = "";
+      let pos = p.s;
+      let g = 0;
+      p.runs.forEach((r) => {
+        const n = r.items.length;
+        const here = state.slice(g, g + n);
+        const touched = here.some((x) => x !== "keep") || [...Array(n).keys()].some((k) => adds.has(`${g + k}>`) || adds.has(`${g + k}<`));
+        if (!touched) {
+          g += n;
+          return;
+        }
+        out += xml.slice(pos, r.s);
+        let seg = [];
+        let segState = null;
+        const emit = () => {
+          if (!seg.length) return;
+          if (segState === "keep") {
+            out += `<w:r>${r.rPr}${itemsXml(seg, false)}</w:r>`;
+          } else if (rev) {
+            out += `${rev.mark("del")}<w:r>${r.rPr}${itemsXml(seg, true)}</w:r></w:del>`;
+          }
+          seg = [];
+        };
+        for (let k = 0; k < n; k++) {
+          const before = adds.get(`${g + k}<`);
+          if (before) {
+            emit();
+            out += insRun(r.rPr, before);
+          }
+          if (state[g + k] !== segState) {
+            emit();
+            segState = state[g + k];
+          }
+          seg.push(r.items[k]);
+          const after = adds.get(`${g + k}>`);
+          if (after) {
+            emit();
+            out += insRun(r.rPr, after);
+          }
+        }
+        emit();
+        pos = r.e;
+        g += n;
+      });
+      return out + xml.slice(pos, p.e);
+    }
+    function deleteParagraph(xml, p, rev) {
+      if (p.tracked || p.nested || p.runs.some((r) => !r.plain)) return null;
+      if (!rev && !p.cell) return "";
+      let out = "";
+      let pos = p.s;
+      for (const r of p.runs) {
+        out += xml.slice(pos, r.s);
+        if (rev && r.items.length) {
+          out += `${rev.mark("del")}<w:r>${r.rPr}${itemsXml(r.items, true)}</w:r></w:del>`;
+        }
+        pos = r.e;
+      }
+      out += xml.slice(pos, p.e);
+      return rev && !p.cell ? markParagraph(out, rev.mark("del", true)) : out;
+    }
+    function markParagraph(px, tag) {
+      const pPr = /<w:pPr>([\s\S]*?)<\/w:pPr>|<w:pPr\/>/.exec(px);
+      if (!pPr) {
+        const open = /^<w:p\b[^>]*>/.exec(px)[0];
+        return open + `<w:pPr><w:rPr>${tag}</w:rPr></w:pPr>` + px.slice(open.length);
+      }
+      const inner = pPr[1] || "";
+      const withMark = /<w:rPr>/.test(inner) ? inner.replace(/<w:rPr>/, `<w:rPr>${tag}`) : inner.replace(/(<w:sectPr\b|$)/, `<w:rPr>${tag}</w:rPr>$1`);
+      return px.slice(0, pPr.index) + `<w:pPr>${withMark}</w:pPr>` + px.slice(pPr.index + pPr[0].length);
+    }
+    function newParagraph(nxml, np, like, rev, styles, link) {
+      if (np.nested || np.runs.some((r) => !r.plain)) return null;
+      let body = nxml.slice(np.s, np.e).replace(/^<w:p\b[^>]*>/, "").replace(/<\/w:p>$/, "").replace(/<w:pPr>[\s\S]*?<\/w:pPr>|<w:pPr\/>/, "").replace(/<w:bookmark(Start|End)\b[^>]*\/>/g, "").replace(/<w:rStyle w:val="([^"]*)"\/>/g, (m, s) => styles.has(s) ? m : "");
+      let bad = false;
+      body = body.replace(
+        /(<w:hyperlink\b[^>]*?)r:id="([^"]*)"/g,
+        (m, open, id) => {
+          const next = link(id);
+          if (!next) bad = true;
+          return `${open}r:id="${next}"`;
+        }
+      );
+      if (bad) return null;
+      if (rev) {
+        body = body.replace(
+          /<w:r\b[\s\S]*?<\/w:r>/g,
+          (r) => `${rev.mark("ins")}${r}</w:ins>`
+        );
+      }
+      const pPr = like && like.pPr || "";
+      let px = `<w:p>${pPr}${body}</w:p>`;
+      if (rev) px = markParagraph(px, rev.mark("ins", true));
+      return px;
+    }
+    var W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
+    var W15 = "http://schemas.microsoft.com/office/word/2012/wordml";
+    var EXT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml";
+    var EXT_REL = "http://schemas.microsoft.com/office/2011/relationships/commentsExtended";
+    var HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+    function comments(files) {
+      const xml = files.get("word/comments.xml") || "";
+      const ext = files.get("word/commentsExtended.xml") || "";
+      const byPara = /* @__PURE__ */ new Map();
+      for (const m of ext.matchAll(/<w15:commentEx\b([^>]*)\/>/g)) {
+        byPara.set(attr(m[1], "w15:paraId"), {
+          parent: attr(m[1], "w15:paraIdParent"),
+          done: attr(m[1], "w15:done") === "1"
+        });
+      }
+      const out = [];
+      const COMMENT = /<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g;
+      for (const m of xml.matchAll(COMMENT)) {
+        const paras = [...m[2].matchAll(/<w:p\b([^>]*)>([\s\S]*?)<\/w:p>/g)];
+        const last = paras[paras.length - 1];
+        const paraId = last ? attr(last[1], "w14:paraId") : null;
+        const text = paras.map((p) => [...p[2].matchAll(
+          /<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g
+        )].map((t) => decode(t[1])).join("").trim()).filter(Boolean).join(" ");
+        const x = byPara.get(paraId) || {};
+        out.push({
+          id: attr(m[1], "w:id"),
+          author: attr(m[1], "w:author"),
+          date: attr(m[1], "w:date"),
+          text,
+          paraId,
+          parentPara: x.parent || null,
+          done: !!x.done
+        });
+      }
+      const idOf = new Map(out.map((c) => [c.paraId, c.id]));
+      for (const c of out) {
+        c.parent = c.parentPara ? idOf.get(c.parentPara) || null : null;
+      }
+      return out;
+    }
+    function newParaId(used) {
+      let id;
+      do {
+        id = Math.floor(Math.random() * 2147483647).toString(16).toUpperCase().padStart(8, "0");
+      } while (used.has(id));
+      used.add(id);
+      return id;
+    }
+    function declare(xml, root, prefix, uri) {
+      const re = new RegExp(`<${root}\\b[^>]*>`);
+      const m = re.exec(xml);
+      if (!m || m[0].includes(`xmlns:${prefix}=`)) return xml;
+      const open = m[0].replace(/\s*\/?>$/, (end) => ` xmlns:${prefix}="${uri}"${end.trim()}`);
+      return xml.slice(0, m.index) + open + xml.slice(m.index + m[0].length);
+    }
+    function writeAnswers(files, answers) {
+      let cxml = files.get("word/comments.xml");
+      let doc = files.get("word/document.xml");
+      if (!cxml || !answers.size) return { replies: 0, resolved: 0 };
+      const list = comments(files);
+      const flat = (t) => String(t || "").replace(/\s+/g, " ").trim();
+      const used = /* @__PURE__ */ new Set();
+      for (const m of (cxml + doc).matchAll(/w14:paraId="([0-9A-F]+)"/gi)) {
+        used.add(m[1].toUpperCase());
+      }
+      let nextId = Math.max(0, ...list.map((c) => Number(c.id) || 0)) + 1;
+      cxml = declare(cxml, "w:comments", "w14", W14);
+      for (const c of list) {
+        if (c.paraId || !answers.has(c.id)) continue;
+        c.paraId = newParaId(used);
+        const re = new RegExp(`(<w:comment\\b[^>]*w:id="${c.id}"[^>]*>[\\s\\S]*?)(<w:p\\b)((?:(?!<w:p\\b)[\\s\\S])*?</w:comment>)`);
+        cxml = cxml.replace(re, `$1<w:p w14:paraId="${c.paraId}" w14:textId="77777777"$3`);
+      }
+      const ext = [];
+      const done = /* @__PURE__ */ new Set();
+      let replies = 0;
+      for (const c of list) {
+        const a = answers.get(c.id);
+        if (!a || c.parent) continue;
+        const thread = list.filter((x) => x.parent === c.id);
+        const last = thread.length ? thread[thread.length - 1] : c;
+        let lastId = last.id;
+        for (const r of a.replies || []) {
+          if (thread.some((x) => x.author === r.author && flat(x.text) === flat(r.text))) continue;
+          const id = String(nextId++);
+          const paraId = newParaId(used);
+          const date = /T/.test(r.date || "") ? r.date : `${r.date || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}T00:00:00Z`;
+          const paras = String(r.text).split(/\n+/).filter(Boolean);
+          const body = (paras.length ? paras : [""]).map((t, k, all) => `<w:p${k === all.length - 1 ? ` w14:paraId="${paraId}" w14:textId="77777777"` : ""}><w:pPr><w:pStyle w:val="CommentText"/></w:pPr>` + (k === 0 ? '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r>' : "") + `<w:r>${textXml(t)}</w:r></w:p>`).join("");
+          const initials = String(r.author).split(/\s+/).map((w) => w[0] || "").join("").toUpperCase();
+          cxml = cxml.replace(
+            /<\/w:comments>\s*$/,
+            `<w:comment w:id="${id}" w:author="${esc(r.author)}" w:date="${date}" w:initials="${esc(initials)}">${body}</w:comment></w:comments>`
+          );
+          ext.push(`<w15:commentEx w15:paraId="${paraId}" w15:paraIdParent="${c.paraId}" w15:done="0"/>`);
+          const after = (re, add) => {
+            const m = re.exec(doc);
+            if (m) {
+              const k = m.index + m[0].length;
+              doc = doc.slice(0, k) + add + doc.slice(k);
+            }
+          };
+          after(new RegExp(`<w:commentRangeStart\\b[^>]*w:id="${lastId}"[^>]*/>`), `<w:commentRangeStart w:id="${id}"/>`);
+          after(new RegExp(`<w:commentRangeEnd\\b[^>]*w:id="${lastId}"[^>]*/>`), `<w:commentRangeEnd w:id="${id}"/>`);
+          after(
+            new RegExp(`<w:r\\b(?:(?!</w:r>)[\\s\\S])*?<w:commentReference\\b[^>]*w:id="${lastId}"[^>]*/>(?:(?!</w:r>)[\\s\\S])*?</w:r>`),
+            `<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="${id}"/></w:r>`
+          );
+          lastId = id;
+          replies++;
+        }
+        if (a.done && !c.done) done.add(c.paraId);
+      }
+      let exml = files.get("word/commentsExtended.xml");
+      if (!exml) {
+        exml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w15:commentsEx xmlns:w15="${W15}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w15"></w15:commentsEx>`;
+        let types = files.get("[Content_Types].xml");
+        types = types.replace("</Types>", `<Override PartName="/word/commentsExtended.xml" ContentType="${EXT_TYPE}"/></Types>`);
+        files.set("[Content_Types].xml", types);
+        const rels = "word/_rels/document.xml.rels";
+        files.set(rels, files.get(rels).replace(
+          "</Relationships>",
+          `<Relationship Id="rIdDendriteExt" Type="${EXT_REL}" Target="commentsExtended.xml"/></Relationships>`
+        ));
+      }
+      for (const c of list) {
+        if (!c.paraId || exml.includes(`w15:paraId="${c.paraId}"`)) continue;
+        if (!answers.has(c.id) && !done.has(c.paraId)) continue;
+        exml = exml.replace("</w15:commentsEx>", `<w15:commentEx w15:paraId="${c.paraId}" w15:done="0"/></w15:commentsEx>`);
+      }
+      for (const p of done) {
+        exml = exml.replace(new RegExp(`(<w15:commentEx\\b[^>]*w15:paraId="${p}")([^>]*)/>`), (m, head, rest) => `${head}${rest.replace(/\s*w15:done="[^"]*"/, "")} w15:done="1"/>`);
+      }
+      exml = exml.replace("</w15:commentsEx>", ext.join("") + "</w15:commentsEx>");
+      files.set("word/commentsExtended.xml", exml);
+      files.set("word/comments.xml", cxml);
+      files.set("word/document.xml", doc);
+      const people = files.get("word/people.xml");
+      if (people) {
+        let px = people;
+        const names = new Set([...answers.values()].flatMap((a) => (a.replies || []).map((r) => r.author)));
+        for (const n of names) {
+          if (px.includes(`w15:author="${esc(n)}"`)) continue;
+          px = px.replace("</w15:people>", `<w15:person w15:author="${esc(n)}"><w15:presenceInfo w15:providerId="None" w15:userId="${esc(n)}"/></w15:person></w15:people>`);
+        }
+        files.set("word/people.xml", px);
+      }
+      return { replies, resolved: done.size };
+    }
+    function replyDocx(theirs, fresh, answers, opts, zlib) {
+      const read = (b) => new Map(docx.readZip(b, zlib).map((f) => [f.name, f.data.toString("utf8")]));
+      const files = read(theirs);
+      if (!files.get("word/document.xml")) {
+        throw new Error("not a Word document");
+      }
+      const report = {
+        replies: 0,
+        resolved: 0,
+        changed: 0,
+        added: 0,
+        removed: 0,
+        left: []
+      };
+      Object.assign(report, writeAnswers(files, answers || /* @__PURE__ */ new Map()));
+      if (fresh) carryText(files, read(fresh), opts, report);
+      const out = docx.readZip(theirs, zlib).map((f) => ({
+        name: f.name,
+        data: files.has(f.name) ? Buffer.from(files.get(f.name), "utf8") : f.data
+      }));
+      for (const [name, text] of files) {
+        if (!out.some((f) => f.name === name)) {
+          out.push({ name, data: Buffer.from(text, "utf8") });
+        }
+      }
+      return { buf: docx.writeZip(out, zlib), report };
+    }
+    var short = (t) => {
+      const s = key(t);
+      return s.length > 70 ? `${s.slice(0, 67)}\u2026` : s;
+    };
+    function carryText(files, nfiles, opts, report) {
+      let doc = files.get("word/document.xml");
+      const ndoc = nfiles.get("word/document.xml");
+      const was = paragraphs(doc).filter((p) => key(p.text));
+      const now = paragraphs(ndoc).filter((p) => key(p.text));
+      const ids = [...(doc + (files.get("word/comments.xml") || "")).matchAll(/\bw:id="(\d+)"/g)].map((m) => Number(m[1]));
+      const rev = opts.tracked ? reviser(
+        Math.max(0, ...ids) + 1,
+        opts.author || "Author",
+        opts.date || (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d+Z$/, "Z")
+      ) : null;
+      const styles = new Set([...(files.get("word/styles.xml") || "").matchAll(/<w:style\b[^>]*w:styleId="([^"]*)"/g)].map((m) => m[1]));
+      const nrels = nfiles.get("word/_rels/document.xml.rels") || "";
+      const relsName = "word/_rels/document.xml.rels";
+      let rels = files.get(relsName) || "";
+      let relN = 0;
+      const link = (id) => {
+        const m = new RegExp(`<Relationship\\b[^>]*Id="${id}"[^>]*/>`).exec(nrels);
+        if (!m || attr(m[0], "Type") !== HYPERLINK) return null;
+        const target = attr(m[0], "Target");
+        const have = [...rels.matchAll(/<Relationship\b[^>]*\/>/g)].find((r) => attr(r[0], "Type") === HYPERLINK && attr(r[0], "Target") === target);
+        if (have) return attr(have[0], "Id");
+        const nid = `rIdDendriteLink${++relN}`;
+        rels = rels.replace("</Relationships>", `<Relationship Id="${nid}" Type="${HYPERLINK}" Target="${esc(target)}" TargetMode="External"/></Relationships>`);
+        return nid;
+      };
+      const swaps = [];
+      const pairs = pairParagraphs(was, now);
+      const squash = (t) => t.replace(/\s+/g, "");
+      const same = /* @__PURE__ */ new Set();
+      pairs.forEach((pr, k) => {
+        if (pr.was === null || pr.now === null) return;
+        let text = was[pr.was].text;
+        for (let b = k + 1; b < pairs.length && pairs[b].now === null && pairs[b].was !== null; b++) {
+          text += was[pairs[b].was].text;
+          if (squash(text) === squash(now[pr.now].text)) {
+            for (let c = k; c <= b; c++) same.add(c);
+            break;
+          }
+        }
+      });
+      pairs.forEach((pr, k) => {
+        if (same.has(k)) return;
+        const p = pr.was !== null ? was[pr.was] : null;
+        const n = pr.now !== null ? now[pr.now] : null;
+        if (p && n) {
+          if (p.text === n.text) return;
+          const px = editParagraph(doc, p, edits(p.text, n.text), rev);
+          if (px === null) {
+            report.left.push({ text: short(p.text), why: p.tracked ? "it holds tracked changes not yet accepted" : "the change falls in a field, a note or a picture" });
+            return;
+          }
+          swaps.push([p.s, p.e, px, k]);
+          report.changed++;
+        } else if (p) {
+          const px = deleteParagraph(doc, p, rev);
+          if (px === null) {
+            report.left.push({ text: short(p.text), why: "to be taken out, but it holds tracked changes, a field or a picture" });
+            return;
+          }
+          swaps.push([p.s, p.e, px, k]);
+          report.removed++;
+        } else {
+          let prev = null;
+          for (let b = k - 1; b >= 0 && !prev; b--) {
+            if (pairs[b].was !== null) prev = was[pairs[b].was];
+          }
+          let next = null;
+          for (let b = k + 1; b < pairs.length && !next; b++) {
+            if (pairs[b].was !== null) next = was[pairs[b].was];
+          }
+          const like = prev || next;
+          if (n.cell || like && like.cell) {
+            report.left.push({ text: short(n.text), why: "new text in a table, whose rows and cells are left as they are" });
+            return;
+          }
+          const px = like && newParagraph(ndoc, n, like, rev, styles, link);
+          if (!px) {
+            report.left.push({
+              text: short(n.text),
+              why: "a new paragraph holding a picture, a note or a field"
+            });
+            return;
+          }
+          const at = prev ? prev.e : next.s;
+          swaps.push([at, at, px, k]);
+          report.added++;
+        }
+      });
+      swaps.sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[3] - a[3]);
+      for (const [s, e, x] of swaps) doc = doc.slice(0, s) + x + doc.slice(e);
+      files.set("word/document.xml", doc);
+      files.set(relsName, rels);
+    }
+    module2.exports = {
+      paragraphs,
+      edits,
+      pairParagraphs,
+      editParagraph,
+      deleteParagraph,
+      newParagraph,
+      comments,
+      writeAnswers,
+      replyDocx,
+      likeness
+    };
+  }
+});
+
 // src/reviewlog.js
 var require_reviewlog = __commonJS({
   "src/reviewlog.js"(exports2, module2) {
@@ -8409,6 +9350,7 @@ var timing = require_timing();
 var { History, idbStore, hash: versionHash } = require_history();
 var { Ledger, makeFolders, moveDone } = require_ledger();
 var wordtemplate = require_wordtemplate();
+var wordreply = require_wordreply();
 var docxLib = require_docx();
 var zotero = require_zotero();
 var reviewlog = require_reviewlog();
@@ -8492,6 +9434,8 @@ var DEFAULTS = {
   reviewApiKey: "",
   // The name a reply to a review comment is signed with.
   replyName: "",
+  // A reply in a reviewer's Word file makes its changes tracked.
+  replyTracked: true,
   // How a diff is shown: unified until side by side is picked.
   diffMode: "unified",
   // How you are shown where your replies are, and in what is sent out.
@@ -14135,6 +15079,187 @@ var DendriteView = class extends ItemView {
     };
     input.click();
   }
+  /**
+   * Ask for a reviewer's returned Word file, then write it back
+   * answered: the replies under their comments, those dealt with
+   * resolved, and its text brought to the cards', tracked or straight.
+   * Written as a new file beside the exports; theirs is not changed.
+   */
+  replyInWord() {
+    const input = this.pageDoc().createElement("input");
+    input.type = "file";
+    input.accept = ".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const buf = require("buffer").Buffer.from(
+        await file.arrayBuffer()
+      );
+      let found;
+      try {
+        found = await this.answersFor(buf);
+      } catch (err) {
+        new Notice(`Dendrite: ${file.name} could not be read as a Word file (${err.message}).`);
+        return;
+      }
+      new ReplyWordModal(this, file.name, buf, found).open();
+    };
+    input.click();
+  }
+  /**
+   * What to write under each comment of a reviewer's Word file `buf`:
+   * { answers, comments }, `answers` a Map of a comment's id to
+   * { replies, done } as wordreply.writeAnswers takes it, from the
+   * cards where the comment is open and the review log where it was
+   * dealt with; `comments` the file's own comments, threads' first.
+   */
+  async answersFor(buf) {
+    const zlib = require("zlib");
+    const files = new Map(docxLib.readZip(buf, zlib).map((f) => [f.name, f.data.toString("utf8")]));
+    if (!files.get("word/document.xml")) {
+      throw new Error("no document in it");
+    }
+    const comments = wordreply.comments(files).filter((c) => !c.parent);
+    const bodies = await this.loadBodies();
+    const open = [];
+    for (const body of bodies.values()) {
+      open.push(...review.reviewItems(body).filter((it) => it.kind === "review"));
+    }
+    const log = reviewlog.settled(await readReviewLog(
+      this.app,
+      this.file
+    ));
+    const me = this.plugin.settings.presentName || this.plugin.settings.replyName || "Me";
+    const answers = wordWriteAnswers(
+      comments,
+      open,
+      log,
+      me,
+      this.selfNames()
+    );
+    return { answers, comments };
+  }
+  /**
+   * A fresh Word export of the whole manuscript to `output`, a path on
+   * disk, as Export to Word or into the template writes it, the tables
+   * not floated, since the reviewer's file keeps its own layout.
+   * Returns null, or what went wrong.
+   */
+  async freshDocx(output) {
+    await this.flush();
+    const ids = core.allNodes(this.root);
+    const bodies = /* @__PURE__ */ new Map();
+    for (const n of ids) {
+      const f = this.cardFile(n.id);
+      if (f) {
+        bodies.set(n.id, core.splitFrontmatter(
+          await this.app.vault.cachedRead(f)
+        ).body);
+      }
+    }
+    const ms = this.manuscript();
+    let text = core.exportMarkdown(
+      this.root.children,
+      (id) => bodies.get(id),
+      ms.headingTop,
+      this.numbers(),
+      (id) => this.printRoleOf(id),
+      this.floatOpts(true)
+    );
+    const s = this.plugin.settings;
+    const deps = this.plugin.pandocDeps();
+    const nodePath = require("path");
+    const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
+    const inVault = (p) => p ? nodePath.join(base, p) : null;
+    const common = {
+      format: "docx",
+      output,
+      csl: ms.csl ? nodePath.join(base, ms.csl) : null,
+      port: s.zoteroPort,
+      fallbackBib: s.fallbackBib || null,
+      pandoc: s.pandocPath || "pandoc",
+      resourcePath: base,
+      resolve: (link) => this.linkPath(link)
+    };
+    let result;
+    if (ms.style.template) {
+      const tpl = await this.templateSetup(ms);
+      if (!tpl) return "no template";
+      text = wordtemplate.plainMath(text).md;
+      result = await pandoc.exportDocument(Object.assign(common, {
+        md: text,
+        style: Object.assign({}, ms.style, {
+          referenceDocx: tpl.templatePath,
+          defaults: inVault(ms.style.defaults)
+        }),
+        transform: async (buf) => wordtemplate.fillDocx(
+          buf,
+          tpl.tplBuf,
+          tpl.opts(true),
+          deps.zlib
+        ).buf
+      }), deps);
+    } else {
+      result = await pandoc.exportDocument(Object.assign(common, {
+        md: text,
+        style: Object.assign({}, ms.style, {
+          defaults: inVault(ms.style.defaults),
+          referenceDocx: inVault(ms.style.referenceDocx)
+        })
+      }), deps);
+    }
+    return result.error || null;
+  }
+  /**
+   * Write the reply to `name`, the reviewer's file `buf`, with
+   * `answers`, tracked when `tracked`: beside the exports, as
+   * "<name> reply.docx", then said and shown.
+   */
+  async writeWordReply(name, buf, answers, tracked) {
+    const deps = this.plugin.pandocDeps();
+    const nodePath = require("path");
+    const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
+    const dir = normalizePath((this.file.parent.path === "/" ? "" : this.file.parent.path + "/") + "exports");
+    if (!this.app.vault.getAbstractFileByPath(dir)) {
+      await this.app.vault.createFolder(dir);
+    }
+    const notice = new Notice("Dendrite: exporting the cards to compare\u2026", 0);
+    const tmp = deps.join(
+      deps.tmpdir(),
+      `dendrite-${Date.now()}-reply.docx`
+    );
+    let fresh = null;
+    try {
+      const err = await this.freshDocx(tmp);
+      if (err) {
+        notice.hide();
+        new Notice(`Dendrite: ${err}`, 12e3);
+        return null;
+      }
+      fresh = await deps.readFile(tmp);
+    } finally {
+      deps.remove(tmp);
+    }
+    const me = this.plugin.settings.presentName || this.plugin.settings.replyName || "Me";
+    const out = wordreply.replyDocx(
+      buf,
+      fresh,
+      answers,
+      { tracked, author: me },
+      deps.zlib
+    );
+    const stem = safeName(name.replace(/\.docx$/i, "")) + " reply";
+    const rel = normalizePath(`${dir}/${stem}.docx`);
+    const output = nodePath.join(base, rel);
+    await deps.writeFile(output, out.buf);
+    notice.hide();
+    new Notice(
+      wordReplyNotice(rel, out.report, tracked),
+      out.report.left.length ? 0 : 2e4
+    );
+    await this.plugin.showExport(rel, output, "docx");
+    return out.report;
+  }
   /** The Google Doc this manuscript is linked to, or null. */
   gdocUrl() {
     const fm = this.file && this.app.metadataCache.getFileCache(this.file)?.frontmatter;
@@ -14243,6 +15368,9 @@ var DendriteView = class extends ItemView {
     }
     m.addSeparator();
     m.addItem((i) => i.setTitle("Import a Word or JSON file\u2026").onClick(() => this.importReview()));
+    if (Platform.isDesktopApp) {
+      m.addItem((i) => i.setTitle("Reply in a returned Word file\u2026").onClick(() => this.replyInWord()));
+    }
     m.addItem((i) => i.setTitle("Reviewers\u2026").onClick(() => new ReviewersModal(this).open()));
     m.addItem((i) => i.setTitle("Mark as sent for review\u2026").onClick(() => new RoundModal(this).open()));
     if (event && m.showAtMouseEvent) m.showAtMouseEvent(event);
@@ -14393,23 +15521,28 @@ var DendriteView = class extends ItemView {
     const buf = require("buffer").Buffer.from(data);
     const json = /\.json$/i.test(name);
     let items;
+    let layout = [];
     try {
       items = json ? review.readReviewJson(buf.toString("utf8")) : review.readReview(buf, require("zlib"));
+      if (!json) layout = review.layoutChanges(buf, require("zlib"));
     } catch (err) {
       new Notice(`Dendrite: ${name} could not be read as ${json ? "a review list" : "a Word file"} (${err.message}).`);
       return null;
     }
     if (!items.length) {
-      new Notice(`Dendrite: ${name} has no comments${json ? "" : " or tracked changes"}.`);
+      new Notice(
+        `Dendrite: ${name} has no comments${json ? "" : " or tracked changes"}` + (layout.length ? ` to bring in; its layout changes are not: ${layout.join("; ")}` : "") + ".",
+        layout.length ? 15e3 : void 0
+      );
       return null;
     }
-    return this.reviewModal(name, items);
+    return this.reviewModal(name, items, null, layout);
   }
   /**
    * Show review items, each with where in the cards it was found, to
    * choose which to add; `inbox`, the submitted review they came from.
    */
-  async reviewModal(name, items, inbox = null) {
+  async reviewModal(name, items, inbox = null, layout = []) {
     const cards = await this.reviewCards();
     const old = await this.oldVersionCards();
     const doneKeys = new Set(await this.reviewDone());
@@ -14455,7 +15588,13 @@ var DendriteView = class extends ItemView {
         use: !!at && !dup && !done
       });
     }
-    const modal = new ReviewImportModal(this, name, rows, inbox);
+    const modal = new ReviewImportModal(
+      this,
+      name,
+      rows,
+      inbox,
+      layout
+    );
     modal.open();
     return modal;
   }
@@ -16175,13 +17314,85 @@ var DendriteView = class extends ItemView {
     const deps = this.plugin.pandocDeps();
     const nodePath = require("path");
     const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
+    const tpl = await this.templateSetup(ms);
+    if (!tpl) return;
+    const { templatePath, tplBuf, opts } = tpl;
+    const rel = normalizePath(`${dir}/${name}.docx`);
+    const output = nodePath.join(base, rel);
+    const inVault = (p) => p ? nodePath.join(base, p) : null;
+    const math = wordtemplate.plainMath(text);
+    text = math.md;
+    let raw = null;
+    let report = null;
+    const notice = new Notice("Dendrite: filling the template\u2026", 0);
+    const result = await pandoc.exportDocument({
+      md: text,
+      format: "docx",
+      output,
+      csl: ms.csl ? nodePath.join(base, ms.csl) : null,
+      style: Object.assign({}, st, {
+        referenceDocx: templatePath,
+        defaults: inVault(st.defaults)
+      }),
+      port: s.zoteroPort,
+      fallbackBib: s.fallbackBib || null,
+      pandoc: s.pandocPath || "pandoc",
+      resourcePath: base,
+      resolve: (link) => this.linkPath(link),
+      transform: async (buf) => {
+        raw = buf;
+        const r = wordtemplate.fillDocx(
+          buf,
+          tplBuf,
+          opts(true),
+          deps.zlib
+        );
+        report = r.report;
+        return r.buf;
+      }
+    }, deps);
+    return this.afterTemplate({
+      result,
+      notice,
+      math,
+      report,
+      raw,
+      tplBuf,
+      opts,
+      pdf,
+      dir,
+      name,
+      rel,
+      output,
+      ms
+    });
+  }
+  /** Where a link in a card leads, as a path on disk, or null. */
+  linkPath(link) {
+    const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
+    const f = this.app.metadataCache.getFirstLinkpathDest(
+      link,
+      this.file.path
+    );
+    return f ? require("path").join(base, f.path) : null;
+  }
+  /**
+   * The manuscript's Word template, ready to fill: { templatePath,
+   * tplBuf, opts(refs) }, or null, said, where there is none.
+   */
+  async templateSetup(ms) {
+    const s = this.plugin.settings;
+    const st = ms.style;
+    const deps = this.plugin.pandocDeps();
+    const nodePath = require("path");
+    const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
     const home = this.file.parent && this.file.parent.path !== "/" ? this.file.parent.path + "/" : "";
     const tf = this.app.vault.getAbstractFileByPath(
       normalizePath(home + st.template)
     ) || this.app.vault.getAbstractFileByPath(normalizePath(st.template));
     if (!(tf instanceof TFile)) {
       new Notice(`Dendrite: no template at ${st.template}, from the index's folder or the vault root.`, 1e4);
-      return;
+      return null;
     }
     const templatePath = nodePath.join(base, tf.path);
     const tplBuf = await deps.readFile(templatePath);
@@ -16214,46 +17425,33 @@ var DendriteView = class extends ItemView {
       references: refs ? "inline" : "none",
       referencesTitle: st.referencesTitle || "References"
     });
-    const rel = normalizePath(`${dir}/${name}.docx`);
-    const output = nodePath.join(base, rel);
-    const inVault = (p) => p ? nodePath.join(base, p) : null;
-    const math = wordtemplate.plainMath(text);
-    text = math.md;
-    let raw = null;
-    let report = null;
-    const notice = new Notice("Dendrite: filling the template\u2026", 0);
-    const result = await pandoc.exportDocument({
-      md: text,
-      format: "docx",
+    return { templatePath, tplBuf, opts };
+  }
+  /**
+   * A filled template written, `args` what exportTemplate made: said,
+   * and as a PDF when asked, floated and measured.
+   */
+  async afterTemplate(args) {
+    const {
+      result,
+      notice,
+      math,
+      report,
+      raw,
+      tplBuf,
+      opts,
+      pdf,
+      dir,
+      name,
+      rel,
       output,
-      csl: ms.csl ? nodePath.join(base, ms.csl) : null,
-      style: Object.assign({}, st, {
-        referenceDocx: templatePath,
-        defaults: inVault(st.defaults)
-      }),
-      port: s.zoteroPort,
-      fallbackBib: s.fallbackBib || null,
-      pandoc: pandocPath,
-      resourcePath: base,
-      resolve: (link) => {
-        const f = this.app.metadataCache.getFirstLinkpathDest(
-          link,
-          this.file.path
-        );
-        return f ? nodePath.join(base, f.path) : null;
-      },
-      transform: async (buf) => {
-        raw = buf;
-        const r = wordtemplate.fillDocx(
-          buf,
-          tplBuf,
-          opts(true),
-          deps.zlib
-        );
-        report = r.report;
-        return r.buf;
-      }
-    }, deps);
+      ms
+    } = args;
+    const st = ms.style;
+    const deps = this.plugin.pandocDeps();
+    const nodePath = require("path");
+    const base = this.app.vault.adapter.getBasePath ? this.app.vault.adapter.getBasePath() : "";
+    let pages = null;
     if (result.error) {
       notice.hide();
       new Notice(`Dendrite: ${result.error}`, 12e3);
@@ -16273,7 +17471,7 @@ var DendriteView = class extends ItemView {
       return;
     }
     const pdfRel = normalizePath(`${dir}/${name}.pdf`);
-    let pages = await this.pdfOf(output, nodePath.join(base, dir), deps);
+    pages = await this.pdfOf(output, nodePath.join(base, dir), deps);
     if (!pages) {
       notice.hide();
       new Notice(`Dendrite: wrote the Word file, but LibreOffice could not make a PDF of it. Is it installed? ${rel}`, 15e3);
@@ -18996,13 +20194,99 @@ var ReviseModal = class extends Modal {
     this.contentEl.empty();
   }
 };
+function wordWriteAnswers(comments, open, log, me, selfNames) {
+  const out = /* @__PURE__ */ new Map();
+  const keysOf = (c) => new Set(review.reviewKeys({
+    kind: "comment",
+    author: c.author,
+    text: c.text
+  }));
+  const pick = (c, replies) => (replies || []).filter((r) => String(r.author || "").toLowerCase() !== "claude").map((r) => {
+    const a = review.addressed(r);
+    if (a.to && a.to.toLowerCase() !== String(c.author || "").toLowerCase()) return null;
+    return {
+      author: selfNames.has(r.author) ? me : r.author,
+      date: r.date,
+      text: a.to ? a.text : r.text
+    };
+  }).filter((r) => r && r.text.trim());
+  for (const c of comments) {
+    const keys = keysOf(c);
+    const has = (ks) => (ks || []).some((k) => keys.has(k));
+    const now = open.find((it) => has(review.reviewKeys(it)));
+    if (now) {
+      out.set(c.id, { replies: pick(c, now.replies), done: false });
+      continue;
+    }
+    const was = log.find((e) => has(e.keys));
+    if (was) out.set(c.id, { replies: pick(c, was.replies), done: true });
+  }
+  return out;
+}
+function wordReplyNotice(rel, r, tracked) {
+  const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  const lines = [`Dendrite: wrote ${rel}: ${n(r.replies, "reply", "replies")}, ${n(r.resolved, "comment", "comments")} resolved; ${n(r.changed, "paragraph", "paragraphs")} changed, ${r.added} added, ${r.removed} taken out` + (r.changed + r.added + r.removed ? tracked ? ", as tracked changes." : ", made straight." : ".")];
+  if (r.left.length) {
+    lines.push(`Not carried, to make by hand: ` + r.left.map((x) => `\u201C${x.text}\u201D (${x.why})`).join("; ") + ".");
+  }
+  return lines.join(" ");
+}
+var ReplyWordModal = class extends Modal {
+  constructor(view, name, buf, found) {
+    super(view.app);
+    this.view = view;
+    this.name = name;
+    this.buf = buf;
+    this.answers = found.answers;
+    this.comments = found.comments;
+  }
+  onOpen() {
+    const { contentEl, view } = this;
+    const s = view.plugin.settings;
+    this.titleEl.setText(`Reply in ${this.name}`);
+    const answered = [...this.answers.values()];
+    const replies = answered.reduce((k, a) => k + a.replies.length, 0);
+    const done = answered.filter((a) => a.done).length;
+    const unknown = this.comments.length - this.answers.size;
+    contentEl.createEl("p", { text: `${this.comments.length} comment${this.comments.length === 1 ? "" : "s"} in the file; ${replies} repl${replies === 1 ? "y" : "ies"} to write under them, ${done} resolved` + (unknown ? `, ${unknown} not found in the cards or the review log, left as they are` : "") + ". The text is brought to what the cards print now, in the reviewer's own file, so their formatting and layout stay. Replies addressed to someone else, and Claude's, are not sent. Written as a new file beside the exports." });
+    const rows = contentEl.createDiv({ cls: "dendrite-review-rows" });
+    for (const c of this.comments) {
+      const a = this.answers.get(c.id);
+      const row = rows.createDiv({ cls: "dendrite-reply-word-row" });
+      row.createEl("b", { text: `${c.author}: ` });
+      row.createSpan({ text: c.text });
+      row.createDiv({ cls: "dendrite-reply-word-what", text: !a ? "Not found in the cards: left as it is." : (a.replies.length ? a.replies.map((r) => `${r.author}: ${r.text}`).join(" \xB7 ") : "No reply.") + (a.done ? " Resolved." : "") });
+    }
+    let tracked = s.replyTracked !== false;
+    new Setting(contentEl).setName("Changes to the text").setDesc("Tracked, for the reviewer to accept or reject, or made straight.").addDropdown((d) => d.addOption("tracked", "As tracked changes").addOption("straight", "Made straight").setValue(tracked ? "tracked" : "straight").onChange(async (v) => {
+      tracked = v === "tracked";
+      s.replyTracked = tracked;
+      if (view.plugin.saveSettings) {
+        await view.plugin.saveSettings();
+      }
+    }));
+    new Setting(contentEl).addButton((b) => b.setButtonText("Write reply").setCta().onClick(async () => {
+      this.close();
+      await view.writeWordReply(
+        this.name,
+        this.buf,
+        this.answers,
+        tracked
+      );
+    }));
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var ReviewImportModal = class extends Modal {
-  constructor(view, name, rows, inbox = null) {
+  constructor(view, name, rows, inbox = null, layout = []) {
     super(view.app);
     this.view = view;
     this.name = name;
     this.rows = rows;
     this.inbox = inbox;
+    this.layout = layout;
   }
   onOpen() {
     const { contentEl, view, rows } = this;
@@ -19016,6 +20300,12 @@ var ReviewImportModal = class extends Modal {
     // comments has a link, which those kept inside a Word file,
     // not in Drive's own comments, do not.
     (this.name && /\(Google Docs\)$/.test(this.name) && rows.some((x) => x.item.kind === "comment") && !rows.some((x) => x.item.link) ? "None has a Google Docs link: its comments are kept inside the Word file, not in Google Docs' own comments, so Google gives them no link to their thread. " : "") + "Each goes after its passage in the card, which is set to revise. A change still made on the text as it was sent can be applied from its card later; one whose passage has changed since comes in as a comment. Nothing is written until you add them, and Ctrl+Z on the board undoes it." });
+    if (this.layout.length) {
+      const box = contentEl.createDiv({ cls: "dendrite-review-layout" });
+      box.createEl("p", { text: "Tracked changes in the file not brought in, since no card holds them, listed so none goes unseen; the export sets layout, and the rest can be made by hand:" });
+      const ul = box.createEl("ul");
+      for (const x of this.layout) ul.createEl("li", { text: x });
+    }
     const list = contentEl.createDiv({ cls: "dendrite-review-rows" });
     const active = view.active && view.byId.get(view.active);
     const count = () => rows.filter((x) => x.use).length;
@@ -20263,6 +21553,12 @@ module.exports = class DendritePlugin extends Plugin {
       (v) => v.nextFlagged(1, (i) => i.prints && i.own === "draft")
     );
     viewCommand("toggle-printed", "Show only the cards that print, or every card", false, (v) => v.togglePrintOnly());
+    viewCommand(
+      "reply-in-word",
+      "Reply in a returned Word file",
+      false,
+      (v) => v.replyInWord()
+    );
     viewCommand(
       "import-review",
       "Import review comments from a returned Word file or a JSON list",
@@ -22154,6 +23450,8 @@ module.exports.DendriteComments = DendriteComments;
 module.exports.DendriteFloats = DendriteFloats;
 module.exports.tidyKept = tidyKept;
 module.exports.readReviewLog = readReviewLog;
+module.exports.wordWriteAnswers = wordWriteAnswers;
+module.exports.wordReplyNotice = wordReplyNotice;
 module.exports.floatInventory = floatInventory;
 module.exports.paneWidths = paneWidths;
 module.exports.DendriteSettings = DendriteSettings;

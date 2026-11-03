@@ -354,3 +354,39 @@ test('a table that left the foot of a page empty floats: the paragraphs ' +
         ['Introductory', '(blank)', '2.', 'Alpha', 'Beta', 'Gamma',
          '(blank)', 'Table', '(table)', '(blank)', '3.', 'Omega']);
 });
+
+test('a template\'s tracked changes taken as made: a paragraph deleted ' +
+     'outright goes, a deleted paragraph mark leaves the XML whole', () => {
+    const by = 'w:id="1" w:author="J" w:date="2026-11-02T00:00:00Z"';
+    const gone = `<w:p><w:pPr><w:rPr><w:del ${by}/></w:rPr></w:pPr>` +
+        `<w:del ${by}><w:r><w:delText>4.2.1 Cluster</w:delText></w:r>` +
+        '</w:del></w:p>';
+    const kept = `<w:p><w:pPr><w:rPr><w:ins ${by}/></w:rPr></w:pPr>` +
+        `<w:r><w:t>Kept </w:t></w:r><w:ins ${by}><w:r><w:t>added</w:t>` +
+        `</w:r></w:ins><w:del ${by}><w:r><w:delText>cut</w:delText></w:r>` +
+        '</w:del></w:p>';
+    const out = wt.settled('<w:body>' + gone + kept + para(run('After.')) +
+                           '</w:body>');
+    assert.doesNotMatch(out, /<w:(ins|del)\b|Cluster|cut/);
+    const blocks = wt.splitDocument('<w:document><w:body>' +
+        out.replace(/^<w:body>|<\/w:body>$/g, '') + '</w:body></w:document>')
+        .blocks;
+    assert.deepEqual(blocks.map((b) => wt.textOf(b)), ['Kept added',
+                                                       'After.']);
+});
+
+test('a table or blank line taken from a template, as a returned export, ' +
+     'loses the keep-with-next it was given, the rules set it again',
+     () => {
+    const kept = '<w:p><w:pPr><w:keepNext/></w:pPr></w:p>';
+    const tr = (t) => '<w:tr><w:tc><w:p><w:pPr><w:keepNext/></w:pPr>' +
+        `${run(t)}</w:p></w:tc></w:tr>`;
+    const rows = wt.tidyTable('<w:tbl><w:tblPr/>' + ['H', '1', '2', '3', '4',
+        '5'].map(tr).join('') + '</w:tbl>').match(/<w:tr>[^]*?<\/w:tr>/g);
+    assert.deepEqual(rows.map((r) => /<w:keepNext\/>/.test(r)),
+                     [true, true, false, false, true, false]);
+    const { items } = wt.templateItems(wt.splitDocument(doc(
+        para(run('1. Outline')), kept, para(run('2. Data')))).blocks);
+    const gap = items.find((x) => x.kind === 'gap');
+    assert.doesNotMatch(gap.xml, /keepNext/);
+});

@@ -50,6 +50,24 @@ const day = (iso) => (iso ? iso.slice(0, 10) : '');
 // A heading's section number, as an export writes it before its text.
 const SECTION_NUMBER = /^\s*\d+(?:\.\d+)*\.?\s+/;
 
+// A font set for code.
+const MONO = /courier|consolas|mono|menlo|monaco|source code/i;
+
+/** Text set as a run is, `f` its { mono, b, i }, in markdown. */
+function marked(t, f) {
+    const lead = /^\s*/.exec(t)[0];
+    const trail = /\s*$/.exec(t.slice(lead.length))[0];
+    let core = t.slice(lead.length, t.length - trail.length);
+    if (!core) return t;
+    if (f.mono) core = `\`${core}\``;
+    if (f.b) core = `**${core}**`;
+    if (f.i) core = `*${core}*`;
+    return lead + core + trail;
+}
+
+/** Markers that close and open again at once taken out: one span. */
+const joined = (t) => t.replace(/``|\*\*\*\*/g, '');
+
 /**
  * Word's body as paragraphs of the text the reviewer was sent: deleted
  * text kept, inserted text left out, so it can be looked for in the
@@ -66,21 +84,47 @@ function readBody(xml) {
     let del = null;
     let inText = false;
     let cells = 0;
+    // The run being read: its formatting now, and as it was where the
+    // reviewer changed it, each { mono, b, i }.
+    let run = null;
+    let rPrDepth = 0;
+    let inOld = false;
     const pos = () => ({ p: paras.length, o: para ? para.text.length : 0 });
+    // Headings and captions the export formats itself.
+    const plain = () => para && (para.heading || para.caption);
     const addText = (t) => {
         if (!para) return;
         if (ins) {
             const last = para.changes[para.changes.length - 1];
             const at = para.text.length;
+            const added = run && !plain() ? marked(t, run.now) : t;
             if (last && last.author === ins.author && last.end === at) {
-                last.insert += t;
+                last.insert = joined(last.insert + added);
             } else {
-                para.changes.push({ start: at, end: at, insert: t,
+                para.changes.push({ start: at, end: at, insert: added,
                                     author: ins.author, date: ins.date });
             }
             return;
         }
         const start = para.text.length;
+        // Formatting added to text that was there: code, bold, italic.
+        if (run && run.was && !plain()) {
+            const f = { mono: run.now.mono && !run.was.mono,
+                        b: run.now.b && !run.was.b,
+                        i: run.now.i && !run.was.i };
+            if (f.mono || f.b || f.i) {
+                const key = `${+!!f.mono}${+!!f.b}${+!!f.i}`;
+                const last = para.formats[para.formats.length - 1];
+                if (last && last.key === key && last.end === start &&
+                    last.author === run.author) {
+                    last.end = start + t.length;
+                } else {
+                    para.formats.push({ start, end: start + t.length, key,
+                                        f, author: run.author,
+                                        date: run.date });
+                }
+            }
+        }
         para.text += t;
         if (del) {
             const last = para.changes[para.changes.length - 1];
@@ -120,12 +164,46 @@ function readBody(xml) {
         const { name, close, empty, attrs } = tk;
         if (name === 'w:p') {
             if (close) {
+                if (para) {
+                    for (const x of para.formats) {
+                        para.changes.push({ start: x.start, end: x.end,
+                            insert: marked(para.text.slice(x.start, x.end),
+                                           x.f),
+                            author: x.author, date: x.date });
+                    }
+                    para.changes.sort((a, b) => a.start - b.start);
+                    delete para.formats;
+                }
                 if (para && para.heading) unnumber(para, paras.length);
                 if (para) paras.push(para);
                 para = null;
             } else if (!empty) {
-                para = { text: '', changes: [], ...(cells ? { cell: true } :
-                                                    {}) };
+                para = { text: '', changes: [], formats: [],
+                         ...(cells ? { cell: true } : {}) };
+            }
+        } else if (name === 'w:r' && !empty) {
+            run = close ? null : { now: {}, was: null };
+            rPrDepth = 0;
+            inOld = false;
+        } else if (name === 'w:rPr' && run && !empty) {
+            rPrDepth += close ? -1 : 1;
+        } else if (name === 'w:rPrChange' && run && !empty) {
+            inOld = !close;
+            if (!close) {
+                run.was = {};
+                run.author = attr(attrs, 'w:author');
+                run.date = day(attr(attrs, 'w:date'));
+            }
+        } else if (run && rPrDepth > 0 && !close &&
+                   (name === 'w:rFonts' || name === 'w:b' ||
+                    name === 'w:i')) {
+            const to = inOld ? run.was : run.now;
+            const on = !/^(0|false|off)$/.test(attr(attrs, 'w:val') || '');
+            if (name === 'w:rFonts') {
+                if (MONO.test(attr(attrs, 'w:ascii') || '') ||
+                    MONO.test(attr(attrs, 'w:hAnsi') || '')) to.mono = true;
+            } else if (on) {
+                to[name === 'w:b' ? 'b' : 'i'] = true;
             }
         } else if (name === 'w:tc' && !empty) {
             cells += close ? -1 : 1;
@@ -133,6 +211,7 @@ function readBody(xml) {
             if (/^(heading\s*\d|title)$/i.test(attr(attrs, 'w:val'))) {
                 para.heading = true;
             }
+            if (/caption/i.test(attr(attrs, 'w:val'))) para.caption = true;
         } else if (name === 'w:ins' || name === 'w:moveTo') {
             if (!empty) {
                 ins = close ? null : { author: attr(attrs, 'w:author'),
@@ -314,6 +393,147 @@ function alone(it, paras) {
         it.insert = NEW_PARAGRAPH + it.insert;
     }
     return true;
+}
+
+// The tracked changes Word writes that this file knows of: what readBody
+// brings in, and what layoutChanges lists. Any other is listed by name.
+const TRACKED = new Set(['ins', 'del', 'moveFrom', 'moveTo',
+    'moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart',
+    'moveToRangeEnd', 'rPrChange', 'pPrChange', 'tblPrChange',
+    'tblPrExChange', 'tblGridChange', 'trPrChange', 'tcPrChange',
+    'sectPrChange', 'numberingChange', 'cellIns', 'cellDel',
+    'cellMerge']);
+const TRACKED_LIKE = new RegExp('^(?:ins|del)$|' +
+    '(?:Ins|Del|Change|Merge)(?:Range(?:Start|End))?$');
+
+/**
+ * Every tracked change in a returned .docx that the import does not
+ * bring in as a comment or a suggested change, said in plain sentences,
+ * so none goes unseen: each table whose layout or cells changed, by its
+ * header row; paragraphs whose spacing, indent, style or numbering
+ * changed; paragraph breaks added or removed on their own; page setup;
+ * runs whose formatting changed other than code, bold or italic added;
+ * spaces taken out of empty lines; changes in the footnotes, endnotes,
+ * headers or footers; and any of a kind not known here.
+ */
+function layoutChanges(buf, zlib) {
+    const files = new Map(docx.readZip(buf, zlib)
+        .map((f) => [f.name, f.data.toString('utf8')]));
+    const body = files.get('word/document.xml') || '';
+    const out = [];
+    const textIn = (x) => [...x.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)]
+        .map((m) => decode(m[1])).join('');
+    const tables = body.match(/<w:tbl>[^]*?<\/w:tbl>/g) || [];
+    for (const t of tables) {
+        const parts = [];
+        if (/<w:tblPrChange\b/.test(t)) parts.push('its width');
+        if (/<w:(?:tblGridChange|tcPrChange)\b/.test(t)) {
+            parts.push('column widths');
+        }
+        if (/<w:trPrChange\b/.test(t)) parts.push('row settings');
+        if (/<w:pPrChange\b/.test(t)) parts.push('cell spacing');
+        if (/<w:(?:cellIns|cellDel|cellMerge)\b/.test(t)) {
+            parts.push('cells inserted, deleted or merged');
+        }
+        if (!parts.length) continue;
+        const first = (/<w:tr\b[^>]*>[^]*?<\/w:tr>/.exec(t) || [''])[0];
+        const head = (first.match(/<w:tc>[^]*?<\/w:tc>/g) || [])
+            .map((c) => textIn(c).trim()).filter(Boolean);
+        const name = head.slice(0, 3).join(' | ') +
+            (head.length > 3 ? ' …' : '');
+        const list = parts.length > 1 ? parts.slice(0, -1).join(', ') +
+            ' and ' + parts[parts.length - 1] : parts[0];
+        out.push(`Table “${name}”: ${list}` +
+                 (/ merged$/.test(list) ? '' : ' changed'));
+    }
+    const rest = body.replace(/<w:tbl>[^]*?<\/w:tbl>/g, '');
+    const n = (rest.match(/<w:pPrChange\b/g) || []).length;
+    const s = (k, one) => (k === 1 ? one : one + 's');
+    if (n) {
+        out.push(`Spacing, indent, style or numbering changed on ${n} ` +
+                 `${s(n, 'paragraph')} outside tables`);
+    }
+    // A break added or taken out, its paragraph's text untouched: one
+    // split or two joined.
+    let breaks = 0;
+    for (const p of body.match(/<w:p\b[^>]*>[^]*?<\/w:p>/g) || []) {
+        const pPr = (/<w:pPr>[^]*?<\/w:pPr>/.exec(p) || [''])[0];
+        if (/<w:(?:ins|del)\b[^>]*\/>/.test(pPr) &&
+            !/<w:(?:ins|del|moveFrom|moveTo)\b[^>]*(?<!\/)>/.test(
+                p.slice(pPr.length))) breaks++;
+    }
+    if (breaks) {
+        out.push(`${breaks} paragraph ${s(breaks, 'break')} added or ` +
+                 'removed with no text changed beside ' +
+                 `${breaks === 1 ? 'it' : 'them'}: a blank line, or a ` +
+                 'paragraph split or joined');
+    }
+    if (/<w:sectPrChange\b/.test(body)) {
+        out.push('Page setup changed: margins, page size, columns or ' +
+                 'orientation');
+    }
+    // Run formatting changed, other than code, bold or italic added,
+    // which come in as markdown.
+    let other = 0;
+    const changed = new RegExp('<w:r\\b[^>]*><w:rPr>((?:(?!</w:rPr>)[^])*?)' +
+        '<w:rPrChange\\b[^>]*>([^]*?)</w:rPrChange>', 'g');
+    for (const m of body.matchAll(changed)) {
+        const flags = (x) => ({ mono: MONO.test(x), b: /<w:b\s*\/>/.test(x),
+                               i: /<w:i\s*\/>/.test(x) });
+        const now = flags(m[1]);
+        const was = flags(m[2]);
+        if (!(now.mono && !was.mono) && !(now.b && !was.b) &&
+            !(now.i && !was.i)) other++;
+    }
+    if (other) {
+        out.push('Other text formatting, such as size or colour, changed ' +
+                 `on ${other} ${s(other, 'run')}`);
+    }
+    // Spaces taken out of empty lines, which the import leaves out.
+    const spaces = readBody(body).paras.reduce((k, p) => k +
+        (p.text.trim() ? 0 : p.changes.filter((c) => !c.insert).length), 0);
+    if (spaces) {
+        out.push(`${spaces} ${s(spaces, 'space')} taken out of ` +
+                 `${spaces === 1 ? 'an empty line' : 'empty lines'}, the ` +
+                 'template\'s spacing');
+    }
+    // The other parts of the file, which the import does not read.
+    let elsewhere = 0;
+    for (const [name, xml] of files) {
+        if (!/^word\/(?:footnotes|endnotes|header\d*|footer\d*)\.xml$/
+            .test(name)) continue;
+        elsewhere += (xml.match(new RegExp('<w:(?:ins|del|moveFrom|' +
+            'moveTo)\\b[^>]*(?<!/)>|<w:\\w+PrChange\\b', 'g')) || []).length;
+    }
+    if (elsewhere) {
+        out.push(`${elsewhere} tracked ${s(elsewhere, 'change')} in the ` +
+                 'footnotes, endnotes, headers or footers');
+    }
+    // Comments anchored there and not in the body, each said in full,
+    // since the import brings in only the body's.
+    const anchored = new Set([...body.matchAll(
+        /<w:comment(?:RangeStart|Reference)\b[^>]*w:id="([^"]+)"/g)]
+        .map((m) => m[1]));
+    const off = [...readComments(files.get('word/comments.xml'))]
+        .filter(([id]) => !anchored.has(id));
+    if (off.length) {
+        out.push(`${off.length} ${s(off.length, 'comment')} on the ` +
+            'footnotes, endnotes, headers or footers, ' + off.map(([, c]) =>
+                `by ${c.author}: “${c.text}”`).join('; '));
+    }
+    // Any kind not known here, by name.
+    const unknown = new Map();
+    for (const m of body.matchAll(/<w:([A-Za-z]+)\b/g)) {
+        if (TRACKED_LIKE.test(m[1]) && !TRACKED.has(m[1])) {
+            unknown.set(m[1], (unknown.get(m[1]) || 0) + 1);
+        }
+    }
+    if (unknown.size) {
+        const k = [...unknown.values()].reduce((a, b) => a + b, 0);
+        out.push(`${k} tracked ${s(k, 'change')} of a kind Dendrite does ` +
+                 `not read (${[...unknown.keys()].join(', ')})`);
+    }
+    return out;
 }
 
 // ---- a Word file saved by Google Docs --------------------------------
@@ -3052,6 +3272,6 @@ module.exports = { readReview, readReviewJson, readBody, readComments,
                    itemText,
                    addItems, removeItem, applyKeeping, keptReplies,
                    emptiedBy, withoutSuggestions, keepsText,
-                   mentionList, setOwnNames, learnNames,
+                   mentionList, setOwnNames, learnNames, layoutChanges,
                    stripReview, renderMarkdown, decorate,
                    shortDate };
