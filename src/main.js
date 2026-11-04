@@ -42,6 +42,7 @@ const wordtemplate = require('./wordtemplate.js');
 const wordreply = require('./wordreply.js');
 const docxLib = require('./docx.js');
 const zotero = require('./zotero.js');
+const citations = require('./citations.js');
 const reviewlog = require('./reviewlog.js');
 const { PdfLinks } = zotero;
 
@@ -2217,6 +2218,8 @@ class DendriteView extends ItemView {
                     this.nameOf(), id, this.cardLinker());
                 externalLinks(out);
             }
+            // Citations in the text, labelled by first author and year.
+            citations.drawCitations(out, { links: this.plugin.pdfLinks });
         } else if (!kind) {
             out.createDiv({ cls: 'dendrite-placeholder',
                             text: 'Empty card' });
@@ -5293,6 +5296,7 @@ class DendriteView extends ItemView {
                 this.nameOf(), id, this.cardLinker());
             externalLinks(out);
         }
+        citations.drawCitations(out, { links: this.plugin.pdfLinks });
     }
 
     async deleteActive() {
@@ -9588,6 +9592,10 @@ class DendritePreview extends ItemView {
         const top = Number(fm.dendrite_heading_top);
         const headingTop = top >= 1 && top <= 6 ? top :
             this.plugin.settings.headingTop;
+        this.citeStyle = await this.loadCiteStyle(fm.dendrite_csl);
+        // A note style prints each citation as a footnote of its own.
+        const noted = this.citeStyle && this.citeStyle.format === 'note' ?
+            citations.asFootnotes : (t) => t;
         for (const n of core.allNodes(root)) {
             const f = this.cardFile(n.id);
             if (!f) continue;
@@ -9637,11 +9645,12 @@ class DendritePreview extends ItemView {
                 const b = this.bodies.get(id);
                 if (!b) return '';
                 return this.showComments ?
-                    review.renderMarkdown(b.body, colourOf,
+                    review.renderMarkdown(noted(b.body), colourOf,
                                           keepOf(b.body)) :
-                    b.body;
+                    noted(b.body);
             }, headingTop, numbers, roleOf, { kindOf })).segments,
             this.notesAt);
+        this.citeNumbers(segs);
         // Only flagged cards are marked here, with a faint bar, so the
         // preview stays a page to read.
         const statusOf = (id) => {
@@ -10211,7 +10220,8 @@ class DendritePreview extends ItemView {
                 core.footnoteBlock(s.cardNotes || []) +
                 '\u0000' + (this.showLeft ? s.left : '') + '\u0000' +
                 this.notesAt + '\u0000' +
-                (s.gathered ? core.footnoteBlock(s.gathered) : '');
+                (s.gathered ? core.footnoteBlock(s.gathered) : '') +
+                '\u0000' + this.citeKey(s);
             let b = this.blocks.get(s.id);
             if (!b) {
                 const el = createDiv({ cls: 'dendrite-pblock' });
@@ -10224,7 +10234,7 @@ class DendritePreview extends ItemView {
                 this.blocks.set(s.id, b);
             }
             const empty = !s.text && !(this.showLeft && s.left) &&
-                !s.gathered;
+                !s.gathered && !s.references;
             b.el.toggleClass('is-empty', empty);
             b.el.toggleClass('is-left-out-only', !s.text);
             if (b.key !== key) {
@@ -10283,6 +10293,11 @@ class DendritePreview extends ItemView {
         // document's real spacing.
         if (s.gathered) {
             await this.renderNotes(s.gathered, b);
+            citations.drawCitations(b.el, this.citeOpts());
+            return;
+        }
+        if (s.references) {
+            this.renderReferences(s.references, b.el);
             return;
         }
         if (s.text) {
@@ -10299,6 +10314,7 @@ class DendritePreview extends ItemView {
             // card's own list is hidden by the stylesheet.
             b.el.toggleClass('is-notes-gathered', this.notesAt !== 'card');
             if (this.notesAt !== 'card') renumberRefs(b.el, s.refs || []);
+            citations.drawCitations(b.el, this.citeOpts());
         }
         if (this.showLeft && s.left) {
             await MarkdownRenderer.render(this.app, s.left,
@@ -10306,6 +10322,77 @@ class DendritePreview extends ItemView {
         }
         if (this.showComments && s.text) this.drawBubbles(id);
         else this.scheduleBubbles();
+    }
+
+    /**
+     * The manuscript's citation style, read from its CSL at `path`, a
+     * path in the vault; Pandoc's default with none, and null where the
+     * file cannot be read, when citations are labelled as on the board.
+     */
+    async loadCiteStyle(path) {
+        const p = typeof path === 'string' ? path.trim() : '';
+        if (!p) return citations.citationStyle(null);
+        try {
+            const f = this.app.vault.getAbstractFileByPath(p);
+            const xml = f ? await this.app.vault.cachedRead(f) :
+                await this.app.vault.adapter.read(p);
+            return citations.citationStyle(xml);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * Each cited key's number, for a numeric style, through the text and
+     * notes in reading order; and for a style printing citations in the
+     * text, a list of the papers cited, as the last part of `segs`.
+     */
+    citeNumbers(segs) {
+        const st = this.citeStyle;
+        this.citeNums = citations.citationNumbers(segs.map((s) =>
+            (s.text || '') + '\n' + core.footnoteBlock(s.notes || [])));
+        if (!st || st.format === 'note' || !this.citeNums.size) return;
+        const keys = [...this.citeNums.keys()];
+        const label = (k) => core.citeName(k);
+        const list = st.format === 'numeric' ? keys :
+            keys.slice().sort((a, b) => label(a).localeCompare(label(b)));
+        segs.push({ id: 'dendrite-references', depth: 0, text: '',
+                    left: '', references: list });
+    }
+
+    /** What a part's citations print as, so it is drawn again on change. */
+    citeKey(s) {
+        if (s.references) return s.references.join(' ');
+        const st = this.citeStyle;
+        if (!st || st.format !== 'numeric') return st ? st.format : '';
+        const text = (s.text || '') + core.footnoteBlock(s.gathered ||
+            s.cardNotes || []);
+        return citations.citationsIn(text).map((c) => c.items.map((it) =>
+            this.citeNums.get(it.key)).join(',')).join(' ');
+    }
+
+    /** How citations are drawn in the preview. */
+    citeOpts() {
+        const st = this.citeStyle;
+        return { style: st && st.format !== 'note' ? st : null,
+                 nums: this.citeNums, links: this.plugin.pdfLinks };
+    }
+
+    /**
+     * The papers cited, under References: each labelled by its key's
+     * first author and year, numbered for a numeric style. The formatted
+     * entries are export's, which reads the papers' records.
+     */
+    renderReferences(keys, el) {
+        el.addClass('dendrite-references');
+        el.createEl('h2', { text: 'References' });
+        const numeric = this.citeStyle &&
+            this.citeStyle.format === 'numeric';
+        const list = el.createEl(numeric ? 'ol' : 'ul');
+        for (const k of keys) {
+            const li = list.createEl('li', { text: core.citeName(k) });
+            li.setAttribute('title', '@' + k);
+        }
     }
 
     /**

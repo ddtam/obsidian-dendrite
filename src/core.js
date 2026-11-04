@@ -914,14 +914,19 @@ function footnoteLabel(note) {
     if (!/^(\[[^\]]*@[^\]]*\]\s*)+$/.test(t)) return null;
     const keys = [...t.matchAll(/@([\w:.#$%&+?<>~/-]+)/g)].map((m) => m[1]);
     if (!keys.length) return null;
-    const name = (k) => {
-        const who = (/^[a-z]+/.exec(k) || /^[^\d]+/.exec(k) || [k])[0];
-        const year = (/(\d{4})[a-z]?$/.exec(k) || [])[1];
-        const shown = who.charAt(0).toUpperCase() + who.slice(1);
-        return year ? `${shown} ${year}` : shown;
-    };
-    return keys.length > 2 ? `${name(keys[0])} +${keys.length - 1}` :
-        keys.map(name).join('; ');
+    return keys.length > 2 ? `${citeName(keys[0])} +${keys.length - 1}` :
+        keys.map(citeName).join('; ');
+}
+
+/**
+ * A citekey's first author and year, as Better BibTeX writes keys,
+ * authorTitle then year: `sollierCOMPASS2023` is "Sollier 2023".
+ */
+function citeName(k) {
+    const who = (/^[a-z]+/.exec(k) || /^[^\d]+/.exec(k) || [k])[0];
+    const year = (/(\d{4})[a-z]?$/.exec(k) || [])[1];
+    const shown = who.charAt(0).toUpperCase() + who.slice(1);
+    return year ? `${shown} ${year}` : shown;
 }
 
 /**
@@ -1889,7 +1894,7 @@ module.exports = {
     STATUSES, isFlag, leftover, lowerStatus, statusReport,
     normaliseMarkdown, renumberFootnotes, footnoteBlock,
     inlineToReferences, inlineFootnotes, footnoteNumbers,
-    footnoteLabel, gatherFootnotes,
+    footnoteLabel, citeName, gatherFootnotes,
     INDENT, splitFrontmatter, parseIndex, serialiseTree, writeIndexText,
     lineDiff, charDiff, printedOnly, HEADING, cardAlias,
     deriveLabel, stripComments, validPrefix, newId, withPrefix,

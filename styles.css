@@ -2592,6 +2592,24 @@ a.dendrite-cite-pdf:hover {
     color: var(--text-accent-hover);
     text-decoration: underline;
 }
+/* A citation written in the text: on the board, its keys' first author
+   and year in the accent colour; in the preview, as the style prints it.
+   One with its paper's PDF opens it. */
+.dendrite-cite.is-label {
+    color: var(--text-accent);
+    font-size: 0.9em;
+}
+.dendrite-cite.dendrite-cite-pdf {
+    color: var(--text-accent);
+    cursor: pointer;
+}
+.dendrite-cite.dendrite-cite-pdf:hover {
+    color: var(--text-accent-hover);
+    text-decoration: underline;
+}
+.dendrite-references li {
+    margin: 0.2em 0;
+}
 
 /* One column at a time, in a pane under one and a half cards wide, as
    on a phone held upright. A column fills the width and a sideways

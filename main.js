@@ -670,13 +670,13 @@ var require_core = __commonJS({
       if (!/^(\[[^\]]*@[^\]]*\]\s*)+$/.test(t)) return null;
       const keys = [...t.matchAll(/@([\w:.#$%&+?<>~/-]+)/g)].map((m) => m[1]);
       if (!keys.length) return null;
-      const name = (k) => {
-        const who = (/^[a-z]+/.exec(k) || /^[^\d]+/.exec(k) || [k])[0];
-        const year = (/(\d{4})[a-z]?$/.exec(k) || [])[1];
-        const shown = who.charAt(0).toUpperCase() + who.slice(1);
-        return year ? `${shown} ${year}` : shown;
-      };
-      return keys.length > 2 ? `${name(keys[0])} +${keys.length - 1}` : keys.map(name).join("; ");
+      return keys.length > 2 ? `${citeName(keys[0])} +${keys.length - 1}` : keys.map(citeName).join("; ");
+    }
+    function citeName(k) {
+      const who = (/^[a-z]+/.exec(k) || /^[^\d]+/.exec(k) || [k])[0];
+      const year = (/(\d{4})[a-z]?$/.exec(k) || [])[1];
+      const shown = who.charAt(0).toUpperCase() + who.slice(1);
+      return year ? `${shown} ${year}` : shown;
     }
     function gatherFootnotes(segments, where) {
       if (where !== "section" && where !== "end") return segments;
@@ -1369,6 +1369,7 @@ var require_core = __commonJS({
       inlineFootnotes,
       footnoteNumbers,
       footnoteLabel,
+      citeName,
       gatherFootnotes,
       INDENT,
       splitFrontmatter,
@@ -9163,6 +9164,199 @@ var require_wordreply = __commonJS({
   }
 });
 
+// src/citations.js
+var require_citations = __commonJS({
+  "src/citations.js"(exports2, module2) {
+    "use strict";
+    var core2 = require_core();
+    var GROUP = /\[([^\[\]]*@[^\[\]]*)\](?![(\[:])/g;
+    var KEY = /^(.*?)(-?)@([\w][\w:.#$%&+?<>~/-]*?)([.:]*)((?:[,\s].*)?)$/s;
+    function parseCitation(inner) {
+      const items = [];
+      for (const part of String(inner).split(";")) {
+        const m = KEY.exec(part.trim());
+        if (!m) return null;
+        if (m[1] && !/\s$/.test(m[1])) return null;
+        items.push({
+          prefix: m[1].trim(),
+          key: m[3],
+          suppress: m[2] === "-",
+          locator: (m[4] + m[5]).replace(/^[.:]+/, "").trim()
+        });
+      }
+      return items.length ? items : null;
+    }
+    function codeRanges(text) {
+      const out = [];
+      const re = new RegExp("^(\\s*)(`{3,}|~{3,})[^\\n]*\\n[\\s\\S]*?(?:^\\s*\\2[^\\n]*$|(?![\\s\\S]))|(`+)[^`\\n][\\s\\S]*?\\3", "gm");
+      for (const m of text.matchAll(re)) {
+        out.push([m.index, m.index + m[0].length]);
+      }
+      return out;
+    }
+    function citationsIn(text) {
+      const t = String(text || "");
+      const code = codeRanges(t);
+      const notes = core2.inlineFootnotes(t);
+      const out = [];
+      for (const m of t.matchAll(GROUP)) {
+        const at = m.index;
+        if (code.some(([a, b]) => a <= at && at < b)) continue;
+        if (t[at - 1] === "!" || t[at - 1] === "^") continue;
+        const items = parseCitation(m[1]);
+        if (!items) continue;
+        const inNote = notes.some((n) => n.from < at && at < n.to);
+        out.push({ from: at, to: at + m[0].length, items, inNote });
+      }
+      return out;
+    }
+    function citationStyle(csl) {
+      if (!csl) {
+        return {
+          format: "author-date",
+          sup: false,
+          prefix: "(",
+          suffix: ")",
+          delimiter: "; "
+        };
+      }
+      const xml = String(csl);
+      const format = (/citation-format="([\w-]+)"/.exec(xml) || [])[1] || "author-date";
+      const cite = (/<citation\b[\s\S]*?<\/citation>/.exec(xml) || [""])[0];
+      const layout = (/<layout\b[^>]*>/.exec(cite) || [""])[0];
+      const attr = (name) => {
+        const m = new RegExp(`\\b${name}="([^"]*)"`).exec(layout);
+        return m ? m[1].replace(/&amp;/g, "&") : null;
+      };
+      const sup = /vertical-align="sup"/.test(cite);
+      const numeric = format === "numeric";
+      return {
+        format,
+        sup,
+        prefix: attr("prefix") ?? (numeric && !sup ? "[" : numeric ? "" : "("),
+        suffix: attr("suffix") ?? (numeric && !sup ? "]" : numeric ? "" : ")"),
+        delimiter: attr("delimiter") ?? (numeric ? "," : "; ")
+      };
+    }
+    function citationNumbers(texts) {
+      const nums = /* @__PURE__ */ new Map();
+      for (const t of texts) {
+        for (const c of citationsIn(t)) {
+          for (const it of c.items) {
+            if (!nums.has(it.key)) nums.set(it.key, nums.size + 1);
+          }
+        }
+      }
+      return nums;
+    }
+    function collapse(ns, delimiter = ",") {
+      const s = [...new Set(ns)].sort((a, b) => a - b);
+      const out = [];
+      for (let i = 0; i < s.length; ) {
+        let j = i;
+        while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++;
+        if (j - i >= 2) {
+          out.push(`${s[i]}\u2013${s[j]}`);
+        } else {
+          for (let k = i; k <= j; k++) out.push(String(s[k]));
+        }
+        i = j + 1;
+      }
+      return out.join(delimiter);
+    }
+    function citationText(items, style, nums) {
+      if (style && style.format === "numeric") {
+        const ns = items.map((it) => nums && nums.get(it.key)).filter((n) => n);
+        if (!ns.length) return null;
+        const loc = items.length === 1 && items[0].locator ? `, ${items[0].locator.replace(/^,\s*/, "")}` : "";
+        return style.prefix + collapse(ns, style.delimiter) + loc + style.suffix;
+      }
+      const one = (it) => {
+        const name = core2.citeName(it.key);
+        const year = (/\d{4}$/.exec(name) || [""])[0];
+        const label = it.suppress && year ? year : name;
+        const loc = it.locator ? /^,/.test(it.locator) ? it.locator : `, ${it.locator}` : "";
+        return [it.prefix, label + loc].filter((x) => x).join(" ");
+      };
+      const body = items.map(one).join("; ");
+      return style ? style.prefix + body + style.suffix : body;
+    }
+    function asFootnotes(text) {
+      const t = String(text || "");
+      let out = "";
+      let at = 0;
+      for (const c of citationsIn(t)) {
+        if (c.inNote) continue;
+        const before = t.slice(at, c.from).replace(/[ \t]+$/, "");
+        const punct = /^[.,;:!?]*/.exec(t.slice(c.to))[0];
+        out += before + punct + `^[${t.slice(c.from, c.to)}]`;
+        at = c.to + punct.length;
+      }
+      return out + t.slice(at);
+    }
+    function drawCitations(el, { style = null, nums = null, links = null } = {}) {
+      const doc = el.ownerDocument;
+      const win = doc.defaultView;
+      const walker = doc.createTreeWalker(el, win.NodeFilter.SHOW_TEXT);
+      const texts = [];
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (n.parentElement && n.parentElement.closest("code, pre, .dendrite-cite")) continue;
+        if (/\[[^\]]*@/.test(n.nodeValue)) texts.push(n);
+      }
+      const drawn = [];
+      for (const node of texts) {
+        const t = node.nodeValue;
+        const found = citationsIn(t);
+        if (!found.length) continue;
+        const frag = doc.createDocumentFragment();
+        let at = 0;
+        for (const c of found) {
+          const shown = citationText(c.items, style, nums);
+          if (!shown) continue;
+          frag.append(doc.createTextNode(t.slice(at, c.from)));
+          const sup = style && style.sup;
+          const span = doc.createElement(sup ? "sup" : "span");
+          span.className = "dendrite-cite" + (style ? "" : " is-label");
+          span.textContent = shown;
+          span.setAttribute("title", c.items.map((it) => "@" + it.key).join("; "));
+          span.dataset.keys = c.items.map((it) => it.key).join(" ");
+          frag.append(span);
+          drawn.push([span, c.items[0].key]);
+          at = c.to;
+        }
+        frag.append(doc.createTextNode(t.slice(at)));
+        node.replaceWith(frag);
+      }
+      if (links && drawn.length) {
+        links.load(drawn.map(([, k]) => k)).then(() => {
+          for (const [span, key] of drawn) {
+            const href = links.get(key);
+            if (!href) continue;
+            span.classList.add("dendrite-cite-pdf");
+            span.addEventListener("click", (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              win.open(href);
+            });
+          }
+        }).catch(() => {
+        });
+      }
+      return drawn.length;
+    }
+    module2.exports = {
+      parseCitation,
+      citationsIn,
+      citationStyle,
+      citationNumbers,
+      collapse,
+      citationText,
+      asFootnotes,
+      drawCitations
+    };
+  }
+});
+
 // src/reviewlog.js
 var require_reviewlog = __commonJS({
   "src/reviewlog.js"(exports2, module2) {
@@ -9481,6 +9675,7 @@ var wordtemplate = require_wordtemplate();
 var wordreply = require_wordreply();
 var docxLib = require_docx();
 var zotero = require_zotero();
+var citations = require_citations();
 var reviewlog = require_reviewlog();
 var { PdfLinks } = zotero;
 var VIEW = "dendrite-view";
@@ -11281,6 +11476,7 @@ var DendriteView = class extends ItemView {
         );
         externalLinks(out);
       }
+      citations.drawCitations(out, { links: this.plugin.pdfLinks });
     } else if (!kind) {
       out.createDiv({
         cls: "dendrite-placeholder",
@@ -14192,6 +14388,7 @@ var DendriteView = class extends ItemView {
       );
       externalLinks(out);
     }
+    citations.drawCitations(out, { links: this.plugin.pdfLinks });
   }
   async deleteActive() {
     const node = this.active && this.byId.get(this.active);
@@ -18388,6 +18585,8 @@ var DendritePreview = class extends ItemView {
     const colourOf = (who) => this.colours.get(who) || null;
     const top = Number(fm.dendrite_heading_top);
     const headingTop = top >= 1 && top <= 6 ? top : this.plugin.settings.headingTop;
+    this.citeStyle = await this.loadCiteStyle(fm.dendrite_csl);
+    const noted = this.citeStyle && this.citeStyle.format === "note" ? citations.asFootnotes : (t) => t;
     for (const n of core.allNodes(root)) {
       const f = this.cardFile(n.id);
       if (!f) continue;
@@ -18437,14 +18636,15 @@ var DendritePreview = class extends ItemView {
           const b = this.bodies.get(id);
           if (!b) return "";
           return this.showComments ? review.renderMarkdown(
-            b.body,
+            noted(b.body),
             colourOf,
             keepOf(b.body)
-          ) : b.body;
+          ) : noted(b.body);
         }, headingTop, numbers, roleOf, { kindOf })
       ).segments,
       this.notesAt
     );
+    this.citeNumbers(segs);
     const statusOf = (id) => {
       const s2 = props(id).dendrite_status;
       return core.STATUSES.includes(s2) ? s2 : null;
@@ -18983,7 +19183,7 @@ var DendritePreview = class extends ItemView {
       review.reviewItems((this.bodies.get(id) || {}).body || "").map((x) => [x.text, x.replies])
     );
     for (const s of segs) {
-      const key = (this.showComments ? "c\0" : "") + s.text + "\0" + said(s.id) + "\0" + core.footnoteBlock(s.cardNotes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "");
+      const key = (this.showComments ? "c\0" : "") + s.text + "\0" + said(s.id) + "\0" + core.footnoteBlock(s.cardNotes || []) + "\0" + (this.showLeft ? s.left : "") + "\0" + this.notesAt + "\0" + (s.gathered ? core.footnoteBlock(s.gathered) : "") + "\0" + this.citeKey(s);
       let b = this.blocks.get(s.id);
       if (!b) {
         const el = createDiv({ cls: "dendrite-pblock" });
@@ -18995,7 +19195,7 @@ var DendritePreview = class extends ItemView {
         b = { el, key: null, comp: null };
         this.blocks.set(s.id, b);
       }
-      const empty = !s.text && !(this.showLeft && s.left) && !s.gathered;
+      const empty = !s.text && !(this.showLeft && s.left) && !s.gathered && !s.references;
       b.el.toggleClass("is-empty", empty);
       b.el.toggleClass("is-left-out-only", !s.text);
       if (b.key !== key) {
@@ -19046,6 +19246,11 @@ var DendritePreview = class extends ItemView {
     const path = f ? f.path : this.file.path;
     if (s.gathered) {
       await this.renderNotes(s.gathered, b);
+      citations.drawCitations(b.el, this.citeOpts());
+      return;
+    }
+    if (s.references) {
+      this.renderReferences(s.references, b.el);
       return;
     }
     if (s.text) {
@@ -19062,6 +19267,7 @@ var DendritePreview = class extends ItemView {
       zotero.linkCitations(b.el, md, this.plugin.pdfLinks);
       b.el.toggleClass("is-notes-gathered", this.notesAt !== "card");
       if (this.notesAt !== "card") renumberRefs(b.el, s.refs || []);
+      citations.drawCitations(b.el, this.citeOpts());
     }
     if (this.showLeft && s.left) {
       await MarkdownRenderer.render(
@@ -19074,6 +19280,74 @@ var DendritePreview = class extends ItemView {
     }
     if (this.showComments && s.text) this.drawBubbles(id);
     else this.scheduleBubbles();
+  }
+  /**
+   * The manuscript's citation style, read from its CSL at `path`, a
+   * path in the vault; Pandoc's default with none, and null where the
+   * file cannot be read, when citations are labelled as on the board.
+   */
+  async loadCiteStyle(path) {
+    const p = typeof path === "string" ? path.trim() : "";
+    if (!p) return citations.citationStyle(null);
+    try {
+      const f = this.app.vault.getAbstractFileByPath(p);
+      const xml = f ? await this.app.vault.cachedRead(f) : await this.app.vault.adapter.read(p);
+      return citations.citationStyle(xml);
+    } catch (e) {
+      return null;
+    }
+  }
+  /**
+   * Each cited key's number, for a numeric style, through the text and
+   * notes in reading order; and for a style printing citations in the
+   * text, a list of the papers cited, as the last part of `segs`.
+   */
+  citeNumbers(segs) {
+    const st = this.citeStyle;
+    this.citeNums = citations.citationNumbers(segs.map((s) => (s.text || "") + "\n" + core.footnoteBlock(s.notes || [])));
+    if (!st || st.format === "note" || !this.citeNums.size) return;
+    const keys = [...this.citeNums.keys()];
+    const label = (k) => core.citeName(k);
+    const list = st.format === "numeric" ? keys : keys.slice().sort((a, b) => label(a).localeCompare(label(b)));
+    segs.push({
+      id: "dendrite-references",
+      depth: 0,
+      text: "",
+      left: "",
+      references: list
+    });
+  }
+  /** What a part's citations print as, so it is drawn again on change. */
+  citeKey(s) {
+    if (s.references) return s.references.join(" ");
+    const st = this.citeStyle;
+    if (!st || st.format !== "numeric") return st ? st.format : "";
+    const text = (s.text || "") + core.footnoteBlock(s.gathered || s.cardNotes || []);
+    return citations.citationsIn(text).map((c) => c.items.map((it) => this.citeNums.get(it.key)).join(",")).join(" ");
+  }
+  /** How citations are drawn in the preview. */
+  citeOpts() {
+    const st = this.citeStyle;
+    return {
+      style: st && st.format !== "note" ? st : null,
+      nums: this.citeNums,
+      links: this.plugin.pdfLinks
+    };
+  }
+  /**
+   * The papers cited, under References: each labelled by its key's
+   * first author and year, numbered for a numeric style. The formatted
+   * entries are export's, which reads the papers' records.
+   */
+  renderReferences(keys, el) {
+    el.addClass("dendrite-references");
+    el.createEl("h2", { text: "References" });
+    const numeric = this.citeStyle && this.citeStyle.format === "numeric";
+    const list = el.createEl(numeric ? "ol" : "ul");
+    for (const k of keys) {
+      const li = list.createEl("li", { text: core.citeName(k) });
+      li.setAttribute("title", "@" + k);
+    }
   }
   /**
    * A gathered list of footnotes, rendered by Obsidian as a card's own

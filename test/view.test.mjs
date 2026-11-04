@@ -2002,7 +2002,7 @@ test('the preview gathers footnotes under each section or at the end',
     const notes = () => [...view.contentEl.querySelectorAll(
         '.dendrite-pnotes')].map((b) => b.textContent.split('\n\n')[1]
         .replace(/\n+$/, ''));
-    assert.deepEqual(notes(), ['[^1]: [@k]\n[^2]: Second\n    goes on.',
+    assert.deepEqual(notes(), ['[^1]: (K)\n[^2]: Second\n    goes on.',
                                '[^3]: Third.'],
                      'by default, under each top-level section');
     assert.match(view.blocks.get('G-ddddd').el.textContent,
@@ -2016,13 +2016,13 @@ test('the preview gathers footnotes under each section or at the end',
         await tick(20);
     };
     await notesAt('Footnotes collected at the end');
-    assert.deepEqual(notes(), ['[^1]: [@k]\n[^2]: Second\n    goes on.\n' +
+    assert.deepEqual(notes(), ['[^1]: (K)\n[^2]: Second\n    goes on.\n' +
                                '[^3]: Third.']);
     assert.equal(view.getState().notesAt, 'end');
     await notesAt('Footnotes under each card');
     assert.deepEqual(notes(), [], 'under each card: nothing gathered');
     const b = view.blocks.get('G-ddddd').el;
-    assert.equal(b.textContent.trim(), 'Aims text.[^1]\n\n[^1]: [@k]',
+    assert.equal(b.textContent.trim(), 'Aims text.[^1]\n\n[^1]: (K)',
                  'under each card, an inline note has its number too');
     assert.ok(!b.hasClass('is-notes-gathered'));
 });
@@ -8144,4 +8144,59 @@ test('a Word file sent keeps its text, and edits made in it without ' +
                        true]]);
     assert.match(m.contentEl.querySelector('.dendrite-review-meta')
         .textContent, /Josh Bridgers · .* · edited without tracking/);
+});
+
+test('a citation in the text is drawn as its first author and year on ' +
+     'the board, and as the style prints it in the preview', async () => {
+    const CITED = 'PURPLE [@priestleyPancancer2019]. DESeq2 ' +
+        '[@loveModerated2014; @priestleyPancancer2019].';
+    const { view, app } = await open(
+        '---\ndendrite_prefix: G\n---\n- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n',
+        { 'G-aaaaa': CITED, 'G-bbbbb': 'Again [@loveModerated2014].' });
+    await view.renderCard('G-aaaaa');
+    const card = view.contentEl.querySelector(
+        '.dendrite-card[data-id="G-aaaaa"] .dendrite-md') ||
+        [...view.contentEl.querySelectorAll('.dendrite-md')]
+            .find((e) => /PURPLE/.test(e.textContent));
+    assert.equal(card.textContent.trim(), 'PURPLE Priestley 2019. DESeq2 ' +
+                 'Love 2014; Priestley 2019.');
+    assert.equal(card.querySelectorAll('.dendrite-cite').length, 2);
+
+    const { DendritePreview } = require('../src/main.js');
+    const draw = async (csl) => {
+        const fm = csl ? 'dendrite_csl: W/s.csl\n' : '';
+        await app.vault.modify(app.vault.getAbstractFileByPath(INDEX),
+            `---\ndendrite_prefix: G\n${fm}---\n` +
+            '- [[G-aaaaa|a]]\n- [[G-bbbbb|b]]\n');
+        if (csl) await app.vault.create('W/s.csl', csl).catch(() =>
+            app.vault.modify(app.vault.getAbstractFileByPath('W/s.csl'),
+                             csl));
+        const plugin = { settings: { headingTop: 1 }, focusCard() {} };
+        const pv = new DendritePreview({ app, updateHeader() {} }, plugin);
+        await pv.onOpen();
+        await pv.setState({ file: INDEX });
+        await tick(20);
+        const text = (id) => pv.blocks.get(id).el.textContent.trim();
+        const out = { a: text('G-aaaaa'), b: text('G-bbbbb'),
+                      refs: [...pv.contentEl.querySelectorAll(
+                          '.dendrite-references li')]
+                          .map((li) => li.textContent) };
+        await pv.onClose();
+        pv.contentEl.remove();
+        return out;
+    };
+    const author = await draw(null);
+    assert.equal(author.a, 'PURPLE (Priestley 2019). DESeq2 ' +
+                 '(Love 2014; Priestley 2019).', 'no style: author-date');
+    const numeric = await draw('<style><info><category ' +
+        'citation-format="numeric"/></info><citation><layout prefix="[" ' +
+        'suffix="]" delimiter=","><text variable="citation-number"/>' +
+        '</layout></citation></style>');
+    assert.equal(numeric.a, 'PURPLE [1]. DESeq2 [1,2].');
+    assert.equal(numeric.b, 'Again [2].', 'numbered across the cards');
+    assert.deepEqual(numeric.refs, ['Priestley 2019', 'Love 2014']);
+    const note = await draw('<style><info><category ' +
+        'citation-format="note"/></info><citation><layout/></citation>' +
+        '</style>');
+    assert.match(note.b, /^Again\.\[\^\d\]/, 'a note style: a footnote');
 });
